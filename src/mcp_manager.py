@@ -144,6 +144,17 @@ class McpManager:
         self._stacks: Dict[str, Any] = {}
         # server_id -> background connect task (HTTP transport / OAuth)
         self._connect_tasks: Dict[str, Any] = {}
+        # server_id -> long-lived task that owns the AsyncExitStack for the
+        # HTTP transport connection (real fix for the anyio "cancel scope in
+        # a different task" error -- the task that opens streamablehttp_client's
+        # async context managers must be the SAME task that closes them; a
+        # short-lived connect-and-return task can't be safely torn down later
+        # from disconnect_server(), since that task has already completed).
+        self._manager_tasks: Dict[str, Any] = {}
+        # server_id -> event that tells the manager task to exit its
+        # AsyncExitStack (set by disconnect_server(), awaited inside
+        # _http_manager so cleanup runs in the same task that opened it)
+        self._shutdown_events: Dict[str, Any] = {}
         # Tracking updates to tools/connections for RAG indexing / prompt cache
         self._generation = 0
 
@@ -188,7 +199,12 @@ class McpManager:
             server_params = StdioServerParameters(
                 command=command,
                 args=args,
-                env={**os.environ, **env} if env else None,
+                # Always merge with the parent process's environment, even when
+                # `env` is an empty dict -- `{} if env else None` would otherwise
+                # evaluate the falsy empty-dict branch to None, silently dropping
+                # container-wide vars like PLAYWRIGHT_BROWSERS_PATH for any server
+                # registered with no extra env vars of its own.
+                env={**os.environ, **(env or {})},
             )
 
             stack = AsyncExitStack()
@@ -323,59 +339,107 @@ class McpManager:
         return False
 
     async def _connect_http(self, server_id: str, name: str, url: str) -> bool:
-        """Connect to a Streamable HTTP MCP server (with automatic OAuth)."""
-        try:
-            from mcp import ClientSession
-            from mcp.client.streamable_http import streamablehttp_client
-            from contextlib import AsyncExitStack
-            from src.mcp_oauth import build_provider, clear_auth_url
+        """Connect to a Streamable HTTP MCP server (with automatic OAuth).
 
-            def _on_redirect(auth_url):
-                # Publish needs_auth the moment the URL is known, independent of
-                # how long discovery/DCR took (may exceed the bounded start wait).
-                self._connections[server_id] = {
-                    "status": "needs_auth", "name": name, "transport": "http",
-                    "auth_url": auth_url,
-                }
+        This is now a thin, fast wrapper: it spawns _http_manager (the real
+        connector, which also owns the long-lived AsyncExitStack) and waits
+        only for a "connected or failed" signal, not for the manager task to
+        finish entirely -- the manager keeps running afterward, holding the
+        connection open, until disconnect_server() tells it to stop. This
+        keeps _start_http_connect's existing 8s-timeout contract working
+        (it still sees this function return a bool promptly) while fixing
+        the real bug: the task that opens streamablehttp_client's async
+        context managers must be the SAME task that eventually closes them.
+        A short-lived connect-and-return task (the old behavior) had already
+        completed by the time disconnect_server() ran later, so there was no
+        live task left to safely close the stack in -- that mismatch is what
+        anyio's "Attempted to exit cancel scope in a different task" error
+        was reporting.
+        """
+        import asyncio
+        ready_event = asyncio.Event()
+        result: dict = {}
+        shutdown_event = asyncio.Event()
+        self._shutdown_events[server_id] = shutdown_event
+        self._manager_tasks[server_id] = asyncio.create_task(
+            self._http_manager(server_id, name, url, ready_event, result, shutdown_event)
+        )
+        await ready_event.wait()
+        return result.get("success", False)
 
-            provider = build_provider(server_id, url, on_redirect=_on_redirect)
-            stack = AsyncExitStack()
-            transport = await stack.enter_async_context(streamablehttp_client(url, auth=provider))
-            read_stream, write_stream, _get_session_id = transport
-            session = await stack.enter_async_context(ClientSession(read_stream, write_stream))
-            await session.initialize()
+    async def _http_manager(self, server_id: str, name: str, url: str,
+                             ready_event: "asyncio.Event", result: dict,
+                             shutdown_event: "asyncio.Event") -> None:
+        """Owns the AsyncExitStack for one HTTP-transport MCP server for its
+        entire connected lifetime. Signals `ready_event` as soon as the
+        connect attempt succeeds or fails (so _connect_http can return
+        quickly), then -- only if connected -- blocks on `shutdown_event`
+        until disconnect_server() sets it. Exiting the `async with
+        AsyncExitStack()` block happens in THIS task, the same one that
+        opened it, which is the actual structural requirement anyio enforces.
+        """
+        from mcp import ClientSession
+        from mcp.client.streamable_http import streamablehttp_client
+        from contextlib import AsyncExitStack
+        from src.mcp_oauth import build_provider, clear_auth_url
 
-            tools_result = await session.list_tools()
-            tools = []
-            for tool in tools_result.tools:
-                tools.append({
-                    "name": tool.name,
-                    "description": tool.description or "",
-                    "input_schema": tool.inputSchema if hasattr(tool, "inputSchema") else {},
-                })
-
-            self._sessions[server_id] = session
-            self._stacks[server_id] = stack
-            self._tools[server_id] = tools
+        def _on_redirect(auth_url):
+            # Publish needs_auth the moment the URL is known, independent of
+            # how long discovery/DCR took (may exceed the bounded start wait).
             self._connections[server_id] = {
-                "status": "connected", "name": name, "transport": "http",
-                "tool_count": len(tools),
+                "status": "needs_auth", "name": name, "transport": "http",
+                "auth_url": auth_url,
             }
-            clear_auth_url(server_id)
-            # Tools changed (this can complete after connect_server already
-            # returned, via the background OAuth flow), so bump the generation
-            # to invalidate the tool-prompt cache.
-            self._generation += 1
-            logger.info(f"MCP server connected: {name} ({server_id}) - {len(tools)} tools via http")
-            return True
-        except ImportError:
-            logger.warning("MCP package not installed. Install with: pip install mcp")
-            self._connections[server_id] = {"status": "error", "error": "mcp package not installed", "name": name}
-            return False
-        except Exception as e:
-            logger.error(f"Failed to connect HTTP MCP server {name} ({server_id}): {e}")
-            self._connections[server_id] = {"status": "error", "error": str(e), "name": name}
-            return False
+
+        async with AsyncExitStack() as stack:
+            try:
+                provider = build_provider(server_id, url, on_redirect=_on_redirect)
+                transport = await stack.enter_async_context(streamablehttp_client(url, auth=provider))
+                read_stream, write_stream, _get_session_id = transport
+                session = await stack.enter_async_context(ClientSession(read_stream, write_stream))
+                await session.initialize()
+
+                tools_result = await session.list_tools()
+                tools = []
+                for tool in tools_result.tools:
+                    tools.append({
+                        "name": tool.name,
+                        "description": tool.description or "",
+                        "input_schema": tool.inputSchema if hasattr(tool, "inputSchema") else {},
+                    })
+
+                self._sessions[server_id] = session
+                self._stacks[server_id] = stack
+                self._tools[server_id] = tools
+                self._connections[server_id] = {
+                    "status": "connected", "name": name, "transport": "http",
+                    "tool_count": len(tools),
+                }
+                clear_auth_url(server_id)
+                # Tools changed (this can complete after connect_server already
+                # returned, via the background OAuth flow), so bump the generation
+                # to invalidate the tool-prompt cache.
+                self._generation += 1
+                logger.info(f"MCP server connected: {name} ({server_id}) - {len(tools)} tools via http")
+                result["success"] = True
+            except ImportError:
+                logger.warning("MCP package not installed. Install with: pip install mcp")
+                self._connections[server_id] = {"status": "error", "error": "mcp package not installed", "name": name}
+                result["success"] = False
+            except Exception as e:
+                logger.error(f"Failed to connect HTTP MCP server {name} ({server_id}): {e}")
+                self._connections[server_id] = {"status": "error", "error": str(e), "name": name}
+                result["success"] = False
+            finally:
+                # Unblock _connect_http's wait now -- success or failure --
+                # before we (maybe) settle in to wait for shutdown below.
+                ready_event.set()
+
+            if result.get("success"):
+                await shutdown_event.wait()
+            # Exiting `async with AsyncExitStack()` here closes everything
+            # in this same task, whether we connected successfully and are
+            # now shutting down, or failed and are cleaning up immediately.
 
     async def disconnect_server(self, server_id: str):
         """Disconnect from an MCP server."""
@@ -390,6 +454,26 @@ class McpManager:
         except Exception:
             pass
 
+        # HTTP transport: signal the long-lived manager task to exit its
+        # AsyncExitStack itself, then await it -- do NOT call stack.aclose()
+        # from here directly, since this task is not the one that opened
+        # the stack's async context managers (that's the real anyio
+        # structured-concurrency requirement the earlier bug violated).
+        shutdown_event = self._shutdown_events.pop(server_id, None)
+        manager_task = self._manager_tasks.pop(server_id, None)
+        if shutdown_event is not None:
+            shutdown_event.set()
+        if manager_task is not None and not manager_task.done():
+            try:
+                await manager_task
+            except Exception as e:
+                logger.warning(f"Error waiting for MCP manager task {server_id}: {e}")
+
+        # Non-HTTP transports (stdio/sse) still use the old direct-stack
+        # pattern -- this remains correct for them since nothing changed
+        # about how those connect. For HTTP transport, self._stacks[server_id]
+        # was already popped and closed inside _http_manager itself by the
+        # time manager_task completes above, so this pop is a a no-op there.
         stack = self._stacks.pop(server_id, None)
         if stack:
             try:

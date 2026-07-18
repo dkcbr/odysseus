@@ -1,0 +1,8 @@
+git+https://github.com/prefecthq/fastmcp@v3.4.4
+mcp==1.28.1
+websockets
+anyio
+pydantic
+starlette
+uvicorn
+requests

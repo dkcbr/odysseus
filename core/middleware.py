@@ -73,6 +73,11 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
         is_document_pdf_preview = path.startswith("/api/document/") and path.endswith("/render-pdf")
         # Visual report pages are self-contained HTML — need inline scripts + external images
         is_report = path.startswith("/api/research/report/")
+        # FastAPI's built-in Swagger/ReDoc UI ships its own inline init script
+        # with no per-request nonce, and Swagger UI fetches CSS/JS + sourcemaps
+        # from jsdelivr via XHR (needs connect-src, not just script-src).
+        # These are dev/debug-only surfaces, so relax CSP here specifically.
+        is_api_docs = path in ("/docs", "/redoc", "/openapi.json")
 
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["Referrer-Policy"] = "no-referrer"
@@ -93,6 +98,18 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
                 "font-src 'self'; "
                 "img-src 'self' data: blob: https:; "
                 "connect-src 'self'; "
+                "frame-ancestors 'none'"
+            )
+        elif is_api_docs:
+            # Swagger/ReDoc need unsafe-inline (no nonce support upstream) and
+            # connect-src to jsdelivr (fetches swagger-ui.css.map etc via XHR).
+            response.headers["Content-Security-Policy"] = (
+                "default-src 'self'; "
+                "script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; "
+                "style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; "
+                "font-src 'self' https://cdn.jsdelivr.net; "
+                "img-src 'self' data: blob: https://cdn.jsdelivr.net; "
+                "connect-src 'self' https://cdn.jsdelivr.net; "
                 "frame-ancestors 'none'"
             )
         elif is_tool_render:
@@ -119,7 +136,7 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
                 "font-src 'self' https://cdn.jsdelivr.net; "
                 "img-src 'self' data: blob: https:; "
                 "media-src 'self' blob:; "
-                "connect-src 'self'; "
+                "connect-src 'self' http://100.116.88.44:7010 http://100.93.206.89:7020; "
                 "frame-src 'self'; "
                 "frame-ancestors 'none'"
             )

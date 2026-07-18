@@ -812,6 +812,22 @@ set_mcp_manager(mcp_manager)
 app.include_router(setup_mcp_routes(mcp_manager))
 logger.info("MCP routes initialized")
 
+# Agent dashboard (recent /api/mcp/call activity + stats -- in-memory only)
+from routes.agent_dashboard import router as agent_dashboard_router
+app.include_router(agent_dashboard_router)
+logger.info("Agent dashboard routes initialized")
+
+# Task queue -- in-memory only, see routes/tasks.py
+from routes.tasks import router as tasks_router
+app.include_router(tasks_router)
+logger.info("Task queue routes initialized")
+
+# Task event history -- append-only SQLite log, Phase 1 of persistence
+# (queue behavior itself is unchanged; see routes/tasks_history.py)
+from routes.tasks_history import init_db as _init_tasks_history_db
+_init_tasks_history_db()
+logger.info("Task event history DB initialized (/app/data/agent_tasks.db)")
+
 # AI Interaction tools (debates, pipelines, self-managing AI, UI control)
 from src.ai_interaction import set_session_manager as set_ai_session_manager, set_memory_manager as set_ai_memory_manager, set_rag_manager as set_ai_rag_manager
 set_ai_session_manager(session_manager)
@@ -906,6 +922,18 @@ async def serve_gallery(request: Request):
 
 @app.get("/tasks")
 async def serve_tasks(request: Request):
+    return await serve_index(request)
+
+@app.get("/registry")
+async def serve_registry(request: Request):
+    return await serve_index(request)
+
+@app.get("/capabilities")
+async def serve_capabilities(request: Request):
+    return await serve_index(request)
+
+@app.get("/tradingview")
+async def serve_tradingview(request: Request):
     return await serve_index(request)
 
 @app.get("/library")

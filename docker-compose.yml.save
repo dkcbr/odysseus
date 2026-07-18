@@ -1,0 +1,15 @@
+services:
+  odysseus:
+    build: .
+    ports:
+      - "${APP_BIND:-127.0.0.1}:${APP_PORT:-7000}:7000"
+
+    volumes:
+      - ${APP_DATA_DIR:-./data}:/app/data:z
+      - ${APP_LOGS_DIR:-./logs}:/app/logs:z
+      - ${APP_DATA_DIR:-./data}/ssh:/app/.ssh:z
+      - ${APP_DATA_DIR:-./data}/huggingface:/app/.cache/huggingface:z
+      - ${APP_DATA_DIR:-./data}/local:/app/.local:z
+
+      # Mount MCP servers (TradingView, etc.)
+      - /home/dk/.config/open-webui/mcp/servers:/app/data/mcp/servers:z

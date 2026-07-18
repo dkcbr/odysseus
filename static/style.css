@@ -15314,6 +15314,41 @@ span[id$="-logo"] svg:not([width]) {
   color: var(--accent-primary, var(--accent, var(--red)));
 }
 
+/* Agent Registry panel */
+.registry-table th, .registry-table td {
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border);
+}
+.registry-status-badge {
+  font-size: 10px;
+  font-weight: 600;
+  padding: 2px 6px;
+  border-radius: 4px;
+  letter-spacing: 0.3px;
+}
+.registry-status-badge.status-alive {
+  color: var(--color-success, #2ecc71);
+  background: color-mix(in srgb, var(--color-success, #2ecc71) 15%, transparent);
+}
+.registry-status-badge.status-stale {
+  color: #e6b800;
+  background: color-mix(in srgb, #e6b800 15%, transparent);
+}
+.registry-status-badge.status-disabled {
+  color: color-mix(in srgb, var(--fg) 50%, transparent);
+  background: color-mix(in srgb, var(--fg) 8%, transparent);
+}
+.capabilities-table td {
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border);
+  font-size: 12px;
+  vertical-align: top;
+}
+.capabilities-table td:first-child {
+  font-weight: 600;
+  white-space: nowrap;
+}
+
 /* RAG upload zone */
 .admin-rag-upload-zone {
   border: 2px dashed var(--border);
@@ -40450,4 +40485,31 @@ body.theme-frosted .modal {
 @media (max-width: 768px) {
   .compare-grid[data-cols] { grid-template-columns: 1fr !important; overflow-y: auto; }
   .compare-pane { min-height: 60dvh; }
+}
+
+/* JARVIS arc reactor -- decorative HUD element in the bottom-left corner,
+   ported from jarvis.html. Unique class/keyframe names (jarvis-arc-*) to
+   avoid any collision with the existing @keyframes spin used elsewhere. */
+.jarvis-arc-ring3 { animation: jarvis-arc-spin-slow 20s linear infinite; transform-origin: center; }
+.jarvis-arc-ring1 { animation: jarvis-arc-spin-fwd 12s linear infinite; transform-origin: center; }
+.jarvis-arc-ring2 { animation: jarvis-arc-spin-rev 6s linear infinite reverse; transform-origin: center; }
+.jarvis-arc-pulse { animation: jarvis-arc-core-pulse 2.4s ease-in-out infinite; }
+.jarvis-arc-segment { animation: jarvis-arc-segment-flicker 3s ease-in-out infinite; }
+.jarvis-arc-segment:nth-child(2) { animation-delay: 0.25s; }
+.jarvis-arc-segment:nth-child(3) { animation-delay: 0.5s; }
+.jarvis-arc-segment:nth-child(4) { animation-delay: 0.75s; }
+.jarvis-arc-segment:nth-child(5) { animation-delay: 1.0s; }
+.jarvis-arc-segment:nth-child(6) { animation-delay: 1.25s; }
+.jarvis-arc-segment:nth-child(7) { animation-delay: 1.5s; }
+.jarvis-arc-segment:nth-child(8) { animation-delay: 1.75s; }
+@keyframes jarvis-arc-spin-slow { to { transform: rotate(360deg); } }
+@keyframes jarvis-arc-spin-fwd { to { transform: rotate(360deg); } }
+@keyframes jarvis-arc-spin-rev { to { transform: rotate(360deg); } }
+@keyframes jarvis-arc-core-pulse {
+  0%, 100% { opacity: 0.7; filter: drop-shadow(0 0 2px #00d4ff); }
+  50% { opacity: 1; filter: drop-shadow(0 0 6px #00d4ff) drop-shadow(0 0 12px rgba(0,212,255,0.5)); }
+}
+@keyframes jarvis-arc-segment-flicker {
+  0%, 100% { opacity: 0.5; }
+  50% { opacity: 1; }
 }

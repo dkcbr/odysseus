@@ -1,0 +1,52 @@
+{
+  "name": "traderdev",
+  "version": "1.0.0",
+  "description": "Odysseus-native TraderDev MCP server",
+  "tools": [
+    {
+      "name": "ping",
+      "description": "Ping the TraderDev MCP server",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "message": { "type": "string" }
+        },
+        "required": ["message"]
+      }
+    },
+    {
+      "name": "place_order",
+      "description": "Place a trade order using TraderDev",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "symbol": { "type": "string" },
+          "side": { "type": "string", "enum": ["buy", "sell"] },
+          "qty": { "type": "number" },
+          "order_type": { "type": "string", "enum": ["market", "limit"] },
+          "limit_price": { "type": "number" }
+        },
+        "required": ["symbol", "side", "qty", "order_type"]
+      }
+    },
+    {
+      "name": "cancel_order",
+      "description": "Cancel an existing order",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "order_id": { "type": "string" }
+        },
+        "required": ["order_id"]
+      }
+    },
+    {
+      "name": "get_positions",
+      "description": "Get all open positions",
+      "input_schema": {
+        "type": "object",
+        "properties": {}
+      }
+    }
+  ]
+}

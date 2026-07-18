@@ -10,9 +10,8 @@ dist/
 build/
 .env
 .env.bak.*
-# Secrets: keep plaintext and every transient secrets.env variant out of
-# the build context. If an encrypted secrets.env is used, it is mounted
-# at runtime — never baked into the image. Mirrored in .gitignore.
+
+# Secrets
 secrets.env
 secrets.env.*
 secrets.env~
@@ -20,7 +19,13 @@ secrets.env~
 .secrets.env.swo
 **/#secrets.env#
 !secrets.env.example
-/data/
+
+# IMPORTANT FIX:
+# Allow data/mcp to be included in the Docker build context
+/data/*
+!/data/mcp
+!/data/mcp/servers
+
 /logs/
 .git/
 .claude/

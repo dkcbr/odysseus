@@ -3,6 +3,11 @@ services:
     build: .
     ports:
       - "${APP_BIND:-127.0.0.1}:${APP_PORT:-7000}:7000"
+      # Also always bind loopback -- host-side tools (agent_supervisor.py,
+      # etc.) assume localhost:7000 always works. APP_BIND above is used
+      # for additionally exposing on Tailscale/LAN; this second mapping
+      # keeps localhost access even when APP_BIND points elsewhere.
+      - "127.0.0.1:7000:7000"
     volumes:
       - ${APP_DATA_DIR:-./data}:/app/data:z
       - ${APP_LOGS_DIR:-./logs}:/app/logs:z
@@ -16,11 +21,42 @@ services:
       # land under /app/.local for the odysseus user. Persist them so a
       # container recreate does not silently remove installed serve engines.
       - ${APP_DATA_DIR:-./data}/local:/app/.local:z
+      - ./mcp_servers:/app/mcp_servers
+      - /home/dk/tradingview-mcp:/app/tradingview_real:ro
+      # Real X11 socket passthrough for jarvis_desktop_mcp.py (wmctrl/xdotool/
+      # imagemagick need a real X server to connect to -- without this mount
+      # and the DISPLAY env var below, those binaries fail with "Can't open
+      # display" even once installed). Requires `xhost +local:docker` (or
+      # similarly scoped) run on the HOST first -- X11 access control is a
+      # real security boundary, this doesn't bypass it on its own.
+      - /tmp/.X11-unix:/tmp/.X11-unix:rw
+      - type: bind
+        source: /home/dk/jarvis/projects/odysseus-vault-sync
+        target: /home/dk/jarvis/projects/odysseus-vault-sync
+        bind:
+          create_host_path: false
     extra_hosts:
       # Lets the container reach local services on the Docker host, including
       # Ollama at http://host.docker.internal:11434.
       - "host.docker.internal:host-gateway"
     environment:
+      # Real X11 display passthrough for jarvis_desktop_mcp.py -- must match
+      # the host's actual DISPLAY value. Socket ownership at /tmp/.X11-unix/
+      # shows X0 belongs to cosmic-greeter (the login screen, not a real
+      # user session) and X1 belongs to dk -- so ":1" is the real, likely
+      # value, NOT ":0". Confirmed by running `echo $DISPLAY` directly in an
+      # actual interactive terminal, not assumed.
+      - DISPLAY=${DISPLAY:-:1}
+      # Built-in Memory MCP server refuses ambiguous reads/writes once the
+      # store has owner-scoped entries but no owner is configured for this
+      # process (a real safety check in mcp_servers/memory_server.py, not a
+      # bug). Confirmed the real, existing entry's owner value directly in
+      # /app/data/memory.json rather than guessing -- "admin" matches
+      # ODYSSEUS_ADMIN_USER below, the single real user of this system.
+      - ODYSSEUS_MCP_MEMORY_OWNER=admin
+      - OLLAMA_HOST=http://host.docker.internal:11434
+      - OLLAMA_HOST=http://192.168.1.161:11434
+      - OLLAMA_ORIGINS=*
       - LLM_HOST=${LLM_HOST:-localhost}
       - LLM_HOSTS=${LLM_HOSTS:-}
       - OPENAI_API_KEY=${OPENAI_API_KEY:-}
@@ -78,14 +114,34 @@ services:
     restart: unless-stopped
 
   chromadb:
-    image: docker.io/chromadb/chroma:latest
+    image: chromadb/chroma:latest
     ports:
-      - "${CHROMADB_BIND:-127.0.0.1}:8100:8000"
+      - "0.0.0.0:8100:8000"
     volumes:
-      - chromadb-data:/chroma/chroma
-    environment:
-      - ANONYMIZED_TELEMETRY=FALSE
+      - chromadb-data:/data
     restart: unless-stopped
+
+  open-webui:
+    image: ghcr.io/open-webui/open-webui:latest
+    container_name: odysseus-open-webui-1
+    restart: unless-stopped
+
+    ports:
+      - "3000:8080"
+
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+      - "popos:192.168.1.161"
+
+    environment:
+      - OLLAMA_HOST=http://192.168.1.161:11434
+      - OLLAMA_ORIGINS=*
+      - WEBUI_NAME=Odysseus
+      - WEBUI_MODE=production
+
+    volumes:
+      - ~/.config/open-webui:/app/backend/data
+      - ~/.config/open-webui/mcp/servers:/app/data/mcp/servers:z
 
   searxng:
     # Pinned, not :latest — odysseus waits on searxng's healthcheck
