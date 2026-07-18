@@ -1,0 +1,29 @@
+{
+  "name": "system",
+  "version": "1.0.0",
+  "description": "Odysseus-native system command MCP server",
+  "tools": [
+    {
+      "name": "ping",
+      "description": "Ping the MCP server",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "message": { "type": "string" }
+        },
+        "required": ["message"]
+      }
+    },
+    {
+      "name": "run",
+      "description": "Run a system command inside the Odysseus sandbox",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "cmd": { "type": "string" }
+        },
+        "required": ["cmd"]
+      }
+    }
+  ]
+}

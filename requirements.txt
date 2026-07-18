@@ -1,50 +1,55 @@
-fastapi
-uvicorn
-python-multipart
-python-dotenv
-httpx
-httpcore>=1.0,<2.0
-pydantic>=2.13.4
-pydantic-settings>=2.14.1
-SQLAlchemy
-pypdf
+bcrypt
 beautifulsoup4
+caldav
+# CalDAV sync (src/caldav_sync.py). Handles PROPFIND discovery + REPORT
+# Calendar .ics import/export (routes/calendar_routes.py).
 charset-normalizer
-numpy
-# Vector store + local embeddings for RAG, semantic memory, and tool
-# selection. Used on core agent paths, so installed by default — the app
-# still degrades to keyword fallback if they're ever missing.
+chromadb-client
 # chromadb-client is the lightweight HTTP client (talks to a standalone
 # ChromaDB service); fastembed runs local ONNX embeddings.
-chromadb-client
-fastembed
-youtube-transcript-api
-# Markdown rendering for research reports (src/visual_report.py).
-# Imported at module-top so it's a hard core dep, not optional.
-markdown
-# HTML sanitizer for rendered research reports (src/visual_report.py). Report
 # content is untrusted (LLM output over crawled pages) and report pages run
-# under a relaxed CSP, so the rendered HTML is allowlist-sanitized.
-nh3
-# Calendar .ics import/export (routes/calendar_routes.py).
-icalendar
-# Recurrence rule expansion for calendar events (routes/calendar_routes.py).
-# Imported directly as dateutil.rrule — make it explicit even though caldav
-# pulls it in transitively.
-python-dateutil
-# CalDAV sync (src/caldav_sync.py). Handles PROPFIND discovery + REPORT
-# fetch across Radicale, Nextcloud, Apple, Fastmail; we'd be reinventing
-# the protocol without it.
-caldav
-cryptography
-bcrypt
-mcp
-pyotp
-qrcode[pil]
 croniter
+cryptography
+fastapi
+fastembed
+feedparser>=6.0.12
+# fetch across Radicale, Nextcloud, Apple, Fastmail; we'd be reinventing
+# HTML sanitizer for rendered research reports (src/visual_report.py). Report
+httpcore>=1.0,<2.0
+httpx
+httpx2
+icalendar
+# Imported at module-top so it's a hard core dep, not optional.
+# Imported directly as dateutil.rrule — make it explicit even though caldav
+markdown
+# Markdown rendering for research reports (src/visual_report.py).
+mcp
+nh3
+numpy
+playwright
+# pulls it in transitively.
+pydantic>=2.13.4
+pydantic-settings>=2.14.1
+pyotp
+pypdf
 pytest
 pytest-asyncio
+python-dateutil
+python-dotenv
+python-multipart
+qrcode[pil]
+# Recurrence rule expansion for calendar events (routes/calendar_routes.py).
+# selection. Used on core agent paths, so installed by default — the app
+SQLAlchemy
 # starlette.testclient prefers httpx2 since Starlette 1.2.0 and warns on every
+# still degrades to keyword fallback if they're ever missing.
 # TestClient import when only classic httpx is present. Runtime code keeps
+# the protocol without it.
+tradingview-screener>=0.6.4
+tradingview-ta>=3.3.0
+# under a relaxed CSP, so the rendered HTML is allowlist-sanitized.
 # using `httpx` above; this is test-client only.
-httpx2
+uvicorn
+# Vector store + local embeddings for RAG, semantic memory, and tool
+youtube-transcript-api
+git+https://github.com/prefecthq/fastmcp@v3.4.4

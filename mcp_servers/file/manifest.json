@@ -1,0 +1,41 @@
+{
+  "name": "file",
+  "version": "1.0.0",
+  "description": "Odysseus-native file MCP server",
+  "tools": [
+    {
+      "name": "ping",
+      "description": "Ping the MCP server",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "message": { "type": "string" }
+        },
+        "required": ["message"]
+      }
+    },
+    {
+      "name": "read_file",
+      "description": "Read a file from the Odysseus sandbox",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "path": { "type": "string" }
+        },
+        "required": ["path"]
+      }
+    },
+    {
+      "name": "write_file",
+      "description": "Write text to a file in the Odysseus sandbox",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "path": { "type": "string" },
+          "content": { "type": "string" }
+        },
+        "required": ["path", "content"]
+      }
+    }
+  ]
+}

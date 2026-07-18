@@ -27,6 +27,12 @@ import calendarModule from './js/calendar.js';
 import notesModule from './js/notes.js';
 import adminModule from './js/admin.js';
 import settingsModule from './js/settings.js';
+import registryModule from './js/registry.js';
+import capabilitiesModule from './js/capabilities.js';
+import tradingviewModule from './js/tradingview.js';
+import pollerStatusModule from './js/poller_status.js';
+import pollerDashboardModule from './js/poller_dashboard.js';
+import taskHistoryModule from './js/task_history.js';
 // Eagerly bind unified minimize/restore behavior across all tool modals.
 import './js/modalManager.js';
 // Desktop window tiling — drag a modal near an edge/corner to snap.
@@ -170,6 +176,12 @@ function initRailHoverLabels() {
     'rail-archive': 'Library',
     'rail-memory': 'Brain',
     'rail-notes': 'Notes',
+    'rail-registry': 'Agent Registry',
+    'rail-capabilities': 'Capability Inspector',
+    'rail-tradingview': 'TradingView',
+    'rail-poller-status': 'Poller Status',
+    'rail-poller-dashboard': 'Poller Dashboard',
+    'rail-task-history': 'Task History',
     'rail-tasks': 'Tasks',
     'rail-theme': 'Theme',
     'rail-settings': 'Settings',
@@ -1222,6 +1234,12 @@ function initializeEventListeners() {
     '/memory':   () => document.getElementById('tool-memory-btn')?.click(),
     '/gallery':  () => document.getElementById('tool-gallery-btn')?.click(),
     '/tasks':    () => document.getElementById('tool-tasks-btn')?.click(),
+    '/registry': () => document.getElementById('tool-registry-btn')?.click(),
+    '/capabilities': () => document.getElementById('tool-capabilities-btn')?.click(),
+    '/tradingview': () => document.getElementById('tool-tradingview-btn')?.click(),
+    '/poller-status': () => document.getElementById('tool-poller-status-btn')?.click(),
+    '/poller-dashboard': () => document.getElementById('tool-poller-dashboard-btn')?.click(),
+    '/task-history': () => document.getElementById('tool-task-history-btn')?.click(),
     '/library':  () => sessionModule && sessionModule.openLibrary && sessionModule.openLibrary(),
   };
   const _opener = _routeOpen[urlPath];
@@ -3642,6 +3660,36 @@ function startOdysseusApp() {
     searchChatModule.init(API_BASE);
   }
 
+  // Initialize agent registry module
+  if (registryModule) {
+    registryModule.init();
+  }
+
+  // Initialize capability inspector module
+  if (capabilitiesModule) {
+    capabilitiesModule.init();
+  }
+
+  // Initialize TradingView module
+  if (tradingviewModule) {
+    tradingviewModule.init();
+  }
+
+  // Initialize poller status module
+  if (pollerStatusModule) {
+    pollerStatusModule.init();
+  }
+
+  // Initialize poller dashboard module
+  if (pollerDashboardModule) {
+    pollerDashboardModule.init();
+  }
+
+  // Initialize task history module
+  if (taskHistoryModule) {
+    taskHistoryModule.init();
+  }
+
   // Search buttons — icon rail + sidebar
   const railSearchBtn = el('rail-search-btn');
   if (railSearchBtn) {
@@ -3661,6 +3709,12 @@ function startOdysseusApp() {
     'rail-calendar':  'tool-calendar-btn',
     'rail-notes':     'tool-notes-btn',
     'rail-memory':    'tool-memory-btn',
+    'rail-registry':  'tool-registry-btn',
+    'rail-capabilities': 'tool-capabilities-btn',
+    'rail-tradingview': 'tool-tradingview-btn',
+    'rail-poller-status': 'tool-poller-status-btn',
+    'rail-poller-dashboard': 'tool-poller-dashboard-btn',
+    'rail-task-history': 'tool-task-history-btn',
     'rail-theme':     'tool-theme-btn',
     'rail-email':     'email-section-title',
   };
