@@ -2,6 +2,7 @@
 """Multi-provider TTS service — dispatches to local Kokoro, OpenAI-compatible API, or browser."""
 
 import io
+import os
 import wave
 import logging
 import hashlib
@@ -41,6 +42,11 @@ class TTSService:
         self.cache_dir = Path(cache_dir)
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         self._kokoro = None  # lazy-init
+        
+        try:
+            self.max_cache_bytes = int(os.getenv("ODYSSEUS_TTS_CACHE_MAX_BYTES", 500 * 1024 * 1024))
+        except ValueError:
+            self.max_cache_bytes = 500 * 1024 * 1024
 
     # ── Settings ──
 
@@ -88,6 +94,35 @@ class TTSService:
     def _put_cache(self, key: str, data: bytes):
         ext = ".mp3" if (len(data) >= 3 and (data[:3] == b'ID3' or (data[0] == 0xff and (data[1] & 0xe0) == 0xe0))) else ".wav"
         (self.cache_dir / f"{key}{ext}").write_bytes(data)
+
+        self._enforce_cache_limit()
+
+    def _enforce_cache_limit(self):
+        """Evicts oldest files if the cache exceeds the configured byte limit."""
+        if self.max_cache_bytes <= 0:
+            return
+
+        files = [f for f in self.cache_dir.glob("*.*") if f.is_file()]
+        total_size = sum(f.stat().st_size for f in files)
+
+        if total_size > self.max_cache_bytes:
+            logger.info(f"TTS cache ({total_size} bytes) exceeded limit ({self.max_cache_bytes} bytes). Evicting oldest files.")
+            
+            # Sort files by modification time (oldest first)
+            files.sort(key=lambda f: f.stat().st_mtime)
+            
+            # Trim down to 80% of max capacity so we aren't constantly triggering this on every new generation
+            target_size = self.max_cache_bytes * 0.8
+            
+            while files and total_size > target_size:
+                f = files.pop(0)
+                try:
+                    size = f.stat().st_size
+                    f.unlink()
+                    total_size -= size
+                except FileNotFoundError:
+                    # File was deleted by another process
+                    continue
 
     def clear_cache(self):
         count = 0
