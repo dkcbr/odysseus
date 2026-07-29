@@ -98,31 +98,49 @@ class TTSService:
         self._enforce_cache_limit()
 
     def _enforce_cache_limit(self):
-        """Evicts oldest files if the cache exceeds the configured byte limit."""
-        if self.max_cache_bytes <= 0:
-            return
+            """Evicts oldest files if the cache exceeds the configured byte limit."""
+            if self.max_cache_bytes <= 0:
+                return
 
-        files = [f for f in self.cache_dir.glob("*.*") if f.is_file()]
-        total_size = sum(f.stat().st_size for f in files)
+            try:
+                files = []
+                total_size = 0
 
-        if total_size > self.max_cache_bytes:
-            logger.info(f"TTS cache ({total_size} bytes) exceeded limit ({self.max_cache_bytes} bytes). Evicting oldest files.")
-            
-            # Sort files by modification time (oldest first)
-            files.sort(key=lambda f: f.stat().st_mtime)
-            
-            # Trim down to 80% of max capacity so we aren't constantly triggering this on every new generation
-            target_size = self.max_cache_bytes * 0.8
-            
-            while files and total_size > target_size:
-                f = files.pop(0)
-                try:
-                    size = f.stat().st_size
-                    f.unlink()
-                    total_size -= size
-                except FileNotFoundError:
-                    # File was deleted by another process
-                    continue
+                # Safely scan files and sum sizes, ignoring files deleted mid-scan
+                for f in self.cache_dir.glob("*.*"):
+                    try:
+                        if f.is_file():
+                            files.append(f)
+                            total_size += f.stat().st_size
+                    except OSError:
+                        continue
+
+                if total_size > self.max_cache_bytes:
+                    logger.info(
+                        f"TTS cache ({total_size} bytes) exceeded limit ({self.max_cache_bytes} bytes). Evicting oldest files."
+                    )
+
+                    # Sort files by modification time (oldest first)
+                    try:
+                        files.sort(key=lambda f: f.stat().st_mtime)
+                    except OSError as e:
+                        logger.warning(f"Failed to sort cache files by mtime: {e}")
+
+                    # Trim down to 80% of max capacity
+                    target_size = self.max_cache_bytes * 0.8
+
+                    while files and total_size > target_size:
+                        f = files.pop(0)
+                        try:
+                            size = f.stat().st_size
+                            f.unlink()
+                            total_size -= size
+                        except OSError as e:
+                            logger.warning(f"Failed to evict cache file {f}: {e}")
+                            continue
+
+            except Exception as e:
+                logger.warning(f"Error enforcing TTS cache limit: {e}", exc_info=True)
 
     def clear_cache(self):
         count = 0
