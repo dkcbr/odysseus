@@ -71,3 +71,27 @@ def test_cache_limit_disabled(tmp_path, monkeypatch):
     files = list(tmp_path.glob("*.*"))
     assert len(files) == 3
     assert sum(f.stat().st_size for f in files) == 3000
+
+def test_cache_eviction_handles_unlink_error_gracefully(tmp_path, monkeypatch):
+    """Test that if unlinking a file fails, _put_cache still succeeds without raising."""
+    service = TTSService(cache_dir=str(tmp_path))
+    service.max_cache_bytes = 50
+
+    # Create a file to evict
+    old_file = tmp_path / "old.wav"
+    old_file.write_bytes(b"x" * 40)
+
+    # Monkeypatch unlink on Path objects to simulate a PermissionError / file-lock failure
+    def mock_unlink(self_path):
+        raise OSError("Permission denied / file locked")
+
+    monkeypatch.setattr(Path, "unlink", mock_unlink)
+
+    # Writing a new file triggers eviction which encounters the mocked unlink error
+    try:
+        service._put_cache("new_key", b"y" * 40)
+    except Exception as e:
+        pytest.fail(f"_put_cache raised an exception during failed eviction: {e}")
+
+    # The new file should still be written successfully
+    assert (tmp_path / "new_key.wav").exists()
