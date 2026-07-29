@@ -107,9 +107,9 @@ class TTSService:
                 total_size = 0
 
                 # Safely scan files and sum sizes, ignoring files deleted mid-scan
-                for f in self.cache_dir.glob("*.*"):
+                for f in self.cache_dir.iterdir():
                     try:
-                        if f.is_file():
+                        if f.is_file() and f.suffix.lower() in (".mp3", ".wav"):
                             files.append(f)
                             total_size += f.stat().st_size
                     except OSError:
