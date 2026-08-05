@@ -12,6 +12,7 @@ Defaults to AGENT_NAME below if no argument given. Wrap in systemd/tmux/a
 Docker container to keep it running continuously.
 """
 
+import json
 import sys
 import time
 from pathlib import Path
@@ -19,12 +20,33 @@ from pathlib import Path
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
+sys.path.insert(0, "/home/dk/jarvis")
+
 from src.agents.odysseus_auth import get_session
 from src.agents.odysseus_dashboard import OdysseusDashboard
+from src.agents.mcp_readiness_cache import get_server_entry
+from memory_helper import remember  # real, tested wrapper around manage_memory
 
 DEFAULT_AGENT_NAME = "browser_agent"
 POLL_INTERVAL_SECONDS = 2
 SESSION_RETRY_SECONDS = 5
+
+LOG_DIR = Path("/home/dk/jarvis/projects/odysseus/data/agent_worker_logs")  # real, already-mounted data dir (maps to /app/data inside the container) -- so the container's own API can read these files without a new docker-compose volume
+
+
+def _log_event(agent_name: str, task_id: str, phase: str, **extra) -> None:
+    """Real, structured (JSON-lines) worker-side log, one file per agent --
+    matches the existing file-per-monitor pattern already used elsewhere
+    (e.g. the zone monitors' health timestamp files), rather than
+    inventing a new mechanism. Never raises into the caller; a logging
+    failure must never break the actual task execution it's describing."""
+    try:
+        LOG_DIR.mkdir(parents=True, exist_ok=True)
+        entry = {"ts": time.time(), "worker": agent_name, "task_id": task_id, "phase": phase, **extra}
+        with open(LOG_DIR / f"{agent_name}.jsonl", "a") as f:
+            f.write(json.dumps(entry) + "\n")
+    except Exception as e:
+        print(f"[agent_worker] _log_event failed (non-fatal): {e}")
 
 
 def run_agent(agent_name: str = DEFAULT_AGENT_NAME):
@@ -69,14 +91,41 @@ def run_agent(agent_name: str = DEFAULT_AGENT_NAME):
                 tool = task["tool"]
                 arguments = task["arguments"]
 
+                # Readiness gating: skip dispatch entirely if the target
+                # MCP server isn't fully ready (verified 2-condition model:
+                # status=="connected" AND tool_count>0). Cached ~1s so this
+                # doesn't add an HTTP call per task. Failing the task (not
+                # silently dropping it) means the real DB retry_count/
+                # max_retries mechanism already used everywhere else in this
+                # loop applies here too -- no new retry system needed.
+                server_entry = get_server_entry(server)
+                if server_entry is None or not server_entry.get("is_ready", False):
+                    reason = "mcp_server_unreachable" if server_entry is None else "mcp_server_not_ready"
+                    _log_event(agent_name, task["id"], "blocked_readiness", server=server, tool=tool,
+                               reason=reason,
+                               status=(server_entry or {}).get("status"),
+                               tool_count=(server_entry or {}).get("tool_count"))
+                    dash.fail_task(task["id"], {"error": reason, "server": server})
+                    print(f"[agent_worker] Task {task['id']} blocked: {reason} ({server}).")
+                    continue
+
                 print(f"[agent_worker] Executing task {task['id']}: {server}.{tool}({arguments})")
+                remember_this = task.get("remember_on_success", False)
+                _log_event(agent_name, task["id"], "tool_start", server=server, tool=tool, arguments=arguments)
+                _tool_start_time = time.monotonic()
                 try:
                     result = dash.call_tool(server, tool, arguments, agent=agent_name)
+                    _duration_ms = round((time.monotonic() - _tool_start_time) * 1000, 1)
                     if result.get("allowed") is False:
                         # Enforcement blocked it -- record as a failure,
                         # not a crash, since this is an expected outcome.
                         dash.fail_task(task["id"], result)
                         print(f"[agent_worker] Task {task['id']} blocked by capability enforcement.")
+                        _log_event(agent_name, task["id"], "tool_end", outcome="blocked",
+                                   duration_ms=_duration_ms, error=result.get("error"))
+                        if remember_this:
+                            remember(f"Task {task['id']} ({agent_name}.{server}.{tool}) was blocked: "
+                                      f"{result.get('error', 'not allowed')}", category="event", task_id=task["id"])
                     elif result.get("exit_code", 0) != 0:
                         # The tool itself reported failure (non-zero exit
                         # code) -- this must be a real failure, not
@@ -86,12 +135,30 @@ def run_agent(agent_name: str = DEFAULT_AGENT_NAME):
                         # exit_code was 1.
                         dash.fail_task(task["id"], result)
                         print(f"[agent_worker] Task {task['id']} failed (exit_code={result.get('exit_code')}).")
+                        _log_event(agent_name, task["id"], "tool_end", outcome="failed",
+                                   duration_ms=_duration_ms, exit_code=result.get("exit_code"),
+                                   stderr=result.get("stderr"))
+                        if remember_this:
+                            remember(f"Task {task['id']} ({agent_name}.{server}.{tool}) failed: "
+                                      f"{result.get('stderr') or result.get('error') or 'unknown error'}",
+                                      category="event", task_id=task["id"])
                     else:
                         dash.complete_task(task["id"], result)
                         print(f"[agent_worker] Task {task['id']} completed.")
+                        _log_event(agent_name, task["id"], "tool_end", outcome="success",
+                                   duration_ms=_duration_ms)
+                        if remember_this:
+                            remember(f"Task {task['id']} ({agent_name}.{server}.{tool}) succeeded: "
+                                      f"{result.get('stdout', '')[:200]}", category="event", task_id=task["id"])
                 except Exception as e:
+                    _duration_ms = round((time.monotonic() - _tool_start_time) * 1000, 1)
                     dash.fail_task(task["id"], {"error": str(e)})
                     print(f"[agent_worker] Task {task['id']} failed: {e}")
+                    _log_event(agent_name, task["id"], "tool_end", outcome="exception",
+                               duration_ms=_duration_ms, error=str(e))
+                    if remember_this:
+                        remember(f"Task {task['id']} ({agent_name}.{server}.{tool}) failed with exception: {e}",
+                                  category="event", task_id=task["id"])
 
         except Exception as e:
             # A real connection-level failure (Odysseus restarting, network
