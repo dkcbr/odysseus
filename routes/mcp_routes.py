@@ -147,6 +147,15 @@ def setup_mcp_routes(mcp_manager: McpManager):
                     needs_oauth = _mcp_oauth_token_missing(oauth_cfg, strict=False)
                 disabled_list = json.loads(srv.disabled_tools) if srv.disabled_tools else []
                 total_tools = status.get("tool_count", 0)
+                # Verified readiness model (2026-08-04): connection_ready
+                # (status == "connected") AND tool_ready (tool_count > 0).
+                # Confirmed empirically via a real probe script that these
+                # two transition atomically in the single-server enable/
+                # disable path. Explicitly NOT is_enabled -- that's just the
+                # DB config value and was confirmed to flip up to ~1 poll
+                # cycle before/after the real connection state, so it's not
+                # a reliable readiness signal on its own.
+                is_ready = status.get("status", "disconnected") == "connected" and total_tools > 0
                 result.append({
                     "id": srv.id,
                     "name": srv.name,
@@ -160,6 +169,7 @@ def setup_mcp_routes(mcp_manager: McpManager):
                     "tool_count": total_tools,
                     "disabled_tool_count": len(disabled_list),
                     "enabled_tool_count": max(0, total_tools - len(disabled_list)),
+                    "is_ready": is_ready,
                     "error": status.get("error"),
                     "auth_url": status.get("auth_url"),
                     "has_oauth": oauth_cfg is not None,
