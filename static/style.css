@@ -20,6 +20,19 @@
   --bg: #282c34;
   --fg: #9cdef2;
   --panel: #111;
+
+  /* Jarvis Home HUD palette -- referenced by jarvis_home.js's inline
+     styles via var(--hud-*). Kept as real custom properties (not just
+     hardcoded hex in the JS) so the look can be tuned from one place. */
+  --hud-bg: #05090c;
+  --hud-panel: #0a1418;
+  --hud-cyan: #3ee6f0;
+  --hud-cyan-dim: #1a8a94;
+  --hud-green: #4ade80;
+  --hud-red: #ff4d4d;
+  --hud-orange: #ff8c3a;
+  --hud-text: #b8e8ec;
+  --hud-text-dim: #6b9aa0;
   --border: #355a66;
   --red: #e06c75;
   /* Were `var(--green)` / `var(--warn)` — self-referential, so they
@@ -837,7 +850,16 @@ body.bg-pattern-sparkles {
       color: var(--red);
       font-weight: 600;
     }
-    .icon-rail-btn:hover { opacity: 1; background: color-mix(in srgb, var(--accent) 12%, transparent); }
+    .icon-rail-btn:hover { opacity: 1; background: color-mix(in srgb, var(--accent) 12%, transparent); animation: accent-pulse 1.4s ease-in-out infinite; }
+    .icon-rail-btn:active { animation: accent-pulse-fast 0.3s ease-out; }
+    @keyframes accent-pulse {
+      0%, 100% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--brand-color) 35%, transparent); }
+      50% { box-shadow: 0 0 6px 2px color-mix(in srgb, var(--brand-color) 35%, transparent); }
+    }
+    @keyframes accent-pulse-fast {
+      0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--brand-color) 55%, transparent); }
+      100% { box-shadow: 0 0 10px 4px color-mix(in srgb, var(--brand-color) 0%, transparent); }
+    }
     .icon-rail-btn.active-section { opacity: 1; background: color-mix(in srgb, var(--color-accent) 15%, transparent); }
     /* Unified "minimized" indicator for any rail/sidebar button whose modal is held open */
     .rail-minimized { position: relative; }
@@ -24085,6 +24107,22 @@ body:not(.welcome-ready) #welcome-screen {
   top: 8px;
 }
 .tasks-modal-content { max-width: 600px; width: min(600px, 92vw); background: var(--bg); font-size: 12px; }
+/* Real fix for the 5-zone grid rendering "correct but small" -- the
+   generic .modal-content rule caps width at min(520px, 92vw), far too
+   narrow for the grid's 200px left-rail + hub + 260px right-stack
+   (needs ~950px). Follows the same override pattern already established
+   for .tasks-modal-content/.memory-modal-content above.
+   Update 2026-08-06: the 980px cap (previous fix) was still cramping the
+   hub's health-ring + CPU + MEM flex row into wrapping onto separate
+   lines -- confirmed via a real screenshot showing them scattered rather
+   than clustered. Widened to genuinely full-screen so the hub row has
+   real room. */
+.jarvis-home-modal-content {
+  max-width: 96vw;
+  width: 96vw;
+  height: 92vh;
+  max-height: 92vh;
+}
 .tasks-activity-card,
 .tasks-activity-list {
   min-height: 0;
@@ -41129,4 +41167,179 @@ body.theme-frosted .modal {
 @media (max-width: 768px) {
   .compare-grid[data-cols] { grid-template-columns: 1fr !important; overflow-y: auto; }
   .compare-pane { min-height: 60dvh; }
+}
+
+/* JARVIS arc reactor -- decorative HUD element in the bottom-left corner,
+   ported from jarvis.html. Unique class/keyframe names (jarvis-arc-*) to
+   avoid any collision with the existing @keyframes spin used elsewhere. */
+.jarvis-arc-ring3 { animation: jarvis-arc-spin-slow 20s linear infinite; transform-origin: center; }
+.jarvis-arc-ring1 { animation: jarvis-arc-spin-fwd 12s linear infinite; transform-origin: center; }
+.jarvis-arc-ring2 { animation: jarvis-arc-spin-rev 6s linear infinite reverse; transform-origin: center; }
+.jarvis-arc-pulse { animation: jarvis-arc-core-pulse 2.4s ease-in-out infinite; }
+.jarvis-arc-segment { animation: jarvis-arc-segment-flicker 3s ease-in-out infinite; }
+.jarvis-arc-segment:nth-child(2) { animation-delay: 0.25s; }
+.jarvis-arc-segment:nth-child(3) { animation-delay: 0.5s; }
+.jarvis-arc-segment:nth-child(4) { animation-delay: 0.75s; }
+.jarvis-arc-segment:nth-child(5) { animation-delay: 1.0s; }
+.jarvis-arc-segment:nth-child(6) { animation-delay: 1.25s; }
+.jarvis-arc-segment:nth-child(7) { animation-delay: 1.5s; }
+.jarvis-arc-segment:nth-child(8) { animation-delay: 1.75s; }
+@keyframes jarvis-arc-spin-slow { to { transform: rotate(360deg); } }
+@keyframes jarvis-arc-spin-fwd { to { transform: rotate(360deg); } }
+@keyframes jarvis-arc-spin-rev { to { transform: rotate(360deg); } }
+@keyframes jarvis-arc-core-pulse {
+  0%, 100% { opacity: 0.7; filter: drop-shadow(0 0 2px #00d4ff); }
+  50% { opacity: 1; filter: drop-shadow(0 0 6px #00d4ff) drop-shadow(0 0 12px rgba(0,212,255,0.5)); }
+}
+@keyframes jarvis-arc-segment-flicker {
+  0%, 100% { opacity: 0.5; }
+  50% { opacity: 1; }
+}
+
+/* HUD ticker dot pulse -- subtle, continuous, matching the existing
+   arc-reactor aesthetic above. Uses --ticker-color set inline per
+   ticker so one rule covers every color. */
+@keyframes hud-ticker-pulse {
+  0%, 100% {
+    transform: scale(1.0);
+    box-shadow: 0 0 4px var(--ticker-color), 0 0 8px var(--ticker-color), 0 0 12px var(--factor-tint, transparent);
+  }
+  50% {
+    transform: scale(1.15);
+    box-shadow: 0 0 7px var(--ticker-color), 0 0 13px var(--ticker-color), 0 0 18px var(--factor-tint, transparent);
+  }
+}
+.hud-ticker-dot {
+  animation: hud-ticker-pulse var(--pulse-speed, 2.2s) ease-in-out infinite;
+  transition: transform 0.25s ease, box-shadow 0.25s ease, border 0.25s ease;
+  border: var(--intensity-border, 1px) solid var(--ticker-color);
+}
+.hud-ticker-dot:hover {
+  transform: scale(1.25);
+  box-shadow:
+    0 0 10px var(--ticker-color),
+    0 0 20px var(--ticker-color),
+    0 0 30px var(--ticker-color);
+}
+
+/* Corner-bracket card treatment for Jarvis Home -- CSS only, no layout
+   changes. Outer glow plus a subtle inset glow (DK's addition) for a bit
+   more depth without breaking the restrained look. Uses only the
+   existing --hud-* variables, no new hardcoded hex values. */
+.jarvis-card {
+  position: relative;
+  transition: box-shadow 0.2s ease;
+}
+.jarvis-card:hover {
+  box-shadow: 0 0 8px rgba(62,230,240,0.35), inset 0 0 10px rgba(62,230,240,0.08);
+}
+.jarvis-card::before,
+.jarvis-card::after {
+  content: '';
+  position: absolute;
+  width: 8px;
+  height: 8px;
+  pointer-events: none;
+}
+.jarvis-card::before {
+  top: -1px;
+  left: -1px;
+  border-top: 2px solid var(--hud-cyan);
+  border-left: 2px solid var(--hud-cyan);
+}
+.jarvis-card::after {
+  bottom: -1px;
+  right: -1px;
+  border-bottom: 2px solid var(--hud-cyan);
+  border-right: 2px solid var(--hud-cyan);
+}
+
+/* Rounded gauge-card variant (2026-08-06) -- soft rounded look for CPU/MEM
+   satellite gauges, distinct from .jarvis-card's sharp corner-bracket style
+   used for the queue-metric boxes. Reuses existing --hud-* vars, no new
+   color tokens. Additive only -- .jarvis-card itself is unchanged. */
+.jarvis-gauge-card {
+  border-radius: 14px;
+  padding: 10px;
+  background: linear-gradient(180deg, rgba(255,255,255,0.03), rgba(255,255,255,0.01));
+  box-shadow: 0 6px 18px rgba(0,0,0,0.55);
+  display: inline-flex;
+  transition: box-shadow 0.2s ease;
+}
+.jarvis-gauge-card:hover {
+  box-shadow: 0 6px 18px rgba(0,0,0,0.55), 0 0 12px rgba(62,230,240,0.25);
+}
+
+/* Jarvis Home 5-zone grid layout -- real structural change, not just
+   styling. Named areas: top-strip (portfolio/risk + queue metrics),
+   left-rail (agents), hub (scaled-up system health, center), right-stack
+   (MCP servers), bottom-rail (throughput + quick access). */
+.jarvis-home-grid {
+  display: grid;
+  grid-template-areas:
+    "top"
+    "hub"
+    "left"
+    "right"
+    "bottom";
+  grid-template-columns: 1fr;
+  grid-template-rows: auto auto auto auto auto;
+  gap: 16px;
+}
+/* 2026-08-06: restructured from a 3-column (200px agents | 1fr hub |
+   260px mcp-servers) layout to a single full-width column with agents
+   and mcp-servers as stacked horizontal rows below the hub, per explicit
+   request. Class names (.jarvis-home-zone-left/-right) kept as-is to
+   avoid touching any JS -- only their grid-area position and internal
+   card-list layout changed (see the card-list grid-template-columns
+   change in jarvis_home.js's _collapsibleSection calls, so cards flow
+   left-to-right across the new full-width row instead of stacking in a
+   narrow former side column). */
+.jarvis-home-zone-top { grid-area: top; }
+.jarvis-home-zone-left { grid-area: left; min-width: 0; }
+.jarvis-home-zone-hub {
+  grid-area: hub;
+  display: flex;
+  align-items: flex-start; /* 2026-08-06: was 'center' -- with the modal
+    genuinely full-screen (92vh) and this row being grid's flexible '1fr'
+    track, centering vertically left large empty gaps above and below the
+    gauges (confirmed via a real screenshot). Top-aligning instead pulls
+    the hub content up under the top row, closing most of that dead space. */
+  justify-content: center;
+  gap: 20px;
+  padding-top: 24px;
+  flex-wrap: nowrap;
+  overflow-x: auto;
+}
+.jarvis-home-zone-right { grid-area: right; min-width: 0; }
+.jarvis-home-zone-bottom { grid-area: bottom; }
+
+/* 2026-08-06: removed the old @media(max-width:900px) narrow-viewport
+   override -- it re-declared the exact same single-column layout the
+   base grid now uses by default (redundant, not conflicting, since the
+   restructure to a full-width stacked layout above). */
+
+/* Visual polish override — 2026-08-06
+   Softens card glow and tightens hub spacing. Gauge size changed at
+   source in jarvis_home.js (48 -> 56) for crisp SVG rendering, not via
+   CSS transform:scale(). */
+:root{
+  --jh-hub-gap: 10px;
+  --jh-card-glow-color: rgba(0,200,255,0.06);
+  --jh-card-glow-blur: 10px;
+}
+
+.jarvis-home-zone-hub {
+  align-items: flex-start;
+  margin-bottom: var(--jh-hub-gap);
+}
+
+.jarvis-card, .jarvis-gauge-card {
+  border-radius: 12px;
+  box-shadow: 0 6px 18px rgba(0,0,0,0.10), 0 0 var(--jh-card-glow-blur) 0 var(--jh-card-glow-color);
+  transition: transform 160ms ease, box-shadow 160ms ease;
+}
+.jarvis-card:hover, .jarvis-gauge-card:hover {
+  transform: translateY(-3px);
+  box-shadow: 0 10px 24px rgba(0,0,0,0.12), 0 0 calc(var(--jh-card-glow-blur) + 4px) 0 var(--jh-card-glow-color);
 }
