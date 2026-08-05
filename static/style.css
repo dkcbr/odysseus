@@ -41319,31 +41319,32 @@ body.theme-frosted .modal {
    base grid now uses by default (redundant, not conflicting, since the
    restructure to a full-width stacked layout above). */
 
-/* Visual polish override — 2026-08-06
-   Softens card glow and tightens hub spacing. Gauge size changed at
-   source in jarvis_home.js (48 -> 56) for crisp SVG rendering, not via
-   CSS transform:scale(). */
-:root{
-  --jh-card-glow-color: rgba(0,200,255,0.06);
-  --jh-card-glow-blur: 10px;
-}
+/* Visual polish — 2026-08-06. Gauge size changed at source in
+   jarvis_home.js (48 -> 56) for crisp SVG rendering, not via CSS
+   transform:scale(). Revised same day to reuse the project's existing
+   --hud-cyan value (rgb(62,230,240)) instead of introducing new CSS
+   custom properties, per repo style policy -- no new color/spacing
+   tokens. Also fixed: an earlier draft of this block applied
+   border-radius:12px to .jarvis-card too, which would have rounded the
+   sharp corner-bracket queue-metric boxes; scoped to .jarvis-gauge-card
+   only, matching this file's own original stated intent ("distinct from
+   .jarvis-card's sharp corner-bracket style"). */
 
-/* 2026-08-06: margin-bottom removed -- confirmed via real math that the
-   grid's existing uniform gap:16px (see .jarvis-home-grid) already
-   provides consistent spacing between every section; adding a separate
-   10px margin here made this one junction 26px total, inconsistent with
-   the rest of the page. Reverted to let the grid's own gap be the single
+/* margin-bottom removed -- confirmed via real math that the grid's
+   existing uniform gap:16px (see .jarvis-home-grid) already provides
+   consistent spacing between every section; adding a separate 10px
+   margin here made this one junction 26px total, inconsistent with the
+   rest of the page. Reverted to let the grid's own gap be the single
    source of truth for this spacing. */
 .jarvis-home-zone-hub {
   align-items: flex-start;
 }
 
-.jarvis-card, .jarvis-gauge-card {
-  border-radius: 12px;
-  box-shadow: 0 6px 18px rgba(0,0,0,0.10), 0 0 var(--jh-card-glow-blur) 0 var(--jh-card-glow-color);
+.jarvis-gauge-card {
+  box-shadow: 0 6px 18px rgba(0,0,0,0.10), 0 0 8px 0 rgba(62,230,240,0.10);
   transition: transform 160ms ease, box-shadow 160ms ease;
 }
-.jarvis-card:hover, .jarvis-gauge-card:hover {
+.jarvis-gauge-card:hover {
   transform: translateY(-3px);
-  box-shadow: 0 10px 24px rgba(0,0,0,0.12), 0 0 calc(var(--jh-card-glow-blur) + 4px) 0 var(--jh-card-glow-color);
+  box-shadow: 0 10px 24px rgba(0,0,0,0.12), 0 0 12px 0 rgba(62,230,240,0.25);
 }
