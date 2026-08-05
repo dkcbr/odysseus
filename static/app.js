@@ -32,6 +32,29 @@ import capabilitiesModule from './js/capabilities.js';
 import tradingviewModule from './js/tradingview.js';
 import pollerStatusModule from './js/poller_status.js';
 import pollerDashboardModule from './js/poller_dashboard.js';
+import taskQueueInspectorModule from './js/task_queue_inspector.js';
+import workerLogModule from './js/worker_log.js';
+import marketDashboardModule from './js/market_dashboard.js';
+import jarvisHomeModule from './js/jarvis_home.js';
+import taskTimelineModule from './js/task_timeline.js';
+import toolAnalyticsModule from './js/tool_analytics.js';
+import agentDiagnosticsModule from './js/agent_diagnostics.js';
+import notificationsModule from './js/notifications.js';
+import notificationsDrawerModule from './js/notifications_drawer.js';
+import commandPaletteModule from './js/command_palette.js';
+import portfolioPanelModule from './js/portfolio_panel.js';
+import systemHealthPanelModule from './js/system_health_panel.js';
+import vaultGraphPanelModule from './js/vault_graph_panel.js';
+import composerPanelModule from './js/composer_panel.js';
+import riskPanelModule from './js/risk_panel.js';
+import crossSearchPanelModule from './js/cross_search_panel.js';
+import stateOfJarvisPanelModule from './js/state_of_jarvis_panel.js';
+import agentTaskDetailPanelModule from './js/agent_task_detail_panel.js';
+import mcpServerDetailPanelModule from './js/mcp_server_detail_panel.js';
+import timelinePanelModule from './js/timeline_panel.js';
+import graphExplorerV2PanelModule from './js/graph_explorer_v2_panel.js';
+
+import processTableModule from './js/process_table.js';
 import taskHistoryModule from './js/task_history.js';
 // Eagerly bind unified minimize/restore behavior across all tool modals.
 import './js/modalManager.js';
@@ -181,6 +204,14 @@ function initRailHoverLabels() {
     'rail-tradingview': 'TradingView',
     'rail-poller-status': 'Poller Status',
     'rail-poller-dashboard': 'Poller Dashboard',
+    'rail-task-queue-inspector': 'Task Queue Inspector',
+    'rail-worker-log': 'Worker Logs',
+    'rail-market-dashboard': 'Market Dashboard',
+    'rail-jarvis-home': 'Jarvis Home',
+    'rail-task-timeline': 'Task Timeline',
+    'rail-tool-analytics': 'Tool Analytics',
+    'rail-agent-diagnostics': 'Agent Diagnostics',
+    'rail-process-table': 'Process Table',
     'rail-task-history': 'Task History',
     'rail-tasks': 'Tasks',
     'rail-theme': 'Theme',
@@ -672,6 +703,33 @@ function initializeEventListeners() {
 
   
 
+
+  // Jarvis OS keyboard shortcuts -- Ctrl/Cmd+1 through 6 open the six
+  // Quick Access panels. Reuses the exact same open logic as the Quick
+  // Access buttons (clicking the real sidebar button), not a parallel
+  // modal-toggle path, so behavior can't drift between the two entry points.
+  const JARVIS_SHORTCUT_MAP = {
+    '1': 'tool-process-table-btn',
+    '2': 'tool-market-dashboard-btn',
+    '3': 'tool-registry-btn',
+    '4': 'tool-worker-log-btn',
+    '5': 'tool-capabilities-btn',
+    '6': 'tool-task-history-btn',
+  };
+  document.addEventListener('keydown', (e) => {
+    // Input-field guard -- never hijack typing.
+    const t = e.target;
+    if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
+
+    const mod = e.ctrlKey || e.metaKey;
+    if (!mod) return;
+
+    const targetBtnId = JARVIS_SHORTCUT_MAP[e.key.toLowerCase()];
+    if (!targetBtnId) return; // not a recognized shortcut -- don't touch default behavior
+
+    e.preventDefault(); // only once a valid Jarvis shortcut is confirmed, matching the real rule
+    document.getElementById(targetBtnId)?.click();
+  });
 
   // Close popups one by one with Escape key (topmost first)
   document.addEventListener('keydown', (e) => {
@@ -1239,6 +1297,12 @@ function initializeEventListeners() {
     '/tradingview': () => document.getElementById('tool-tradingview-btn')?.click(),
     '/poller-status': () => document.getElementById('tool-poller-status-btn')?.click(),
     '/poller-dashboard': () => document.getElementById('tool-poller-dashboard-btn')?.click(),
+    '/task-queue-inspector': () => document.getElementById('tool-task-queue-inspector-btn')?.click(),
+    '/worker-logs': () => document.getElementById('tool-worker-log-btn')?.click(),
+    '/market-dashboard': () => document.getElementById('tool-market-dashboard-btn')?.click(),
+    '/jarvis-home': () => document.getElementById('tool-jarvis-home-btn')?.click(),
+    '/task-timeline': () => document.getElementById('tool-task-timeline-btn')?.click(),
+    '/process-table': () => document.getElementById('tool-process-table-btn')?.click(),
     '/task-history': () => document.getElementById('tool-task-history-btn')?.click(),
     '/library':  () => sessionModule && sessionModule.openLibrary && sessionModule.openLibrary(),
   };
@@ -3685,6 +3749,86 @@ function startOdysseusApp() {
     pollerDashboardModule.init();
   }
 
+  // Initialize task queue inspector module
+  if (taskQueueInspectorModule) {
+    taskQueueInspectorModule.init();
+  }
+
+  if (workerLogModule) {
+    workerLogModule.init();
+  }
+
+  if (marketDashboardModule) {
+    marketDashboardModule.init();
+  }
+
+  if (jarvisHomeModule) {
+    jarvisHomeModule.init();
+  }
+
+  if (taskTimelineModule) {
+    taskTimelineModule.init();
+  }
+
+  if (toolAnalyticsModule) {
+    toolAnalyticsModule.init();
+  }
+
+  if (agentDiagnosticsModule) {
+    agentDiagnosticsModule.init();
+  }
+
+  if (notificationsModule) {
+    notificationsModule.init();
+  }
+
+  if (notificationsDrawerModule) {
+    notificationsDrawerModule.init();
+  }
+
+  if (commandPaletteModule) {
+    commandPaletteModule.init();
+  }
+
+  if (portfolioPanelModule) {
+    portfolioPanelModule.init();
+  }
+  if (systemHealthPanelModule) {
+    systemHealthPanelModule.init();
+  }
+  if (vaultGraphPanelModule) {
+    vaultGraphPanelModule.init();
+  }
+  if (composerPanelModule) {
+    composerPanelModule.init();
+  }
+  if (riskPanelModule) {
+    riskPanelModule.init();
+  }
+  if (crossSearchPanelModule) {
+    crossSearchPanelModule.init();
+  }
+  if (stateOfJarvisPanelModule) {
+    stateOfJarvisPanelModule.init();
+  }
+  if (agentTaskDetailPanelModule) {
+    agentTaskDetailPanelModule.init();
+  }
+  if (mcpServerDetailPanelModule) {
+    mcpServerDetailPanelModule.init();
+  }
+  if (timelinePanelModule) {
+    timelinePanelModule.init();
+  }
+  if (graphExplorerV2PanelModule) {
+    graphExplorerV2PanelModule.init();
+  }
+
+
+  if (processTableModule) {
+    processTableModule.init();
+  }
+
   // Initialize task history module
   if (taskHistoryModule) {
     taskHistoryModule.init();
@@ -3714,6 +3858,12 @@ function startOdysseusApp() {
     'rail-tradingview': 'tool-tradingview-btn',
     'rail-poller-status': 'tool-poller-status-btn',
     'rail-poller-dashboard': 'tool-poller-dashboard-btn',
+    'rail-task-queue-inspector': 'tool-task-queue-inspector-btn',
+    'rail-worker-log': 'tool-worker-log-btn',
+    'rail-market-dashboard': 'tool-market-dashboard-btn',
+    'rail-jarvis-home': 'tool-jarvis-home-btn',
+    'rail-task-timeline': 'tool-task-timeline-btn',
+    'rail-process-table': 'tool-process-table-btn',
     'rail-task-history': 'tool-task-history-btn',
     'rail-theme':     'tool-theme-btn',
     'rail-email':     'email-section-title',

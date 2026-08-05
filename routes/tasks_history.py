@@ -61,6 +61,24 @@ def init_db() -> None:
                 result TEXT
             )
         """)
+
+        # Real migration: add optional "name" column to both real,
+        # already-populated tables, plus "remember_on_success" to tasks
+        # only (it's a task-creation-time flag, not something individual
+        # events need). CREATE TABLE IF NOT EXISTS above does NOT alter an
+        # existing table's columns, so this must be a separate, idempotent
+        # ALTER TABLE -- checked against the real sqlite_master/PRAGMA
+        # table_info first, since re-running ALTER TABLE ADD COLUMN on a
+        # column that already exists raises "duplicate column name".
+        for table in ("tasks", "task_events"):
+            existing_cols = {row[1] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+            if "name" not in existing_cols:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN name TEXT")
+
+        tasks_cols = {row[1] for row in conn.execute("PRAGMA table_info(tasks)").fetchall()}
+        if "remember_on_success" not in tasks_cols:
+            conn.execute("ALTER TABLE tasks ADD COLUMN remember_on_success INTEGER DEFAULT 0")
+
         conn.commit()
     finally:
         conn.close()
@@ -161,6 +179,8 @@ def _hydrate_task_row(row) -> dict:
     d = dict(row)
     d["arguments"] = json.loads(d["arguments"]) if d.get("arguments") else {}
     d["result"] = json.loads(d["result"]) if d.get("result") else None
+    if "remember_on_success" in d:
+        d["remember_on_success"] = bool(d["remember_on_success"])
     return d
 
 
@@ -174,8 +194,8 @@ def log_event(task: dict, event_type: str) -> None:
             conn.execute(
                 """INSERT INTO task_events
                    (ts, task_id, event_type, agent, server, tool, arguments,
-                    priority, retry_count, status, result)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    priority, retry_count, status, result, name)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     time.time(),
                     task["id"],
@@ -188,6 +208,7 @@ def log_event(task: dict, event_type: str) -> None:
                     task.get("retry_count"),
                     task["status"],
                     json.dumps(task.get("result")) if task.get("result") is not None else None,
+                    task.get("name"),
                 ),
             )
             conn.commit()

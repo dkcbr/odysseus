@@ -368,6 +368,25 @@ async function syncPrefToggle(elementId, prefKey, onMsg, offMsg, dimBelow = true
   }
 }
 
+export function scrollToMemory(memoryId) {
+  // Memory_panel_task_link's reverse direction: called from task_history.js
+  // after opening the Memory panel, to scroll to and briefly highlight the
+  // specific entry that was clicked. Retries briefly since loadMemories()
+  // may still be in flight when this is called.
+  const attempt = (triesLeft) => {
+    const el = document.querySelector(`.memory-item[data-memory-id="${CSS.escape(String(memoryId))}"]`);
+    if (el) {
+      el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      el.style.transition = 'background-color 0.3s ease';
+      el.style.backgroundColor = 'color-mix(in srgb, var(--accent, var(--red)) 20%, transparent)';
+      setTimeout(() => { el.style.backgroundColor = ''; }, 1800);
+    } else if (triesLeft > 0) {
+      setTimeout(() => attempt(triesLeft - 1), 200);
+    }
+  };
+  attempt(10);
+}
+
 export async function loadMemories() {
   _ensureNewMemoryCategorySelect();
   try {
@@ -780,6 +799,26 @@ export function renderMemoryList() {
       timeSpan.textContent = relativeTime(memory.timestamp);
       timeSpan.title = new Date(memory.timestamp * 1000).toLocaleString();
       meta.appendChild(timeSpan);
+    }
+
+    if (memory.task_id) {
+      // Memory_panel_task_link: real, clickable origin-task badge --
+      // opens the real Task History panel, pre-selected to this task,
+      // via task_history.js's openPanel(taskId) extension.
+      const taskSpan = document.createElement('span');
+      taskSpan.className = 'memory-item-task-link';
+      taskSpan.textContent = `task: ${memory.task_id}`;
+      taskSpan.title = 'View originating task';
+      taskSpan.style.cursor = 'pointer';
+      taskSpan.style.textDecoration = 'underline';
+      taskSpan.addEventListener('click', (e) => {
+        e.stopPropagation();
+        import('./task_history.js').then(m => {
+          const openPanel = m.openPanel || m.default?.openPanel;
+          if (openPanel) openPanel(memory.task_id);
+        });
+      });
+      meta.appendChild(taskSpan);
     }
 
     content.appendChild(textSpan);
@@ -1525,7 +1564,8 @@ const memoryModule = {
   buildCategoryChips,
   tidyMemories,
   importMemories,
-  exportMemories
+  exportMemories,
+  scrollToMemory
 };
 
 export default memoryModule;

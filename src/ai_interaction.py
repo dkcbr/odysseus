@@ -37,6 +37,22 @@ MAX_PIPELINE_STEPS = 10
 _session_manager = None
 _memory_manager = None
 _memory_vector = None
+
+# Strategy-level topics that MUST use replace_fact() semantics, never plain
+# add_entry() -- these describe ongoing behavior/mission/identity, where
+# append-only storage caused real, confirmed drift (the stale NVDA-primary-
+# mission entries found and fixed earlier). Kept local (not fetched from
+# contextor at runtime) to avoid cross-system coupling for a short, static
+# list. NOTE: keep in sync with contextor's canonical_topics entry.
+CANONICAL_TOPICS = {
+    "nvda_strategy",
+    "portfolio_mission",
+    "jarvis_role",
+    "odysseus_memory_architecture",
+    "user_preference_core",
+    "system_state_core",
+    "embedding_model_state",
+}
 _rag_manager = None
 _personal_docs_manager = None
 
@@ -302,10 +318,17 @@ async def do_manage_memory(content: str, session_id: Optional[str] = None, owner
 
     Actions:
       list                    — list all memories (optional line 2: category filter)
-      add                     — line 2: text, optional line 3: category (fact|event|contact|preference)
+      add                     — line 2: text, optional line 3: category (fact|event|contact|preference),
+                                 optional line 4: topic (if it matches a canonical strategy topic,
+                                 automatically rerouted to replace semantics -- see "replace" below)
       edit                    — line 2: memory_id, line 3: new text
       delete                  — line 2: memory_id
       search                  — line 2: query
+      replace                 — line 2: topic, line 3: new text, optional line 4: category
+                                 (supersedes all entries tagged with this topic in metadata --
+                                 use for strategy-level facts that change over time, e.g. an
+                                 investment strategy or a stated mission; plain "add" is still
+                                 correct for one-off events/logs that never need superseding)
     """
     if not _memory_manager:
         return {"error": "Memory manager not available"}
@@ -339,10 +362,30 @@ async def do_manage_memory(content: str, session_id: Optional[str] = None, owner
             return {"error": "Add needs line 2: memory text"}
         text = lines[1].strip()
         category = lines[2].strip().lower() if len(lines) > 2 and lines[2].strip() else "fact"
+        topic = lines[3].strip() if len(lines) > 3 and lines[3].strip() else None
         if not text:
             return {"error": "Memory text cannot be empty"}
 
+        # Rule 1: strategy-level topics must use replace_fact(), never plain
+        # add -- reroute rather than silently allowing drift back in.
+        if topic:
+            from src.memory_provider import NativeMemoryProvider
+            provider = NativeMemoryProvider(_memory_manager, _memory_vector)
+            normalized_topic = provider._normalize_topic(topic)
+            if normalized_topic in CANONICAL_TOPICS:
+                logger.info(f"rerouted add -> replace due to strategy topic: {normalized_topic}")
+                record = await provider.replace_fact(normalized_topic, text, owner=owner, category=category, source="ai_agent")
+                try:
+                    from src.event_bus import fire_event
+                    fire_event("memory_added", owner)
+                except Exception:
+                    logger.debug("memory_added event dispatch failed", exc_info=True)
+                return {"action": "add", "rerouted_to": "replace", "memory_id": record.id, "topic": normalized_topic,
+                        "results": f"Memory replaced (rerouted from add, strategy topic): [{category}] {text}"}
+
         entry = _memory_manager.add_entry(text, source="ai_agent", category=category, owner=owner)
+        if topic:
+            entry["metadata"] = {"topic": topic}
         memories = _memory_manager.load_all()
         memories.append(entry)
         _memory_manager.save(memories)
@@ -361,6 +404,42 @@ async def do_manage_memory(content: str, session_id: Optional[str] = None, owner
 
         return {"action": "add", "memory_id": entry["id"],
                 "results": f"Memory added: [{category}] {text}"}
+
+    elif action == "replace":
+        if len(lines) < 3:
+            return {"error": "Replace needs line 2: topic, line 3: new text"}
+        topic = lines[1].strip()
+        new_text = lines[2].strip()
+        category = lines[3].strip().lower() if len(lines) > 3 and lines[3].strip() else "fact"
+        if not topic:
+            return {"error": "Topic cannot be empty"}
+        if not new_text:
+            return {"error": "New text cannot be empty"}
+
+        from src.memory_provider import NativeMemoryProvider
+        provider = NativeMemoryProvider(_memory_manager, _memory_vector)
+        normalized_topic = provider._normalize_topic(topic)
+        removed_before = [
+            m for m in _memory_manager.load(owner=owner)
+            if provider._normalize_topic((m.get("metadata") or {}).get("topic") or "") == normalized_topic
+        ]
+        record = await provider.replace_fact(topic, new_text, owner=owner, category=category, source="ai_agent")
+        try:
+            from src.event_bus import fire_event
+            fire_event("memory_added", owner)
+        except Exception:
+            logger.debug("memory_added event dispatch failed", exc_info=True)
+
+        removed_summary = f" (superseded {len(removed_before)} prior entr{'y' if len(removed_before) == 1 else 'ies'} under this topic)" if removed_before else " (no prior entries under this topic)"
+
+        # Rule 3: allow non-canonical topics (new strategy topics can be
+        # introduced intentionally) but warn, rather than silently letting
+        # a typo'd canonical topic (or an actually-new one) go unnoticed.
+        response = {"action": "replace", "memory_id": record.id, "topic": normalized_topic,
+                    "results": f"Memory replaced: [{category}] {new_text}{removed_summary}"}
+        if normalized_topic not in CANONICAL_TOPICS:
+            response["warning"] = f"topic '{normalized_topic}' is not in the canonical topic list"
+        return response
 
     elif action == "edit":
         if len(lines) < 3:

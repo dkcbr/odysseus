@@ -703,6 +703,9 @@ app.include_router(setup_preset_routes(preset_manager))
 from routes.diagnostics_routes import setup_diagnostics_routes
 app.include_router(setup_diagnostics_routes(rag_manager, rag_available, research_handler, memory_vector))
 
+from routes.factor_routes import setup_factor_routes
+app.include_router(setup_factor_routes())
+
 # Cleanup
 from routes.cleanup_routes import setup_cleanup_routes
 app.include_router(setup_cleanup_routes(session_manager))
@@ -815,6 +818,9 @@ logger.info("MCP routes initialized")
 # Agent dashboard (recent /api/mcp/call activity + stats -- in-memory only)
 from routes.agent_dashboard import router as agent_dashboard_router
 app.include_router(agent_dashboard_router)
+
+from routes.risk_surface import router as risk_surface_router
+app.include_router(risk_surface_router)
 logger.info("Agent dashboard routes initialized")
 
 # Task queue -- in-memory only, see routes/tasks.py
@@ -1076,7 +1082,12 @@ async def _startup_event():
         except BaseException as e:
             logger.warning(f"Built-in MCP registration failed (non-critical): {type(e).__name__}: {e}")
         try:
-            await asyncio.wait_for(mcp_manager.connect_all_enabled(), timeout=20)
+            # Increased from 20s: with connect_all_enabled() now running all
+            # servers concurrently (real bug fixed -- previously sequential,
+            # so servers late in DB order never even got attempted before
+            # this shared timeout fired), this is now defense-in-depth
+            # headroom rather than the primary bottleneck.
+            await asyncio.wait_for(mcp_manager.connect_all_enabled(), timeout=45)
         except asyncio.TimeoutError:
             logger.warning("User MCP startup timed out (non-critical)")
         except BaseException as e:

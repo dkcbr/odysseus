@@ -53,3 +53,10 @@ uvicorn
 # Vector store + local embeddings for RAG, semantic memory, and tool
 youtube-transcript-api
 git+https://github.com/prefecthq/fastmcp@v3.4.4
+
+# opencv-python-headless: real, confirmed dependency of the GFPGAN face-
+# restoration path in routes/gallery/gallery_routes.py (cv2.cvtColor).
+# gfpgan/basicsr wheels are installed with --no-deps, so this real
+# dependency needs to be listed here explicitly. Headless variant since
+# this runs in a server container with no display.
+opencv-python-headless

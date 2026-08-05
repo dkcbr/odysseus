@@ -159,12 +159,13 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
     elif action == "add":
         text = arguments.get("text", "")
         category = arguments.get("category", "fact")
+        task_id = arguments.get("task_id")
         if not text:
             return _text_result("Error: Memory text cannot be empty")
         owner, memories, _visible, scope_error = _scope_entries()
         if scope_error:
             return _text_result(scope_error)
-        entry = _memory_manager.add_entry(text, source="ai_agent", category=category, owner=owner)
+        entry = _memory_manager.add_entry(text, source="ai_agent", category=category, owner=owner, task_id=task_id)
         memories.append(entry)
         _memory_manager.save(memories)
         if _memory_vector and _memory_vector.healthy:

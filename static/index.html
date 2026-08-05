@@ -324,6 +324,159 @@
     </div>
   </div>
 
+  <!-- Jarvis OS Home Screen Modal -->
+  <div id="jarvis-home-modal" class="modal hidden">
+    <div class="modal-content jarvis-home-modal-content" role="dialog" aria-label="Jarvis Home" style="background:#050810;position:relative;overflow:hidden;">
+      <div class="modal-header" style="border-bottom:1px solid #1a3a4a;">
+        <h4 style="color:#4ad4e8;text-shadow:0 0 8px #4ad4e8;"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:6px"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="4"/></svg><span>JARVIS</span></h4>
+        <button class="close-btn" id="close-jarvis-home-modal" aria-label="Close Jarvis home">✖</button>
+      </div>
+      <div class="modal-body jarvis-home-modal-body" style="background:#050810;">
+        <div id="jarvis-home-content">Loading...</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Tool Analytics Modal -->
+  <div id="tool-analytics-modal" class="modal hidden">
+    <div class="modal-content tool-analytics-modal-content" role="dialog" aria-label="Tool Analytics" style="background:var(--bg)">
+      <div class="modal-header">
+        <h4><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:6px"><path d="M3 3v18h18"/><rect x="7" y="12" width="3" height="6"/><rect x="12" y="8" width="3" height="10"/><rect x="17" y="5" width="3" height="13"/></svg><span>Tool Analytics</span></h4>
+        <button class="close-btn" id="close-tool-analytics-modal" aria-label="Close tool analytics modal">✖</button>
+      </div>
+      <div class="modal-body">
+        <div id="tool-analytics-content">Loading...</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Agent Diagnostics Modal -->
+  <div id="agent-diagnostics-modal" class="modal hidden">
+    <div class="modal-content agent-diagnostics-modal-content" role="dialog" aria-label="Agent Diagnostics" style="background:var(--bg)">
+      <div class="modal-header">
+        <h4><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:6px"><circle cx="12" cy="12" r="3"/><path d="M12 1v6m0 6v6m11-7h-6m-6 0H1"/></svg><span>Agent Diagnostics</span></h4>
+        <button class="close-btn" id="close-agent-diagnostics-modal" aria-label="Close agent diagnostics modal">✖</button>
+      </div>
+      <div class="modal-body">
+        <button id="agent-diagnostics-refresh" style="font-size:11px;margin-bottom:8px;">Refresh</button>
+        <div id="agent-diagnostics-list">Loading...</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Task Timeline Modal -->
+  <div id="task-timeline-modal" class="modal hidden">
+    <div class="modal-content task-timeline-modal-content" role="dialog" aria-label="Task Timeline" style="background:var(--bg)">
+      <div class="modal-header">
+        <h4><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:6px"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg><span>Task Timeline</span></h4>
+        <button class="close-btn" id="close-task-timeline-modal" aria-label="Close task timeline modal">✖</button>
+      </div>
+      <div class="modal-body task-timeline-modal-body">
+        <div id="task-timeline-content">Loading...</div>
+        <div id="task-timeline-drawer" style="display:none;margin-top:10px;border-top:1px solid #1a3a4a;padding-top:10px;">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">
+            <div id="task-timeline-drawer-title" style="font-weight:600;font-size:12px;"></div>
+            <button id="task-timeline-drawer-close" style="font-size:10px;padding:2px 6px;">Close</button>
+          </div>
+          <div id="task-timeline-drawer-content" style="font-size:11px;"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Process Table Modal -->
+  <div id="process-table-modal" class="modal hidden">
+    <div class="modal-content process-table-modal-content" role="dialog" aria-label="Process Table" style="background:var(--bg);position:relative;overflow:hidden;">
+      <div class="modal-header">
+        <h4><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:6px"><rect x="3" y="3" width="18" height="18" rx="2"/><line x1="3" y1="9" x2="21" y2="9"/><line x1="9" y1="9" x2="9" y2="21"/></svg><span>Process Table</span></h4>
+        <button class="close-btn" id="close-process-table-modal" aria-label="Close process table modal">✖</button>
+      </div>
+      <div class="modal-body process-table-modal-body">
+        <div style="display:flex;gap:8px;margin-bottom:8px;flex-wrap:wrap;">
+          <select id="process-table-filter-status" style="font-size:11px;">
+            <option value="">All statuses</option>
+            <option value="pending">pending</option>
+            <option value="running">running</option>
+            <option value="success">success</option>
+            <option value="failed">failed</option>
+          </select>
+          <select id="process-table-filter-agent" style="font-size:11px;">
+            <option value="">All agents</option>
+            <option value="browser_agent">browser_agent</option>
+            <option value="filesystem_agent">filesystem_agent</option>
+            <option value="system_agent">system_agent</option>
+            <option value="market_agent">market_agent</option>
+          </select>
+        </div>
+        <div id="process-table-content">Loading...</div>
+      </div>
+      <div id="process-table-drawer" class="hidden" style="position:absolute;top:0;right:0;bottom:0;width:340px;background:var(--bg);border-left:1px solid var(--border);overflow-y:auto;padding:10px;">
+        <div style="display:flex;justify-content:flex-end;margin-bottom:6px;">
+          <button class="close-btn" id="close-process-table-drawer">✖</button>
+        </div>
+        <div id="process-table-drawer-body">Loading...</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Market Dashboard Modal -->
+  <div id="market-dashboard-modal" class="modal hidden">
+    <div class="modal-content market-dashboard-modal-content" role="dialog" aria-label="Market Dashboard" style="background:var(--bg)">
+      <div class="modal-header">
+        <h4><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:6px"><path d="M3 3v18h18"/><path d="M18 17V9"/><path d="M13 17V5"/><path d="M8 17v-3"/></svg><span>Market Dashboard</span></h4>
+        <button class="close-btn" id="close-market-dashboard-modal" aria-label="Close market dashboard modal">✖</button>
+      </div>
+      <div class="modal-body market-dashboard-modal-body">
+        <div id="market-dashboard-content">Loading...</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Worker Log Panel Modal -->
+  <div id="worker-log-modal" class="modal hidden">
+    <div class="modal-content worker-log-modal-content" role="dialog" aria-label="Worker Logs" style="background:var(--bg)">
+      <div class="modal-header">
+        <h4><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:6px"><path d="M4 17l6-6-6-6"/><path d="M12 19h8"/></svg><span>Worker Logs</span></h4>
+        <button class="close-btn" id="close-worker-log-modal" aria-label="Close worker log modal">✖</button>
+      </div>
+      <div class="modal-body worker-log-modal-body">
+        <div style="display:flex;gap:8px;margin-bottom:8px;flex-wrap:wrap;">
+          <select id="worker-log-filter-agent" style="font-size:11px;">
+            <option value="filesystem_agent">filesystem_agent</option>
+            <option value="browser_agent">browser_agent</option>
+            <option value="market_agent">market_agent</option>
+          </select>
+          <select id="worker-log-filter-phase" style="font-size:11px;">
+            <option value="">All phases</option>
+            <option value="tool_start">tool_start</option>
+            <option value="tool_end">tool_end</option>
+          </select>
+          <select id="worker-log-filter-outcome" style="font-size:11px;">
+            <option value="">All outcomes</option>
+            <option value="success">success</option>
+            <option value="failed">failed</option>
+            <option value="blocked">blocked</option>
+            <option value="exception">exception</option>
+          </select>
+        </div>
+        <div id="worker-log-content">Loading...</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Task Queue Inspector Modal -->
+  <div id="task-queue-inspector-modal" class="modal hidden">
+    <div class="modal-content task-queue-inspector-modal-content" role="dialog" aria-label="Task Queue Inspector" style="background:var(--bg)">
+      <div class="modal-header">
+        <h4><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:6px"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 10h18"/></svg><span>Task Queue Inspector</span></h4>
+        <button class="close-btn" id="close-task-queue-inspector-modal" aria-label="Close task queue inspector modal">✖</button>
+      </div>
+      <div class="modal-body task-queue-inspector-modal-body">
+        <div id="task-queue-inspector-content">Loading...</div>
+      </div>
+    </div>
+  </div>
+
   <!-- Task History Modal -->
   <div id="task-history-modal" class="modal hidden">
     <div class="modal-content task-history-modal-content" role="dialog" aria-label="Task History" style="background:var(--bg)">
@@ -332,7 +485,7 @@
         <button class="close-btn" id="close-task-history-modal" aria-label="Close task history modal">✖</button>
       </div>
       <div class="modal-body task-history-modal-body">
-        <div style="display:flex;gap:8px;margin-bottom:8px;flex-wrap:wrap;">
+        <div style="display:flex;gap:8px;margin-bottom:8px;flex-wrap:wrap;align-items:center;">
           <select id="task-history-filter-status" style="font-size:11px;">
             <option value="">All statuses</option>
             <option value="pending">pending</option>
@@ -344,9 +497,11 @@
             <option value="">All agents</option>
             <option value="browser_agent">browser_agent</option>
             <option value="filesystem_agent">filesystem_agent</option>
+            <option value="market_agent">market_agent</option>
           </select>
           <input id="task-history-filter-server" placeholder="server contains..." style="font-size:11px;flex:1;min-width:100px;">
           <input id="task-history-filter-tool" placeholder="tool contains..." style="font-size:11px;flex:1;min-width:100px;">
+          <button class="close-btn" id="task-history-export-btn" title="Export selected task's timeline as JSON" style="font-size:11px;">⬇ Export JSON</button>
         </div>
         <div style="display:flex;gap:12px;">
           <div id="task-history-list" style="flex:1;max-height:400px;overflow-y:auto;"></div>
@@ -652,6 +807,11 @@
           <div class="theme-fd-label" style="opacity:0.4;">Drop <code>.woff2</code>, <code>.ttf</code>, or <code>.otf</code> files into <code>static/fonts/custom/</code> and reload — they'll appear in the Font dropdown above.</div>
         </div>
         <button class="theme-adv-clear-btn" id="theme-adv-clear">Clear Advanced Overrides</button>
+        <div style="display:flex;gap:8px;margin-top:8px;">
+          <button class="theme-adv-clear-btn" id="theme-export-btn">Export Theme (.json)</button>
+          <button class="theme-adv-clear-btn" id="theme-import-btn">Import Theme (.json)</button>
+          <input type="file" id="theme-import-file" accept="application/json" style="display:none;">
+        </div>
       </div>
       <!-- Color Harmony Generator (its own card) -->
       <div class="admin-card" id="theme-harmony-card">
@@ -809,6 +969,14 @@
     <button class="icon-rail-btn" id="rail-tradingview" title="TradingView"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3v18h18"/><path d="M18.7 8 12 14.7l-3.3-3.3L4 16"/></svg></button>
     <button class="icon-rail-btn" id="rail-poller-status" title="Poller Status"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg></button>
     <button class="icon-rail-btn" id="rail-poller-dashboard" title="Poller Dashboard"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/></svg></button>
+    <button class="icon-rail-btn" id="rail-task-queue-inspector" title="Task Queue Inspector"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 10h18"/></svg></button>
+    <button class="icon-rail-btn" id="rail-worker-log" title="Worker Logs"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 17l6-6-6-6"/><path d="M12 19h8"/></svg></button>
+    <button class="icon-rail-btn" id="rail-market-dashboard" title="Market Dashboard"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3v18h18"/><path d="M18 17V9"/><path d="M13 17V5"/><path d="M8 17v-3"/></svg></button>
+    <button class="icon-rail-btn" id="rail-jarvis-home" title="Jarvis Home"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="4"/></svg></button>
+    <button class="icon-rail-btn" id="rail-tool-analytics" title="Tool Analytics"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3v18h18"/><rect x="7" y="12" width="3" height="6"/><rect x="12" y="8" width="3" height="10"/><rect x="17" y="5" width="3" height="13"/></svg></button>
+    <button class="icon-rail-btn" id="rail-agent-diagnostics" title="Agent Diagnostics"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M12 1v6m0 6v6m11-7h-6m-6 0H1"/></svg></button>
+    <button class="icon-rail-btn" id="rail-task-timeline" title="Task Timeline"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg></button>
+    <button class="icon-rail-btn" id="rail-process-table" title="Process Table"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><line x1="3" y1="9" x2="21" y2="9"/><line x1="9" y1="9" x2="9" y2="21"/></svg></button>
     <button class="icon-rail-btn" id="rail-task-history" title="Task History"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 8v4l3 3"/><circle cx="12" cy="12" r="9"/></svg></button>
     <button class="icon-rail-btn" id="rail-tasks" title="Tasks"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/><path d="M9 16l2 2 4-4"/></svg></button>
     <button class="icon-rail-btn" id="rail-theme" title="Theme"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 2a10 10 0 0 0 0 20 5 5 0 0 0 5-5 3 3 0 0 0-3-3h-2a3 3 0 0 1-3-3 5 5 0 0 1 5-5"/></svg></button>
@@ -952,7 +1120,7 @@
         <div class="section-header-flex">
           <span class="section-title"><svg class="section-icon" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg>Tools</span>
         </div>
-        <div class="list-item" id="tool-memory-btn">
+        <div class="list-item" id="tool-memory-btn" data-panel-btn>
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
             stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
             style="flex-shrink:0;opacity:0.5;">
@@ -962,7 +1130,7 @@
           </svg>
           <span class="grow">Brain</span>
         </div>
-        <div class="list-item" id="tool-calendar-btn">
+        <div class="list-item" id="tool-calendar-btn" data-panel-btn>
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
             stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
             style="flex-shrink:0;opacity:0.5;">
@@ -973,11 +1141,11 @@
           </svg>
           <span class="grow">Calendar</span>
         </div>
-        <div class="list-item" id="tool-compare-btn">
+        <div class="list-item" id="tool-compare-btn" data-panel-btn>
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0;opacity:0.5;"><circle cx="18" cy="18" r="3"/><circle cx="6" cy="6" r="3"/><path d="M13 6h3a2 2 0 0 1 2 2v7"/><path d="M11 18H8a2 2 0 0 1-2-2V9"/></svg>
           <span class="grow">Compare</span>
         </div>
-        <div class="list-item" id="tool-cookbook-btn">
+        <div class="list-item" id="tool-cookbook-btn" data-panel-btn>
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
             stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"
             style="flex-shrink:0;opacity:0.5;">
@@ -988,11 +1156,11 @@
           <span id="cookbook-bg-status" style="display:none;font-size:9px;opacity:0.5;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-right:12px;flex-shrink:1;min-width:0;position:relative;top:-1px;"></span>
           <span class="cookbook-notif-dot" id="cookbook-notif-dot" style="display:none;margin-left:6px;margin-right:4px;position:relative;top:-1px;left:0px;"></span>
         </div>
-        <div class="list-item" id="tool-research-btn">
+        <div class="list-item" id="tool-research-btn" data-panel-btn>
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="flex-shrink:0;opacity:0.5;"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/><line x1="11" y1="8" x2="11" y2="14"/><line x1="8" y1="11" x2="14" y2="11"/></svg>
           <span class="grow">Deep Research</span>
         </div>
-        <div class="list-item" id="tool-gallery-btn">
+        <div class="list-item" id="tool-gallery-btn" data-panel-btn>
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
             stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
             style="flex-shrink:0;opacity:0.5;">
@@ -1002,7 +1170,7 @@
           </svg>
           <span class="grow">Gallery</span>
         </div>
-        <div class="list-item" id="tool-library-btn">
+        <div class="list-item" id="tool-library-btn" data-panel-btn>
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0;opacity:0.5;">
             <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/><path d="M9 7h6M9 11h4"/>
           </svg>
@@ -1012,7 +1180,7 @@
             <span class="list-item-plus-label">document</span>
           </button>
         </div>
-        <div class="list-item" id="tool-notes-btn">
+        <div class="list-item" id="tool-notes-btn" data-panel-btn>
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
             stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
             style="flex-shrink:0;opacity:0.5;">
@@ -1022,7 +1190,7 @@
           </svg>
           <span class="grow">Notes</span>
         </div>
-        <div class="list-item" id="tool-registry-btn">
+        <div class="list-item" id="tool-registry-btn" data-panel-btn>
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
             stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
             style="flex-shrink:0;opacity:0.5;">
@@ -1031,7 +1199,7 @@
           </svg>
           <span class="grow">Agent Registry</span>
         </div>
-        <div class="list-item" id="tool-capabilities-btn">
+        <div class="list-item" id="tool-capabilities-btn" data-panel-btn>
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
             stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
             style="flex-shrink:0;opacity:0.5;">
@@ -1040,7 +1208,7 @@
           </svg>
           <span class="grow">Capability Inspector</span>
         </div>
-        <div class="list-item" id="tool-tradingview-btn">
+        <div class="list-item" id="tool-tradingview-btn" data-panel-btn>
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
             stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
             style="flex-shrink:0;opacity:0.5;">
@@ -1049,7 +1217,7 @@
           </svg>
           <span class="grow">TradingView</span>
         </div>
-        <div class="list-item" id="tool-poller-status-btn">
+        <div class="list-item" id="tool-poller-status-btn" data-panel-btn>
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
             stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
             style="flex-shrink:0;opacity:0.5;">
@@ -1057,7 +1225,7 @@
           </svg>
           <span class="grow">Poller Status</span>
         </div>
-        <div class="list-item" id="tool-poller-dashboard-btn">
+        <div class="list-item" id="tool-poller-dashboard-btn" data-panel-btn>
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
             stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
             style="flex-shrink:0;opacity:0.5;">
@@ -1065,7 +1233,154 @@
           </svg>
           <span class="grow">Poller Dashboard</span>
         </div>
-        <div class="list-item" id="tool-task-history-btn">
+        <div class="list-item" id="tool-task-queue-inspector-btn" data-panel-btn>
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+            stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
+            style="flex-shrink:0;opacity:0.5;">
+            <rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 10h18"/>
+          </svg>
+          <span class="grow">Task Queue Inspector</span>
+        </div>
+        <div class="list-item" id="tool-worker-log-btn" data-panel-btn>
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+            stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
+            style="flex-shrink:0;opacity:0.5;">
+            <path d="M4 17l6-6-6-6"/><path d="M12 19h8"/>
+          </svg>
+          <span class="grow">Worker Logs</span>
+        </div>
+        <div class="list-item" id="tool-market-dashboard-btn" data-panel-btn>
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+            stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
+            style="flex-shrink:0;opacity:0.5;">
+            <path d="M3 3v18h18"/><path d="M18 17V9"/><path d="M13 17V5"/><path d="M8 17v-3"/>
+          </svg>
+          <span class="grow">Market Dashboard</span>
+        </div>
+        <div class="list-item" id="tool-jarvis-home-btn" data-panel-btn>
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+            stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
+            style="flex-shrink:0;opacity:0.5;">
+            <circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="4"/>
+          </svg>
+          <span class="grow">Jarvis Home</span>
+        </div>
+        <div class="list-item" id="tool-agent-diagnostics-btn" data-panel-btn>
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+            stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
+            style="flex-shrink:0;opacity:0.5;">
+            <circle cx="12" cy="12" r="3"/><path d="M12 1v6m0 6v6m11-7h-6m-6 0H1"/>
+          </svg>
+          <span class="grow">Agent Diagnostics</span>
+        </div>
+        <div class="list-item" id="tool-system-health-btn" data-panel-btn>
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+            stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
+            style="flex-shrink:0;opacity:0.5;">
+            <path d="M22 12h-4l-3 9L9 3l-3 9H2"/>
+          </svg>
+          <span class="grow">System Health</span>
+        </div>
+        <div class="list-item" id="tool-vault-graph-btn" data-panel-btn>
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+            stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
+            style="flex-shrink:0;opacity:0.5;">
+            <circle cx="5" cy="6" r="3"/><circle cx="5" cy="18" r="3"/><circle cx="19" cy="12" r="3"/>
+            <path d="M8 6h5a3 3 0 0 1 3 3v0M8 18h5a3 3 0 0 0 3-3v0"/>
+          </svg>
+          <span class="grow">Vault Graph</span>
+        </div>
+        <div class="list-item" id="tool-composer-btn" data-panel-btn>
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+            stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
+            style="flex-shrink:0;opacity:0.5;">
+            <path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z"/>
+          </svg>
+          <span class="grow">Vault Composer</span>
+        </div>
+        <div class="list-item" id="tool-risk-panel-btn" data-panel-btn>
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+            stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
+            style="flex-shrink:0;opacity:0.5;">
+            <path d="M3 3v18h18"/><path d="M18.7 8l-5.1 5.1-2.8-2.8L7 14"/>
+          </svg>
+          <span class="grow">Risk Panel</span>
+        </div>
+        <div class="list-item" id="tool-cross-search-btn" data-panel-btn>
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+            stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
+            style="flex-shrink:0;opacity:0.5;">
+            <circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/>
+          </svg>
+          <span class="grow">Cross Search</span>
+        </div>
+        <div class="list-item" id="tool-timeline-btn" data-panel-btn>
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+            stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
+            style="flex-shrink:0;opacity:0.5;">
+            <circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/>
+          </svg>
+          <span class="grow">Timeline</span>
+        </div>
+        <div class="list-item" id="tool-graph-explorer-v2-btn" data-panel-btn>
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+            stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
+            style="flex-shrink:0;opacity:0.5;">
+            <circle cx="6" cy="6" r="2"/><circle cx="18" cy="6" r="2"/><circle cx="12" cy="18" r="2"/>
+            <path d="M6 8v3l6 5M18 8v3l-6 5"/>
+          </svg>
+          <span class="grow">Graph Explorer v2</span>
+        </div>
+        <div class="list-item" id="tool-state-of-jarvis-btn" data-panel-btn>
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+            stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
+            style="flex-shrink:0;opacity:0.5;">
+            <rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/>
+            <rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/>
+          </svg>
+          <span class="grow">State of Jarvis</span>
+        </div>
+        <div class="list-item" id="tool-portfolio-panel-btn" data-panel-btn>
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+            stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
+            style="flex-shrink:0;opacity:0.5;">
+            <rect x="2" y="7" width="20" height="14" rx="2"/><path d="M16 3v4M8 3v4M2 11h20"/>
+          </svg>
+          <span class="grow">Portfolio</span>
+        </div>
+        <div class="list-item" id="tool-notifications-drawer-btn" data-panel-btn>
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+            stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
+            style="flex-shrink:0;opacity:0.5;">
+            <path d="M18 8a6 6 0 0 0-12 0c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/>
+          </svg>
+          <span class="grow">Notifications</span>
+        </div>
+        <div class="list-item" id="tool-tool-analytics-btn" data-panel-btn>
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+            stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
+            style="flex-shrink:0;opacity:0.5;">
+            <path d="M3 3v18h18"/><rect x="7" y="12" width="3" height="6"/><rect x="12" y="8" width="3" height="10"/><rect x="17" y="5" width="3" height="13"/>
+          </svg>
+          <span class="grow">Tool Analytics</span>
+        </div>
+        <div class="list-item" id="tool-task-timeline-btn" data-panel-btn>
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+            stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
+            style="flex-shrink:0;opacity:0.5;">
+            <line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/>
+          </svg>
+          <span class="grow">Task Timeline</span>
+        </div>
+        <div class="list-item" id="tool-process-table-btn" data-panel-btn>
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+            stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
+            style="flex-shrink:0;opacity:0.5;">
+            <rect x="3" y="3" width="18" height="18" rx="2"/><line x1="3" y1="9" x2="21" y2="9"/><line x1="9" y1="9" x2="9" y2="21"/>
+          </svg>
+          <span class="grow">Process Table</span>
+        </div>
+        <div class="list-item" id="tool-task-history-btn" data-panel-btn>
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
             stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
             style="flex-shrink:0;opacity:0.5;">
@@ -1073,7 +1388,7 @@
           </svg>
           <span class="grow">Task History</span>
         </div>
-        <div class="list-item" id="tool-tasks-btn">
+        <div class="list-item" id="tool-tasks-btn" data-panel-btn>
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
             stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
             style="flex-shrink:0;opacity:0.5;">
@@ -1087,7 +1402,7 @@
           <span id="assistant-notif-dot" class="sidebar-notif-dot" style="display:none"></span>
         </div>
 
-        <div class="list-item" id="tool-theme-btn">
+        <div class="list-item" id="tool-theme-btn" data-panel-btn>
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
             stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
             style="flex-shrink:0;opacity:0.5;">
@@ -2658,7 +2973,7 @@
 
 <!-- JARVIS arc reactor -- decorative HUD element, ported from jarvis.html.
      pointer-events:none so it never blocks clicks on whatever sits under it. -->
-<div id="jarvis-arc-reactor" style="position:fixed;bottom:8px;left:8px;width:52px;height:52px;z-index:40;pointer-events:none;">
+<div id="jarvis-arc-reactor" style="position:fixed;bottom:8px;right:8px;width:104px;height:104px;z-index:40;pointer-events:none;">
   <svg viewBox="0 0 52 52" fill="none" xmlns="http://www.w3.org/2000/svg">
     <defs>
       <radialGradient id="arc-core-grad" cx="50%" cy="50%" r="50%">
@@ -2699,5 +3014,182 @@
     <circle cx="26" cy="26" r="1" fill="white" opacity="0.8"/>
   </svg>
 </div>
+  <!-- Notifications Drawer -->
+  <div id="notifications-drawer" style="display:none;position:fixed;top:0;right:0;width:340px;height:100vh;background:#08111c;border-left:1px solid #1a3a4a;box-shadow:-4px 0 12px rgba(0,0,0,0.4);z-index:9998;flex-direction:column;">
+    <div style="display:flex;justify-content:space-between;align-items:center;padding:12px 14px;border-bottom:1px solid #1a3a4a;">
+      <span style="font-weight:600;font-size:13px;color:#4ad4e8;">Notifications</span>
+      <button id="notifications-drawer-close" style="background:transparent;border:none;color:#7a9aab;font-size:16px;cursor:pointer;">✖</button>
+    </div>
+    <div id="notifications-drawer-filterbar"></div>
+    <div id="notifications-drawer-list" style="flex:1;overflow-y:auto;padding:8px;"></div>
+    <div id="notifications-drawer-expanded" style="display:none;padding:10px;border-top:1px solid #1a3a4a;font-size:11px;"></div>
+    <div style="display:flex;gap:8px;padding:10px;border-top:1px solid #1a3a4a;">
+      <button id="notifications-drawer-clear" style="font-size:10px;padding:4px 8px;background:transparent;border:1px solid #1a3a4a;color:#7a9aab;border-radius:3px;cursor:pointer;">Clear all</button>
+      <button id="notifications-drawer-export" style="font-size:10px;padding:4px 8px;background:transparent;border:1px solid #1a3a4a;color:#7a9aab;border-radius:3px;cursor:pointer;">⬇ Export JSON</button>
+    </div>
+  </div>
+
+  <!-- Command Palette -->
+  <div id="command-palette-modal" class="hidden" style="position:fixed;inset:0;z-index:9999;align-items:flex-start;justify-content:center;padding-top:12vh;background:rgba(0,0,0,0.45);">
+    <div style="width:480px;max-width:92vw;background:#08111c;border:1px solid #1a3a4a;border-radius:8px;box-shadow:0 12px 32px rgba(0,0,0,0.45);overflow:hidden;">
+      <div id="cp-status" style="display:flex;gap:10px;padding:6px 16px;font-size:11px;color:#7a9aab;border-bottom:1px solid #1a3a4a;"></div>
+      <input id="cp-input" type="text" placeholder="Type a command\u2026" autocomplete="off" style="width:100%;box-sizing:border-box;padding:14px 16px;font-size:14px;background:#0a1420;color:#e6f7ff;border:none;border-bottom:1px solid #1a3a4a;outline:none;">
+      <div id="cp-quick-actions" style="display:flex;gap:6px;padding:8px 16px;border-bottom:1px solid #1a3a4a;overflow-x:auto;"></div>
+      <div id="cp-categories" style="display:flex;gap:6px;padding:8px 16px;border-bottom:1px solid #1a3a4a;overflow-x:auto;"></div>
+      <div id="cp-results" style="max-height:320px;overflow-y:auto;"></div>
+    </div>
+  </div>
+
+  <!-- Portfolio Panel -->
+  <div id="portfolio-panel-modal" class="hidden" style="position:fixed;inset:0;z-index:9997;align-items:flex-start;justify-content:center;padding-top:8vh;background:rgba(0,0,0,0.45);">
+    <div style="width:700px;max-width:94vw;max-height:80vh;background:#08111c;border:1px solid #1a3a4a;border-radius:8px;box-shadow:0 12px 32px rgba(0,0,0,0.45);overflow:hidden;display:flex;flex-direction:column;">
+      <div style="display:flex;justify-content:space-between;align-items:center;padding:12px 14px;border-bottom:1px solid #1a3a4a;">
+        <span style="font-weight:600;font-size:13px;color:#4ad4e8;">Portfolio</span>
+        <button id="close-portfolio-panel-modal" style="background:transparent;border:none;color:#7a9aab;font-size:16px;cursor:pointer;">✖</button>
+      </div>
+      <div id="portfolio-panel-body" style="flex:1;overflow-y:auto;"></div>
+      <div style="padding:8px 12px;border-top:1px solid #1a3a4a;font-size:10px;color:#7a9aab;text-align:center;">Read-only — trading tools are disabled on this server.</div>
+    </div>
+  </div>
+
+  <!-- System Health Panel -->
+  <div id="system-health-panel-modal" class="hidden" style="position:fixed;inset:0;z-index:9997;align-items:flex-start;justify-content:center;padding-top:8vh;background:rgba(0,0,0,0.45);">
+    <div style="width:600px;max-width:94vw;max-height:80vh;background:#08111c;border:1px solid #1a3a4a;border-radius:8px;box-shadow:0 12px 32px rgba(0,0,0,0.45);overflow:hidden;display:flex;flex-direction:column;">
+      <div style="display:flex;justify-content:space-between;align-items:center;padding:12px 14px;border-bottom:1px solid #1a3a4a;">
+        <span style="font-weight:600;font-size:13px;color:#4ad4e8;">System Health</span>
+        <button id="close-system-health-panel-modal" style="background:transparent;border:none;color:#7a9aab;font-size:16px;cursor:pointer;">✖</button>
+      </div>
+      <div id="system-health-panel-body" style="flex:1;overflow-y:auto;"></div>
+    </div>
+  </div>
+
+  <!-- Vault Graph Explorer Panel -->
+  <div id="vault-graph-panel-modal" class="hidden" style="position:fixed;inset:0;z-index:9996;align-items:flex-start;justify-content:center;padding-top:6vh;background:rgba(0,0,0,0.45);">
+    <div style="width:820px;max-width:96vw;max-height:84vh;background:#08111c;border:1px solid #1a3a4a;border-radius:8px;box-shadow:0 12px 32px rgba(0,0,0,0.45);overflow:hidden;display:flex;flex-direction:column;">
+      <div style="display:flex;justify-content:space-between;align-items:center;padding:12px 14px;border-bottom:1px solid #1a3a4a;">
+        <span style="font-weight:600;font-size:13px;color:#4ad4e8;">Vault Graph Explorer</span>
+        <button id="close-vault-graph-panel-modal" style="background:transparent;border:none;color:#7a9aab;font-size:16px;cursor:pointer;">✖</button>
+      </div>
+      <div style="padding:8px 12px;border-bottom:1px solid #1a3a4a;">
+        <input id="vault-graph-search" type="text" placeholder="Search notes by title or path…"
+          style="width:100%;background:#0a1420;color:#e6f7ff;border:1px solid #1a3a4a;border-radius:4px;padding:6px 10px;font-size:12px;outline:none;box-sizing:border-box;">
+      </div>
+      <div style="flex:1;display:flex;overflow:hidden;">
+        <div id="vault-graph-tags" style="width:160px;border-right:1px solid #1a3a4a;overflow-y:auto;padding:8px 4px;"></div>
+        <div id="vault-graph-canvas" style="flex:1;overflow-y:auto;"></div>
+        <div id="vault-graph-details" style="width:220px;border-left:1px solid #1a3a4a;overflow-y:auto;"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Vault Composer Panel -->
+  <div id="composer-panel-modal" class="hidden" style="position:fixed;inset:0;z-index:9995;align-items:flex-start;justify-content:center;padding-top:5vh;background:rgba(0,0,0,0.45);">
+    <div style="width:900px;max-width:96vw;max-height:88vh;background:#08111c;border:1px solid #1a3a4a;border-radius:8px;box-shadow:0 12px 32px rgba(0,0,0,0.45);overflow:hidden;display:flex;flex-direction:column;">
+      <div style="display:flex;justify-content:space-between;align-items:center;padding:12px 14px;border-bottom:1px solid #1a3a4a;">
+        <span style="font-weight:600;font-size:13px;color:#4ad4e8;">Vault Composer</span>
+        <button id="close-composer-panel-modal" style="background:transparent;border:none;color:#7a9aab;font-size:16px;cursor:pointer;">✖</button>
+      </div>
+      <div id="composer-status" style="padding:6px 14px;font-size:11px;color:#7a9aab;border-bottom:1px solid #1a3a4a;">No note loaded.</div>
+      <div style="flex:1;display:flex;overflow:hidden;">
+        <textarea id="composer-textarea" style="flex:1;background:#0a1420;color:#e6f7ff;border:none;border-right:1px solid #1a3a4a;padding:10px;font-family:monospace;font-size:12px;resize:none;outline:none;"></textarea>
+        <div id="composer-diff" style="flex:1;overflow-y:auto;background:#08111c;"></div>
+      </div>
+      <div style="padding:10px 14px;border-top:1px solid #1a3a4a;display:flex;justify-content:flex-end;gap:8px;">
+        <button id="composer-apply-btn" style="padding:6px 14px;font-size:12px;background:#1a3a4a;color:#4ad4e8;border:1px solid #4ad4e8;border-radius:4px;cursor:pointer;">Apply Changes</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Risk Panel -->
+  <div id="risk-panel-modal" class="hidden" style="position:fixed;inset:0;z-index:9994;align-items:flex-start;justify-content:center;padding-top:6vh;background:rgba(0,0,0,0.45);">
+    <div style="width:600px;max-width:96vw;max-height:86vh;background:#08111c;border:1px solid #1a3a4a;border-radius:8px;box-shadow:0 12px 32px rgba(0,0,0,0.45);overflow:hidden;display:flex;flex-direction:column;">
+      <div style="display:flex;justify-content:space-between;align-items:center;padding:12px 14px;border-bottom:1px solid #1a3a4a;">
+        <span style="font-weight:600;font-size:13px;color:#4ad4e8;">Risk Panel</span>
+        <div style="display:flex;gap:8px;align-items:center;">
+          <button id="risk-refresh-btn" style="padding:4px 10px;font-size:11px;background:#1a3a4a;color:#4ad4e8;border:1px solid #4ad4e8;border-radius:4px;cursor:pointer;">Refresh Now</button>
+          <button id="close-risk-panel-modal" style="background:transparent;border:none;color:#7a9aab;font-size:16px;cursor:pointer;">✖</button>
+        </div>
+      </div>
+      <div id="risk-panel-body" style="flex:1;overflow-y:auto;"></div>
+    </div>
+  </div>
+
+  <!-- Cross Search Panel -->
+  <div id="cross-search-panel-modal" class="hidden" style="position:fixed;inset:0;z-index:9993;align-items:flex-start;justify-content:center;padding-top:6vh;background:rgba(0,0,0,0.45);">
+    <div style="width:600px;max-width:96vw;max-height:80vh;background:#08111c;border:1px solid #1a3a4a;border-radius:8px;box-shadow:0 12px 32px rgba(0,0,0,0.45);overflow:hidden;display:flex;flex-direction:column;">
+      <div style="display:flex;justify-content:space-between;align-items:center;padding:12px 14px;border-bottom:1px solid #1a3a4a;">
+        <span style="font-weight:600;font-size:13px;color:#4ad4e8;">Vault + Risk: Cross Search</span>
+        <button id="close-cross-search-panel-modal" style="background:transparent;border:none;color:#7a9aab;font-size:16px;cursor:pointer;">✖</button>
+      </div>
+      <div style="padding:8px 12px;border-bottom:1px solid #1a3a4a;">
+        <input id="cross-search-input" type="text" placeholder="Search vault notes, tags, regimes, factors, risk events, suggestions…"
+          style="width:100%;background:#0a1420;color:#e6f7ff;border:1px solid #1a3a4a;border-radius:4px;padding:6px 10px;font-size:12px;outline:none;box-sizing:border-box;">
+      </div>
+      <div id="cross-search-body" style="flex:1;overflow-y:auto;"></div>
+    </div>
+  </div>
+
+  <!-- State of Jarvis Panel -->
+  <div id="state-of-jarvis-panel-modal" class="hidden" style="position:fixed;inset:0;z-index:9992;align-items:flex-start;justify-content:center;padding-top:5vh;background:rgba(0,0,0,0.45);">
+    <div style="width:600px;max-width:96vw;max-height:88vh;background:#08111c;border:1px solid #1a3a4a;border-radius:8px;box-shadow:0 12px 32px rgba(0,0,0,0.45);overflow:hidden;display:flex;flex-direction:column;">
+      <div style="display:flex;justify-content:space-between;align-items:center;padding:12px 14px;border-bottom:1px solid #1a3a4a;">
+        <span style="font-weight:600;font-size:13px;color:#4ad4e8;">State of Jarvis</span>
+        <button id="close-state-of-jarvis-panel-modal" style="background:transparent;border:none;color:#7a9aab;font-size:16px;cursor:pointer;">✖</button>
+      </div>
+      <div id="state-of-jarvis-body" style="flex:1;overflow-y:auto;"></div>
+    </div>
+  </div>
+
+  <!-- Agent Task Detail Panel -->
+  <div id="agent-task-detail-panel-modal" class="hidden" style="position:fixed;inset:0;z-index:9991;align-items:flex-start;justify-content:center;padding-top:6vh;background:rgba(0,0,0,0.45);">
+    <div style="width:600px;max-width:96vw;max-height:80vh;background:#08111c;border:1px solid #1a3a4a;border-radius:8px;box-shadow:0 12px 32px rgba(0,0,0,0.45);overflow:hidden;display:flex;flex-direction:column;">
+      <div style="display:flex;justify-content:space-between;align-items:center;padding:12px 14px;border-bottom:1px solid #1a3a4a;">
+        <span style="font-weight:600;font-size:13px;color:#4ad4e8;">Agent Task Detail</span>
+        <button id="close-agent-task-detail-panel-modal" style="background:transparent;border:none;color:#7a9aab;font-size:16px;cursor:pointer;">✖</button>
+      </div>
+      <div id="agent-task-detail-body" style="flex:1;overflow-y:auto;"></div>
+    </div>
+  </div>
+
+  <!-- MCP Server Detail Panel -->
+  <div id="mcp-server-detail-panel-modal" class="hidden" style="position:fixed;inset:0;z-index:9990;align-items:flex-start;justify-content:center;padding-top:6vh;background:rgba(0,0,0,0.45);">
+    <div style="width:600px;max-width:96vw;max-height:80vh;background:#08111c;border:1px solid #1a3a4a;border-radius:8px;box-shadow:0 12px 32px rgba(0,0,0,0.45);overflow:hidden;display:flex;flex-direction:column;">
+      <div style="display:flex;justify-content:space-between;align-items:center;padding:12px 14px;border-bottom:1px solid #1a3a4a;">
+        <span style="font-weight:600;font-size:13px;color:#4ad4e8;">MCP Server Detail</span>
+        <button id="close-mcp-server-detail-panel-modal" style="background:transparent;border:none;color:#7a9aab;font-size:16px;cursor:pointer;">✖</button>
+      </div>
+      <div id="mcp-server-detail-body" style="flex:1;overflow-y:auto;"></div>
+    </div>
+  </div>
+
+  <!-- Unified Timeline Panel -->
+  <div id="timeline-panel-modal" class="hidden" style="position:fixed;inset:0;z-index:9989;align-items:flex-start;justify-content:center;padding-top:5vh;background:rgba(0,0,0,0.45);">
+    <div style="width:600px;max-width:96vw;max-height:88vh;background:#08111c;border:1px solid #1a3a4a;border-radius:8px;box-shadow:0 12px 32px rgba(0,0,0,0.45);overflow:hidden;display:flex;flex-direction:column;">
+      <div style="display:flex;justify-content:space-between;align-items:center;padding:12px 14px;border-bottom:1px solid #1a3a4a;">
+        <span style="font-weight:600;font-size:13px;color:#4ad4e8;">Unified Timeline (Risk + Agent Tasks)</span>
+        <button id="close-timeline-panel-modal" style="background:transparent;border:none;color:#7a9aab;font-size:16px;cursor:pointer;">✖</button>
+      </div>
+      <div id="timeline-body" style="flex:1;overflow-y:auto;"></div>
+    </div>
+  </div>
+
+  <!-- Graph Explorer v2 Panel -->
+  <div id="graph-explorer-v2-panel-modal" class="hidden" style="position:fixed;inset:0;z-index:9988;align-items:flex-start;justify-content:center;padding-top:5vh;background:rgba(0,0,0,0.45);">
+    <div style="width:600px;max-width:96vw;max-height:88vh;background:#08111c;border:1px solid #1a3a4a;border-radius:8px;box-shadow:0 12px 32px rgba(0,0,0,0.45);overflow:hidden;display:flex;flex-direction:column;">
+      <div style="display:flex;justify-content:space-between;align-items:center;padding:12px 14px;border-bottom:1px solid #1a3a4a;">
+        <span style="font-weight:600;font-size:13px;color:#4ad4e8;">Graph Explorer v2</span>
+        <button id="close-graph-explorer-v2-panel-modal" style="background:transparent;border:none;color:#7a9aab;font-size:16px;cursor:pointer;">✖</button>
+      </div>
+      <div id="graph-explorer-v2-filterbar" style="padding:8px 12px;border-bottom:1px solid #1a3a4a;"></div>
+      <div id="graph-explorer-v2-diffbar" style="padding:8px 12px;border-bottom:1px solid #1a3a4a;">
+        <button id="graph-explorer-v2-export-btn" style="padding:4px 8px;font-size:10px;background:#1a3a4a;color:#4ad4e8;border:1px solid #4ad4e8;border-radius:4px;cursor:pointer;">Export Visible Graph</button>
+      </div>
+      <div id="graph-explorer-v2-export-view" class="hidden" style="padding:8px 12px;border-bottom:1px solid #1a3a4a;max-height:200px;overflow-y:auto;">
+        <pre id="graph-explorer-v2-export-text" style="font-size:10px;color:#e6f7ff;white-space:pre-wrap;margin:0;"></pre>
+      </div>
+      <div id="graph-explorer-v2-body" style="flex:1;overflow-y:auto;"></div>
+    </div>
+  </div>
+
 </body>
 </html>

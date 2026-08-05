@@ -29,6 +29,9 @@ export const THEMES = {
                             inputBg: '#2f2f2f', brandColor: '#ffffff', brandMixTo: '#ffffff' } },
   claude:     { bg:'#262624', fg:'#f5f4f0', panel:'#30302e', border:'#4a4a47', red:'#c6613f' },
   cute:       { bg:'#fff0f5', fg:'#d4608a', panel:'#fff8fa', border:'#f0c0d0', red:'#ff6b9d' },
+  hud:        { bg:'#000814', fg:'#e0faff', panel:'rgba(0, 20, 40, 0.6)', border:'#00bfff', red:'#ff4d4d' },
+  solar:      { bg:'#1e1b16', fg:'#f7e7c1', panel:'#2a2620', border:'#d4a259', red:'#d45d5d' },
+  mono:       { bg:'#000000', fg:'#ffffff', panel:'#111111', border:'#444444', red:'#ff3333' },
 };
 
 const DEFAULT_THEME = 'dark';
@@ -1042,6 +1045,63 @@ export function initThemeUI() {
       _saveFull('custom', base);
       syncAdvancedPickers(base);
       syncResetButtons();
+    });
+  }
+
+  // Export/Import: real, minimal serialization of exactly what save()/getSaved()
+  // already track (colors, font, density, bg pattern/effects, frosted) --
+  // no fabricated "harmony state" object; harmony is a one-time generator,
+  // not persisted state, confirmed directly in generateHarmonyColors().
+  const exportBtn = document.getElementById('theme-export-btn');
+  if (exportBtn) {
+    exportBtn.addEventListener('click', () => {
+      const state = getSaved();
+      if (!state) { alert('No saved theme to export yet.'); return; }
+      const blob = new Blob([JSON.stringify(state, null, 2)], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `jarvis-theme-${(state.name || 'custom').replace(/[^a-z0-9-]/gi, '_')}.json`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    });
+  }
+
+  const importBtn = document.getElementById('theme-import-btn');
+  const importFile = document.getElementById('theme-import-file');
+  if (importBtn && importFile) {
+    importBtn.addEventListener('click', () => importFile.click());
+    importFile.addEventListener('change', async () => {
+      const file = importFile.files && importFile.files[0];
+      importFile.value = ''; // allow re-selecting the same file later
+      if (!file) return;
+      let parsed;
+      try {
+        parsed = JSON.parse(await file.text());
+      } catch (e) {
+        alert('Invalid theme file: not valid JSON.');
+        return;
+      }
+      const c = parsed.colors;
+      if (!c || !c.bg || !c.fg || !c.panel || !c.border || !c.red) {
+        alert('Invalid theme file: missing required color fields.');
+        return;
+      }
+      applyColors(c);
+      applyFontDensity(parsed.font, parsed.density);
+      applyBgEffectColor(parsed.bgEffectColor);
+      applyBgEffectIntensity(parsed.bgEffectIntensity !== undefined ? parsed.bgEffectIntensity : 1);
+      applyBgEffectSize(parsed.bgEffectSize !== undefined ? parsed.bgEffectSize : 1);
+      applyFrostedGlass(!!parsed.frosted);
+      applyBgPattern(parsed.bgPattern || 'none');
+      save(parsed.name || 'imported', c, {
+        font: parsed.font, density: parsed.density, bgPattern: parsed.bgPattern,
+        bgEffectColor: parsed.bgEffectColor, bgEffectIntensity: parsed.bgEffectIntensity,
+        bgEffectSize: parsed.bgEffectSize, frosted: parsed.frosted,
+      });
+      syncPickers(c);
     });
   }
 

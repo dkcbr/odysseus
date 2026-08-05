@@ -244,6 +244,78 @@ class NativeMemoryProvider(MemoryProvider):
             self.memory_vector.remove(deleted_id)
         return True
 
+    @staticmethod
+    def _normalize_topic(topic: str) -> str:
+        """Real, defensive normalization so near-variants of the same topic
+        still collide correctly -- e.g. "NVDA Strategy", "nvda-strategy",
+        and "NVDA__STRATEGY" must all resolve to the same key, or
+        replace_fact() would silently create parallel entries instead of
+        superseding, recreating the exact drift problem this was built to
+        prevent. Lowercase, collapse whitespace/hyphens/repeated
+        underscores to single underscores, trim leading/trailing ones.
+        """
+        import re
+        t = topic.strip().lower()
+        t = re.sub(r"[\s\-]+", "_", t)
+        t = re.sub(r"_+", "_", t)
+        return t.strip("_")
+
+    async def replace_fact(
+        self,
+        topic: str,
+        new_text: str,
+        *,
+        owner: Optional[str] = None,
+        category: str = "fact",
+        source: str = "user",
+    ) -> MemoryRecord:
+        """Replace all entries tagged with `topic` (stored in metadata) with a
+        single new entry -- the supersede semantics MemoryVectorStore.add()
+        itself never provides (it's pure append, silently skipping if an ID
+        already exists; confirmed no overwrite/versioning path exists
+        anywhere in the write call sites). Use this for strategy-level facts
+        (e.g. "nvda_strategy", "primary_investment_mission") that are
+        expected to change over time -- plain remember() is still correct
+        for one-off events/logs/observations that never need superseding.
+
+        `topic` is normalized defensively (see _normalize_topic) so
+        near-variants collide correctly rather than silently creating
+        parallel entries.
+        """
+        topic = self._normalize_topic(topic)
+        memories = self.memory_manager.load_all()
+        remaining = []
+        removed_ids = []
+        for m in memories:
+            m_topic = (m.get("metadata") or {}).get("topic")
+            m_topic = self._normalize_topic(m_topic) if m_topic else m_topic
+            if m_topic == topic and (not owner or m.get("owner") == owner):
+                removed_ids.append(m["id"])
+            else:
+                remaining.append(m)
+
+        if self._vector_available():
+            for rid in removed_ids:
+                try:
+                    self.memory_vector.remove(rid)
+                except Exception:
+                    pass
+
+        entry = self.memory_manager.add_entry(
+            new_text,
+            source=source,
+            category=category,
+            owner=owner,
+        )
+        entry["metadata"] = {"topic": topic}
+        remaining.append(entry)
+        self.memory_manager.save(remaining)
+
+        if self._vector_available():
+            self.memory_vector.add(entry["id"], entry["text"])
+
+        return self._to_record(entry)
+
     def _vector_available(self) -> bool:
         return bool(self.memory_vector and getattr(self.memory_vector, "healthy", True))
 
