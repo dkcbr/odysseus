@@ -41324,14 +41324,18 @@ body.theme-frosted .modal {
    source in jarvis_home.js (48 -> 56) for crisp SVG rendering, not via
    CSS transform:scale(). */
 :root{
-  --jh-hub-gap: 10px;
   --jh-card-glow-color: rgba(0,200,255,0.06);
   --jh-card-glow-blur: 10px;
 }
 
+/* 2026-08-06: margin-bottom removed -- confirmed via real math that the
+   grid's existing uniform gap:16px (see .jarvis-home-grid) already
+   provides consistent spacing between every section; adding a separate
+   10px margin here made this one junction 26px total, inconsistent with
+   the rest of the page. Reverted to let the grid's own gap be the single
+   source of truth for this spacing. */
 .jarvis-home-zone-hub {
   align-items: flex-start;
-  margin-bottom: var(--jh-hub-gap);
 }
 
 .jarvis-card, .jarvis-gauge-card {
