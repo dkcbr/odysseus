@@ -231,6 +231,7 @@ _AGENT_RULES = """\
 - After a tool fails, retry with a concrete fix or state what is blocking you.
 - Finish only when the user's concrete request is actually done, or clearly state that you are blocked.
 - User identity facts/preferences ("my name is X", "call me X", "I live in X") use `manage_memory`, not contacts.
+- When reporting data returned by ANY tool (financial, market, file, or otherwise), state ONLY figures and facts literally present in that tool's output. Never add prices, fundamentals (market cap, EPS, revenue, etc.), targets, or other specific numbers from general/outside knowledge, and never invent a source name (e.g. a website or provider) that did not appear in the tool result. If the tool output doesn't cover something the user asked about, say so explicitly instead of filling the gap.
 """
 
 _API_AGENT_RULES = """\
@@ -244,6 +245,7 @@ _API_AGENT_RULES = """\
 - After a tool fails, retry with a concrete fix or state what is blocking you.
 - Finish only when the user's concrete request is actually done, or clearly state that you are blocked.
 - User identity facts/preferences ("my name is X", "call me X", "I live in X") use `manage_memory`, not contacts.
+- When reporting data returned by ANY tool (financial, market, file, or otherwise), state ONLY figures and facts literally present in that tool's output. Never add prices, fundamentals (market cap, EPS, revenue, etc.), targets, or other specific numbers from general/outside knowledge, and never invent a source name (e.g. a website or provider) that did not appear in the tool result. If the tool output doesn't cover something the user asked about, say so explicitly instead of filling the gap.
 """
 
 _LINK_RULES = """\
@@ -694,7 +696,17 @@ _ADMIN_SCHEMA_NAMES = frozenset([
     "create_session", "list_sessions", "send_to_session", "pipeline",
     "ask_teacher", "list_models", "search_chats",
 ])
-_TOOL_SELECTION_TIMEOUT_SECONDS = 1.5
+# Real bug fixed here: 1.5s was too tight for MCP tool reindexing right
+# after a restart (multiple servers reconnecting and needing fresh
+# embeddings at once) -- confirmed via live logs showing "MCP tool
+# indexing exceeded 1.5s; continuing without reindex" immediately after a
+# container restart, which silently left the tool index missing an
+# entire MCP server's tools (get_portfolio/get_accounts both absent from
+# retrieval), not just under-ranked. The mcp_generation check means
+# reindexing only actually runs once per generation change, not on every
+# message, so a more generous timeout only costs time on that first
+# post-restart query, not on ongoing normal chat.
+_TOOL_SELECTION_TIMEOUT_SECONDS = 8.0
 
 
 def _is_ollama_openai_compat_url(endpoint_url: str) -> bool:
@@ -3333,10 +3345,24 @@ async def stream_agent_loop(
                     and t.get("name") not in disabled_tools
                 ]
         else:
-            # Local: only MCP schemas when message suggests MCP tool usage
-            _last_content = _last_user.lower()
-            _wants_mcp = any(kw in _last_content for kw in _MCP_KEYWORDS)
-            all_tool_schemas = mcp_schemas if (_wants_mcp and mcp_schemas) else []
+            # Local: filter MCP schemas by the same RAG-selected relevant_tools
+            # used for API models, instead of all-or-nothing keyword matching.
+            # Sending all 24+ real MCP tool schemas at once to a 14B local
+            # model causes it to narrate alongside tool calls instead of
+            # producing clean, schema-only output -- confirmed by direct
+            # testing against the live Ollama endpoint (reproduced with 24
+            # synthetic tools, persisted even with an explicit large num_ctx,
+            # ruling out context-window size as the cause). This is a tool-
+            # count/model-capability issue, not a context or config issue.
+            if _relevant_tools:
+                all_tool_schemas = [
+                    s for s in mcp_schemas
+                    if s.get("function", {}).get("name") in _relevant_tools
+                ]
+            else:
+                _last_content = _last_user.lower()
+                _wants_mcp = any(kw in _last_content for kw in _MCP_KEYWORDS)
+                all_tool_schemas = mcp_schemas if (_wants_mcp and mcp_schemas) else []
         agent_stream_timeout = int(get_setting("agent_stream_timeout_seconds", 300) or 300)
 
         _tool_names_sent = [t.get("function", {}).get("name") for t in (all_tool_schemas or []) if t.get("function")]

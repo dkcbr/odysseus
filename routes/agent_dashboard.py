@@ -10,6 +10,7 @@ call record_agent_call(...) after each invocation (see the companion edit
 to mcp_routes.py).
 """
 
+import json
 import time
 from collections import deque
 from typing import Any
@@ -119,3 +120,19 @@ async def get_agent_history(server_name: str, request: Request, limit: int = 50)
         "failures": len(matching) - successes,
         "calls": matching,
     }
+
+
+@router.get("/status")
+async def get_agent_status(request: Request):
+    """Real, read-only passthrough of the supervisor's live health state
+    (written every 5s by agent_supervisor.py on the host, visible here via
+    the existing ./data:/app/data mount -- no new plumbing required)."""
+    require_admin(request)
+    state_file = "/app/data/supervisor_state.json"
+    try:
+        with open(state_file, "r") as f:
+            return json.load(f)
+    except FileNotFoundError:
+        return {"error": "agent_state_unavailable", "detail": "supervisor_state.json not found"}
+    except json.JSONDecodeError as e:
+        return {"error": "agent_state_unavailable", "detail": f"malformed JSON: {e}"}

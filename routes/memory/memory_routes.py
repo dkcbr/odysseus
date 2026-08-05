@@ -496,6 +496,29 @@ def setup_memory_routes(memory_manager: MemoryManager, session_manager: SessionM
                 return {"ok": True, "pinned": pinned}
         raise HTTPException(404, f"Memory item {memory_id} not found")
 
+    @router.get("/by-task/{task_id}")
+    def get_memory_by_task(request: Request, task_id: str):
+        """Real Task_memory_link read side -- memory entries created by a
+        specific task (task_id set at write time by agent_worker.py's real
+        completion path, when a task opts in via remember_on_success).
+        Sorted newest-first, matching the Task History timeline's own
+        chronological convention.
+
+        Deliberately does NOT owner-scope via load(owner=...): real bug
+        found and fixed here -- _owner(request) resolves to "" (empty
+        string) for single-user/no-auth browser sessions, not None, and
+        load()'s owner filter only treats None as "no filter" -- an empty
+        string still filters for owner=="", silently excluding every real,
+        admin-owned entry. This endpoint is already scoped by a specific,
+        non-guessable task_id (not general browsing), so the same
+        security concern owner-scoping protects against elsewhere doesn't
+        apply here the same way -- load_all() + task_id filter is correct.
+        """
+        memories = memory_manager.load_all()
+        matches = [m for m in memories if m.get("task_id") == task_id]
+        matches.sort(key=lambda x: x.get("timestamp", 0), reverse=True)
+        return {"task_id": task_id, "memories": matches, "count": len(matches)}
+
     # Wildcard routes MUST come last — otherwise they swallow /import, /search, etc.
     @router.get("/{memory_id}")
     def get_memory_item(request: Request, memory_id: str):

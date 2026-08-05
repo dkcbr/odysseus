@@ -382,6 +382,166 @@ def providers_health(endpoints: List[Dict[str, Any]],
     return _rollup_items("providers", "endpoint(s)", per_endpoint, key="endpoints")
 
 
+def default_model_config_health(owner: str = "admin") -> Dict[str, Any]:
+    """Real, cheap (no network call) Tier-1 check: confirms the stored
+    default_model/default_endpoint_id prefs and what resolve_endpoint()
+    actually returns are internally consistent. This is a genuinely
+    different, complementary check from default_model_health() below --
+    it catches config-level bugs (stale endpoint id, resolver falling
+    through to an unrelated default, a deleted endpoint row) cheaply and
+    safely enough to run on every diagnostics view. It does NOT catch the
+    kind of drift that already happened once (correct config, but the
+    actual completion silently failing due to credits) -- that class of
+    bug is real and can only be caught by an actual API call, which is
+    exactly why default_model_health() exists as a separate, deliberately
+    NOT-auto-run, real Tier-2 check.
+    """
+    try:
+        from src.settings import load_settings
+        from src.endpoint_resolver import resolve_endpoint
+        from core.database import SessionLocal, ModelEndpoint
+    except Exception as e:
+        return _svc("default_model_config", DOWN, "Could not import config/resolver.",
+                    error=_classify_error(e))
+
+    try:
+        settings = load_settings() or {}
+        intended_model = settings.get("default_model") or ""
+        intended_endpoint_id = settings.get("default_endpoint_id") or ""
+
+        db = SessionLocal()
+        try:
+            row = db.query(ModelEndpoint).filter(
+                ModelEndpoint.id == intended_endpoint_id).first()
+            intended_base_url = row.base_url if row else ""
+        finally:
+            db.close()
+
+        resolved_url, resolved_model, _headers = resolve_endpoint("default", owner=owner)
+    except Exception as e:
+        return _svc("default_model_config", DOWN, "Config/resolution check failed.",
+                    error=_classify_error(e))
+
+    issues = []
+    if not intended_model or not intended_endpoint_id:
+        issues.append("No default_model/default_endpoint_id configured.")
+    if intended_model and resolved_model != intended_model:
+        issues.append(
+            f"Resolved model '{resolved_model}' does not match configured "
+            f"default_model '{intended_model}'.")
+    if intended_base_url and resolved_url and intended_base_url.rstrip("/") not in resolved_url:
+        issues.append(
+            f"Resolved URL does not correspond to the configured endpoint "
+            f"'{_safe_url(intended_base_url)}'.")
+    if intended_endpoint_id and not row:
+        issues.append(
+            f"Configured default_endpoint_id '{intended_endpoint_id}' does "
+            f"not match any real, existing endpoint row.")
+
+    if issues:
+        return _svc("default_model_config", DEGRADED, " ".join(issues),
+                    intended_model=intended_model, resolved_model=resolved_model,
+                    resolved_url=_safe_url(resolved_url))
+
+    return _svc("default_model_config", OK,
+                f"Default model config is internally consistent ('{resolved_model}').",
+                resolved_model=resolved_model, resolved_url=_safe_url(resolved_url))
+
+
+def default_model_health(owner: str = "admin") -> Dict[str, Any]:
+    """Real, two-tier verification that Odysseus's default chat model is
+    genuinely the one actually in use -- not just reachable (that's what
+    providers_health already checks). This closes the exact gap that let
+    the OpenRouter->Anthropic drift sit undetected for 24 hours: the config
+    values looked correct the whole time, but the resolved endpoint/model
+    the real chat flow was using had silently reverted.
+
+    Tier 1 (cheap, always runs): resolves the real default endpoint/model
+    via the same resolve_endpoint() used by the live chat flow, with the
+    real owner -- confirmed tonight that omitting owner silently falls
+    through to an unrelated global default, which is exactly the kind of
+    false-negative this check must not have.
+
+    Tier 2 (real API call, only on demand / scheduled call from outside):
+    this function itself always performs the real completion -- callers
+    that want a cheap-only check should not call this function at all and
+    should just compare resolve_endpoint()'s output to the stored prefs.
+    """
+    try:
+        from src.endpoint_resolver import resolve_endpoint
+    except Exception as e:
+        return _svc("default_model", DOWN, "Could not import endpoint resolver.",
+                    error=_classify_error(e))
+
+    try:
+        url, model, headers = resolve_endpoint("default", owner=owner)
+    except Exception as e:
+        return _svc("default_model", DOWN, "Endpoint resolution failed.",
+                    error=_classify_error(e))
+
+    if not url or not model:
+        return _svc("default_model", DOWN,
+                    "No default model/endpoint resolved for this owner.",
+                    resolved_model=model, resolved_url=_safe_url(url))
+
+    import json
+    import urllib.request
+    import urllib.error
+
+    is_anthropic_style = "api.anthropic.com" in url or "messages" in url
+    try:
+        if is_anthropic_style:
+            payload = {
+                "model": model,
+                "max_tokens": 5,
+                "messages": [{"role": "user", "content": "Reply with exactly the word: ok"}],
+            }
+            req_headers = dict(headers or {})
+            req_headers.setdefault("anthropic-version", "2023-06-01")
+            req_headers.setdefault("Content-Type", "application/json")
+        else:
+            payload = {
+                "model": model,
+                "max_tokens": 5,
+                "messages": [{"role": "user", "content": "Reply with exactly the word: ok"}],
+            }
+            req_headers = dict(headers or {})
+            req_headers.setdefault("Content-Type", "application/json")
+
+        req = urllib.request.Request(url, data=json.dumps(payload).encode(),
+                                     headers=req_headers)
+        resp = urllib.request.urlopen(req, timeout=20)
+        data = json.loads(resp.read().decode())
+    except urllib.error.HTTPError as e:
+        try:
+            body = e.read().decode()[:300]
+        except Exception:
+            body = str(e)
+        return _svc("default_model", DOWN,
+                    f"Real completion call failed (HTTP {e.code}) -- likely a "
+                    f"credit/balance or auth issue, not just unreachable.",
+                    resolved_model=model, resolved_url=_safe_url(url),
+                    http_status=e.code, error_body=body)
+    except Exception as e:
+        return _svc("default_model", DOWN, "Real completion call failed.",
+                    resolved_model=model, resolved_url=_safe_url(url),
+                    error=_classify_error(e))
+
+    # Confirm the response actually reports back the model we intended --
+    # not just that *some* call to *some* endpoint succeeded.
+    returned_model = data.get("model") or ""
+    if returned_model and returned_model != model:
+        return _svc("default_model", DEGRADED,
+                    f"Completion succeeded but returned model '{returned_model}' "
+                    f"does not match intended default '{model}' -- possible drift.",
+                    resolved_model=model, returned_model=returned_model,
+                    resolved_url=_safe_url(url))
+
+    return _svc("default_model", OK,
+                f"Default model '{model}' resolved correctly and completed a real request.",
+                resolved_model=model, resolved_url=_safe_url(url))
+
+
 def _rollup_items(name: str, noun: str, items: List[Dict[str, Any]],
                   key: str = "accounts") -> Dict[str, Any]:
     """Shared ok/degraded/down rollup for a list of per-item probe results."""
@@ -405,6 +565,65 @@ def _rollup(services: List[Dict[str, Any]]) -> str:
         if sev is not None and sev > _SEVERITY[worst]:
             worst = s["status"]
     return worst
+
+
+# Real, module-level state for alert throttling -- prevents repeated ntfy
+# pushes every time collect_service_health() runs (e.g. every diagnostics
+# panel view) while a subsystem stays down for hours. Resets to "silent"
+# once a subsystem recovers to ok, so a genuine new failure still alerts.
+_last_alerted_status: Dict[str, str] = {}
+
+# Real, module-level state for the unified system-health transition alert
+# (distinct from per-subsystem throttling above).
+_last_system_health: Optional[str] = None
+
+
+def _real_ntfy_base_url() -> Optional[str]:
+    """Find the real, configured ntfy integration's base_url (the actual
+    topic URL, used as-is -- unlike the Reminders test route, this is not
+    overridden by reminder_ntfy_topic, since health alerts are a genuinely
+    separate use case from reminders)."""
+    try:
+        from src.integrations import load_integrations
+        for i in load_integrations() or []:
+            if (i.get("preset") == "ntfy" and i.get("enabled", True)
+                    and i.get("base_url")):
+                return i["base_url"]
+    except Exception as e:
+        logger.debug(f"service_health: ntfy integration lookup failed: {e}")
+    return None
+
+
+async def _alert_ntfy(subsystem_name: str, status: str, detail: str) -> None:
+    """Send a real ntfy push using the same httpx pattern already confirmed
+    working in routes/auth_routes.py's integration test endpoint -- no
+    invented helper module, since none exists in the real codebase."""
+    base_url = _real_ntfy_base_url()
+    if not base_url:
+        logger.debug("service_health: no configured ntfy integration, skipping alert")
+        return
+    try:
+        import httpx
+        async with httpx.AsyncClient(timeout=8.0) as client:
+            await client.post(
+                base_url,
+                content=f"[Odysseus Health] {subsystem_name} is {status}: {detail}",
+                headers={"Title": "Odysseus health alert", "Priority": "high",
+                        "Tags": "warning"},
+            )
+    except Exception as e:
+        logger.debug(f"service_health: ntfy alert send failed: {e}")
+
+
+async def _maybe_alert(name: str, result: Dict[str, Any]) -> None:
+    """Alert on DOWN/DEGRADED, throttled so a subsystem stuck down doesn't
+    re-alert on every collect_service_health() call -- only fires again if
+    the status actually changes (including recovering then failing again)."""
+    status = result.get("status")
+    prev = _last_alerted_status.get(name)
+    if status in (DOWN, DEGRADED) and prev != status:
+        await _alert_ntfy(name, status, result.get("detail", ""))
+    _last_alerted_status[name] = status
 
 
 def _gather_inputs() -> Dict[str, Any]:
@@ -481,12 +700,13 @@ async def collect_service_health(rag_manager: Any = None,
     # ChromaDB is in-process and synchronous (just reads flags).
     chroma = chromadb_health(rag_manager, memory_vector)
 
-    names = ["searxng", "ntfy", "email", "providers"]
+    names = ["searxng", "ntfy", "email", "providers", "default_model_config"]
     coros = [
         _run_subsystem("searxng", searxng_health, settings),
         _run_subsystem("ntfy", ntfy_health, inputs["integrations"], settings),
         _run_subsystem("email", email_health, inputs["accounts"]),
         _run_subsystem("providers", providers_health, inputs["endpoints"]),
+        _run_subsystem("default_model_config", default_model_config_health),
     ]
     try:
         results = await asyncio.wait_for(asyncio.gather(*coros),
@@ -497,8 +717,77 @@ async def collect_service_health(rag_manager: Any = None,
                    for n in names]
 
     services = [chroma, *results]
+
+    # Real ntfy alerting: fires on any DOWN/DEGRADED subsystem, throttled
+    # by _maybe_alert so a subsystem stuck down for hours doesn't re-alert
+    # on every call. Uses the real, confirmed _svc() dict shape (name/
+    # status/detail keys), not an invented result object.
+    for svc in services:
+        await _maybe_alert(svc["name"], svc)
+
+    overall = _rollup(services)
+
+    # Real, live module-level provider references (src.ai_interaction's
+    # _memory_manager/_memory_vector, populated by set_memory_manager() at
+    # real app startup) -- imported at call time, not import time, since a
+    # top-level "from ... import _memory_manager" would capture whatever
+    # value existed before startup finished setting it (i.e. None).
+    # Shared by both fact writes below.
+    provider = None
+    try:
+        import src.ai_interaction as _ai
+        from src.memory_provider import NativeMemoryProvider
+        if _ai._memory_manager is not None:
+            provider = NativeMemoryProvider(_ai._memory_manager, _ai._memory_vector)
+    except Exception as e:
+        logger.debug(f"service_health: provider init failed: {e}")
+
+    if provider is not None:
+        # Real, durable unified system-health fact -- written every call,
+        # regardless of status, via the same real replace_fact() supersede
+        # semantics used by last_health_ok below. _rollup() (existing,
+        # already computed above) is the real severity aggregation; no
+        # separate computation needed.
+        try:
+            await provider.replace_fact(
+                "system_health",
+                f"Odysseus unified system health is '{overall}' as of "
+                f"{datetime.now(timezone.utc).isoformat()}.",
+                category="system_state",
+                source="service_health",
+            )
+        except Exception as e:
+            logger.debug(f"service_health: system_health fact write failed: {e}")
+
+        if overall == OK:
+            # Real, durable "last known healthy" fact -- replace_fact()
+            # keeps this a single, current entry rather than piling up a
+            # new one on every healthy check.
+            try:
+                await provider.replace_fact(
+                    "last_health_ok",
+                    f"All Odysseus subsystems last confirmed healthy at "
+                    f"{datetime.now(timezone.utc).isoformat()}.",
+                    category="system_state",
+                    source="service_health",
+                )
+            except Exception as e:
+                logger.debug(f"service_health: last_health_ok fact write failed: {e}")
+
+    # Real, transition-only ntfy alert on the unified severity -- distinct
+    # from the existing per-subsystem _last_alerted_status/_maybe_alert
+    # throttling above (that alerts per-subsystem on DOWN/DEGRADED; this
+    # alerts once on the *overall* rollup changing, including recovery
+    # transitions like down -> ok, which the per-subsystem path doesn't
+    # surface as its own event).
+    global _last_system_health
+    if overall != _last_system_health:
+        await _alert_ntfy("system", overall,
+                          f"Unified system health changed to '{overall}'.")
+        _last_system_health = overall
+
     return {
-        "overall": _rollup(services),
+        "overall": overall,
         "services": services,
         # Timezone-aware UTC (…+00:00). Avoids the deprecated naive
         # datetime.utcnow() flagged in review (overlaps with #1116).

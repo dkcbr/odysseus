@@ -1,6 +1,13 @@
 services:
   odysseus:
     build: .
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
     ports:
       - "${APP_BIND:-127.0.0.1}:${APP_PORT:-7000}:7000"
       # Also always bind loopback -- host-side tools (agent_supervisor.py,
@@ -17,6 +24,7 @@ services:
       # Cookbook local model cache. Inside Docker, "Local" means the Odysseus
       # container, so persist its HuggingFace cache under ./data/huggingface.
       - ${APP_DATA_DIR:-./data}/huggingface:/app/.cache/huggingface:z
+      - /home/dk/gdrive/Obsidian:/app/vault:z
       # Cookbook-installed Python CLIs/packages (vLLM, llama-cpp-python, etc.)
       # land under /app/.local for the odysseus user. Persist them so a
       # container recreate does not silently remove installed serve engines.
@@ -35,11 +43,22 @@ services:
         target: /home/dk/jarvis/projects/odysseus-vault-sync
         bind:
           create_host_path: false
+      # Real, minimal addition (not a broad "/" or "/app" exposure) so the
+      # filesystem MCP server (rooted at /home/dk inside the container)
+      # can see the automation scripts built tonight -- confirmed the
+      # container's /home/dk was never a full host bind-mount, only this
+      # narrow odysseus-vault-sync path existed before.
+      - type: bind
+        source: /home/dk/jarvis-scripts
+        target: /home/dk/jarvis-scripts
+        bind:
+          create_host_path: false
     extra_hosts:
       # Lets the container reach local services on the Docker host, including
       # Ollama at http://host.docker.internal:11434.
       - "host.docker.internal:host-gateway"
     environment:
+      - ODYSSEUS_INTERNAL_TOKEN=adb0a1121216ea6982172c4294ef175d01b7e351c76cba1833fb03f5805c21ff
       # Real X11 display passthrough for jarvis_desktop_mcp.py -- must match
       # the host's actual DISPLAY value. Socket ownership at /tmp/.X11-unix/
       # shows X0 belongs to cosmic-greeter (the login screen, not a real

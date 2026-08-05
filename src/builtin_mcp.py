@@ -74,6 +74,7 @@ _BUILTIN_SERVERS = {
     "memory":     ("mcp_servers/memory_server.py",     "Built-in: Memory"),
     "rag":        ("mcp_servers/rag_server.py",        "Built-in: RAG"),
     "email":      ("mcp_servers/email_server.py",      "Built-in: Email"),
+    "jarvis_context": ("mcp_servers/jarvis_context_server.py", "Built-in: Jarvis Context"),
 }
 
 # NPX-based built-in servers (run via npx, not Python)
@@ -116,7 +117,15 @@ def builtin_python_env(base_dir: str) -> dict[str, str]:
     for item in existing.split(os.pathsep):
         if item and item not in parts:
             parts.append(item)
-    return {"PYTHONPATH": os.pathsep.join(parts)}
+    env = {"PYTHONPATH": os.pathsep.join(parts)}
+    # Real, fixed internal token forwarded to subprocesses that need to call
+    # back into the main app over HTTP (e.g. jarvis_context_server.py) --
+    # without this, each side would see a different randomly-generated
+    # fallback token and internal-tool auth would silently fail.
+    token = os.environ.get("ODYSSEUS_INTERNAL_TOKEN")
+    if token:
+        env["ODYSSEUS_INTERNAL_TOKEN"] = token
+    return env
 
 
 async def register_builtin_servers(mcp_manager):

@@ -20,6 +20,7 @@ route in this codebase.
 import json
 import sqlite3
 import time
+from pathlib import Path
 from uuid import uuid4
 
 from fastapi import APIRouter, HTTPException, Request
@@ -38,10 +39,14 @@ router = APIRouter(prefix="/api/agent-tasks", tags=["agent-tasks"])
 
 AGENT_HEALTH: dict[str, dict] = {}
 STALE_AFTER_SECONDS = 10
+WORKER_LOG_DIR = Path("/app/data/agent_worker_logs")  # matches the host-side path (data/agent_worker_logs) agent_worker.py writes to, via the existing bind mount
 
 DESIRED_AGENTS: dict[str, dict] = {
     "browser_agent": {"enabled": True, "description": "Controls Playwright browser automation"},
     "filesystem_agent": {"enabled": True, "description": "Handles filesystem operations"},
+    "system_agent": {"enabled": True, "description": "Read-only system introspection (disk, processes, uptime, worker health)"},
+    "market_agent": {"enabled": True, "description": "Read-only TradingView market data (analysis, screening, sentiment) -- no order execution capability"},
+    "memory_agent": {"enabled": True, "description": "Structured graph memory (entities/relations/observations) via knowledge-graph-memory"},
 }
 
 
@@ -53,6 +58,8 @@ class TaskCreate(BaseModel):
     priority: int = 5
     max_retries: int = 3
     schedule_at: float | None = None
+    name: str | None = None  # optional human-readable label
+    remember_on_success: bool = False  # opt-in: write a real memory entry on this task's outcome (success or failure)
 
 
 class TaskResult(BaseModel):
@@ -75,18 +82,20 @@ def create_task_db_native(body: TaskCreate) -> dict:
         "result": None,
         "created_at": now,
         "updated_at": now,
+        "name": body.name,
+        "remember_on_success": body.remember_on_success,
     }
     conn = sqlite3.connect(DB_PATH)
     try:
         conn.execute(
             """INSERT INTO tasks
                (id, created_at, updated_at, agent, server, tool, arguments,
-                priority, retry_count, max_retries, schedule_at, status, result)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                priority, retry_count, max_retries, schedule_at, status, result, name, remember_on_success)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (task["id"], task["created_at"], task["updated_at"], task["agent"],
              task["server"], task["tool"], json.dumps(task["arguments"]),
              task["priority"], task["retry_count"], task["max_retries"],
-             task["schedule_at"], task["status"], None),
+             task["schedule_at"], task["status"], None, task["name"], int(task["remember_on_success"])),
         )
         conn.commit()
     finally:
@@ -436,6 +445,171 @@ async def get_history_db_route(request: Request, limit: int = 200):
     """Real, DB-backed history for the Task History UI panel."""
     require_admin(request)
     return get_history_db(limit)
+
+
+@router.get("/tool-analytics")
+async def get_tool_analytics(request: Request):
+    """Real, aggregated tool usage stats -- computed from the same real
+    JSON-lines worker log files get_worker_logs() reads, across every real
+    agent in DESIRED_AGENTS, not just one. Aggregates: per-tool call count,
+    average/max duration, failure rate; and per-agent totals. No new data
+    source -- purely a server-side aggregation of what's already logged.
+    """
+    require_admin(request)
+
+    per_tool: dict[str, dict] = {}
+    per_agent: dict[str, dict] = {}
+
+    for agent in DESIRED_AGENTS:
+        log_path = WORKER_LOG_DIR / f"{agent}.jsonl"
+        if not log_path.exists():
+            continue
+
+        agent_stats = {"total_calls": 0, "failed_calls": 0}
+        # tool_end entries carry duration/outcome but not server/tool (only
+        # tool_start does) -- correlate by task_id in a first pass to get
+        # the real tool name for each completed call.
+        task_tool_map: dict[str, str] = {}
+        raw_lines = []
+        with open(log_path) as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    entry = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                raw_lines.append(entry)
+                if entry.get("phase") == "tool_start" and entry.get("tool"):
+                    task_tool_map[entry.get("task_id")] = f"{entry.get('server', '?')}.{entry.get('tool')}"
+
+        for entry in raw_lines:
+            if entry.get("phase") != "tool_end":
+                continue  # only completed calls carry duration/outcome
+
+            tool_key = task_tool_map.get(entry.get("task_id"), f"{agent} (unknown tool)")
+            if tool_key not in per_tool:
+                per_tool[tool_key] = {"calls": 0, "failures": 0, "total_duration_ms": 0.0, "max_duration_ms": 0.0, "min_duration_ms": None, "agents": set()}
+            pt = per_tool[tool_key]
+            pt["calls"] += 1
+            pt["agents"].add(agent)
+            outcome = entry.get("outcome")
+            if outcome and outcome != "success":
+                pt["failures"] += 1
+                agent_stats["failed_calls"] += 1
+            dur = entry.get("duration_ms")
+            if dur is not None:
+                pt["total_duration_ms"] += dur
+                pt["max_duration_ms"] = max(pt["max_duration_ms"], dur)
+                pt["min_duration_ms"] = dur if pt["min_duration_ms"] is None else min(pt["min_duration_ms"], dur)
+            agent_stats["total_calls"] += 1
+
+        per_agent[agent] = agent_stats
+
+    tools_out = []
+    for tool_key, pt in per_tool.items():
+        avg_duration = (pt["total_duration_ms"] / pt["calls"]) if pt["calls"] else 0
+        tools_out.append({
+            "tool": tool_key,
+            "calls": pt["calls"],
+            "failures": pt["failures"],
+            "failure_rate_pct": round((pt["failures"] / pt["calls"]) * 100, 1) if pt["calls"] else 0,
+            "avg_duration_ms": round(avg_duration, 1),
+            "max_duration_ms": round(pt["max_duration_ms"], 1),
+            "min_duration_ms": round(pt["min_duration_ms"], 1) if pt["min_duration_ms"] is not None else None,
+            "agents": sorted(pt["agents"]),
+        })
+
+    return {"tools": tools_out, "by_agent": per_agent}
+
+
+@router.get("/worker-logs/{agent}")
+async def get_worker_logs(agent: str, request: Request, task_id: str | None = None,
+                          phase: str | None = None, outcome: str | None = None, limit: int = 200):
+    """Real structured worker logs (JSON-lines files written by
+    agent_worker.py's real _log_event() calls -- tool_start/tool_end with
+    duration_ms, arguments, outcome). Lives under /app/data/agent_worker_logs/
+    (the existing bind-mounted data dir, no new docker-compose volume needed).
+    Newest first. Optional filters for task_id/phase/outcome.
+    """
+    require_admin(request)
+    if agent not in DESIRED_AGENTS:
+        raise HTTPException(404, f"Unknown agent: {agent}")
+
+    log_path = WORKER_LOG_DIR / f"{agent}.jsonl"
+    if not log_path.exists():
+        return {"agent": agent, "logs": [], "count": 0}
+
+    entries = []
+    with open(log_path) as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                entry = json.loads(line)
+            except json.JSONDecodeError:
+                continue  # a partially-written line (rare, non-fatal) -- skip rather than fail the whole read
+            if task_id is not None and entry.get("task_id") != task_id:
+                continue
+            if phase is not None and entry.get("phase") != phase:
+                continue
+            if outcome is not None and entry.get("outcome") != outcome:
+                continue
+            entries.append(entry)
+
+    entries.sort(key=lambda e: e.get("ts", 0), reverse=True)
+    entries = entries[:limit]
+    return {"agent": agent, "logs": entries, "count": len(entries)}
+
+
+@router.get("/throughput")
+async def get_throughput(request: Request, bucket_minutes: int = 15, hours: int = 24):
+    """Real throughput metrics -- computed retroactively from the tasks
+    table's own real created_at/updated_at fields, NOT a new sampling/
+    snapshot subsystem. For a terminal task (success/failed), updated_at
+    IS its completion time -- that data already exists and is already
+    retained for as long as the task row exists, so no new infrastructure
+    is needed to compute a real time-bucketed throughput series from it.
+    """
+    require_admin(request)
+    now = time.time()
+    window_start = now - (hours * 3600)
+    bucket_seconds = bucket_minutes * 60
+
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            """SELECT agent, status, updated_at FROM tasks
+               WHERE status IN ('success', 'failed') AND updated_at >= ?
+               ORDER BY updated_at ASC""",
+            (window_start,),
+        ).fetchall()
+    finally:
+        conn.close()
+
+    buckets: dict[int, dict] = {}
+    for row in rows:
+        bucket_ts = int((row["updated_at"] - window_start) // bucket_seconds) * bucket_seconds + int(window_start)
+        if bucket_ts not in buckets:
+            buckets[bucket_ts] = {"bucket_start": bucket_ts, "success": 0, "failed": 0, "by_agent": {}}
+        buckets[bucket_ts][row["status"]] += 1
+        agent = row["agent"]
+        buckets[bucket_ts]["by_agent"][agent] = buckets[bucket_ts]["by_agent"].get(agent, 0) + 1
+
+    series = sorted(buckets.values(), key=lambda b: b["bucket_start"])
+    total_completed = sum(b["success"] + b["failed"] for b in series)
+    real_hours = (now - window_start) / 3600
+
+    return {
+        "bucket_minutes": bucket_minutes,
+        "hours": hours,
+        "series": series,
+        "total_completed": total_completed,
+        "avg_per_hour": round(total_completed / real_hours, 2) if real_hours > 0 else 0,
+    }
 
 
 @router.get("/{task_id}")

@@ -358,6 +358,13 @@ class ToolIndex:
             {"manage_bg_jobs"},
         frozenset({"note", "todo", "reminder", "remind", "checklist", "remember to"}):
             {"manage_notes"},
+        # Real gap found and confirmed tonight: "tell me about my vault notes"
+        # did not retrieve get_jarvis_context even once properly indexed,
+        # unlike "system health"/"jarvis status" which did -- the tool's
+        # description leans toward health, under-matching vault-focused
+        # queries. Same class of fix as get_portfolio -> get_accounts earlier.
+        frozenset({"vault", "vault notes", "jarvis context", "jarvis state"}):
+            {"get_jarvis_context"},
         # Chat/session management. "rename" alone maps to documents below, so a
         # request like "rename the last 12 sessions/chats" needs these session
         # keywords to surface the right tools (NOT app_api — /api/sessions is
@@ -516,6 +523,22 @@ class ToolIndex:
         base = set(always_include or ALWAYS_AVAILABLE)
         retrieved = self.retrieve(query, k=k)
         base.update(retrieved)
+
+        # Real bug fixed here: for a query like "give me a quick portfolio
+        # update", embedding retrieval reliably surfaces get_portfolio but
+        # not get_accounts, even though get_portfolio's own description
+        # names get_accounts as its required prerequisite when account_id
+        # is unknown -- confirmed via live logs showing the model correctly
+        # reasoning it needed an account ID but having no tool to fetch one,
+        # then asking the user directly for a raw account ID instead. Not
+        # hardcoding the MCP server's prefix (e.g. "mcp__77dcd752__") since
+        # that ID changes if the server is ever re-registered -- instead,
+        # derive the sibling tool name from whatever prefix get_portfolio
+        # itself actually has this time.
+        for tool_name in list(retrieved):
+            if tool_name.endswith("__get_portfolio"):
+                prefix = tool_name[: -len("get_portfolio")]
+                base.add(f"{prefix}get_accounts")
         # Keyword-based force-include for common intents. Match on word
         # boundaries, not raw substrings, so short hints like "fix", "line",
         # "serve", "reply" or "unread" don't fire inside unrelated words
