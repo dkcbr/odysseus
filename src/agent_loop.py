@@ -570,6 +570,12 @@ Use this instead of `bash`, `curl`, `python`, `requests`, or scraping code for w
 ```
 Fetch and read the text content of a SPECIFIC URL the user names (e.g. "check example.com", "what does this page say <url>"). A bare domain like `example.com` works (defaults to https). Use this when you already have a concrete URL. For open-ended lookups use `web_search`, and for "research X" jobs use `trigger_research`.""",
 
+    "lookup_ticker": """\
+```lookup_ticker
+<ticker symbol>
+```
+Look up REAL, VERIFIED company identity and quote data for a ticker symbol. MANDATORY before stating what company a ticker represents, its price, or any other fact about it - do not answer from memory, especially for small/mid-cap tickers which are frequently confused with unrelated companies.""",
+
     "read_file": """\
 ```read_file
 <file path>
