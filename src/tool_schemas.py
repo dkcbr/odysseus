@@ -93,6 +93,20 @@ FUNCTION_TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
+            "name": "lookup_ticker",
+            "description": "Look up REAL, VERIFIED company identity and quote data for a stock/crypto ticker symbol via Financial Modeling Prep. MANDATORY: call this before stating what company a ticker represents, its price, or any other fact about it - never answer from memory. Small and mid-cap tickers are frequently confused with unrelated companies when answered from memory (e.g. TMC has been misidentified as an unrelated medical-communications company when it is actually a deep-sea mining company; MP has been misidentified as an oil refiner when it is a rare-earth miner) - this tool exists specifically to prevent that. If the tool errors (no API key configured, ticker not found), tell the user real data isn't available rather than guessing.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "symbol": {"type": "string", "description": "The ticker symbol to look up, e.g. KTOS"}
+                },
+                "required": ["symbol"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "read_file",
             "description": "Read a file from disk. Optionally read a line range with offset/limit for large files.",
             "parameters": {
