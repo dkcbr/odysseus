@@ -2,23 +2,34 @@
 """MCP (Model Context Protocol) server management routes."""
 import json
 import os
+import time
 import uuid
 import urllib.parse
 import html
 from pathlib import Path
 from fastapi import APIRouter, Form, HTTPException, Request
 from fastapi.responses import RedirectResponse, HTMLResponse
+from pydantic import BaseModel
 import logging
 import httpx
 
 from core.database import McpServer, SessionLocal
 from core.middleware import require_admin
+from src.agents.capabilities import is_tool_allowed
 from src.constants import DATA_DIR, MCP_OAUTH_DIR
 from src.mcp_manager import McpManager
+from routes.agent_dashboard import record_agent_call
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/mcp", tags=["mcp"])
+
+
+class McpCallRequest(BaseModel):
+    server: str
+    tool: str
+    arguments: dict = {}
+    agent: str | None = None
 
 
 def _mcp_oauth_base_dir() -> Path:
@@ -422,6 +433,78 @@ def setup_mcp_routes(mcp_manager: McpManager):
             return {"id": server_id, "disabled_count": len(disabled)}
         finally:
             db.close()
+
+    @router.post("/call")
+    async def call_mcp_tool(request: Request, body: McpCallRequest):
+        """Directly invoke a single MCP tool and return its result - a real,
+        general-purpose test/automation surface for any connected server.
+
+        Body (JSON): {"server": "<server name or id>", "tool": "<tool name>",
+                      "arguments": {...}}
+
+        Resolves "server" against both the DB id and the human-readable name,
+        since either is natural to type. Delegates to the same McpManager.call_tool()
+        the agent loop itself uses, so results here match real chat behavior.
+
+        Built-in servers (memory, rag, image_gen, email, builtin_browser) are
+        registered directly via mcp_manager.connect_server() at startup and
+        never get a McpServer DB row, so they fall through to a second,
+        in-memory lookup here - checked by real server_id via
+        get_server_status(), or by real display name via get_all_tools(),
+        both genuine public methods on mcp_manager (no private attribute
+        access). This does NOT add built-ins to the DB or change how they're
+        registered; it only extends this endpoint's server resolution.
+        """
+        require_admin(request)
+
+        db = SessionLocal()
+        try:
+            srv = (
+                db.query(McpServer).filter(McpServer.id == body.server).first()
+                or db.query(McpServer).filter(McpServer.name == body.server).first()
+            )
+        finally:
+            db.close()
+
+        if srv is not None:
+            resolved_id = srv.id
+            resolved_name = srv.name
+        else:
+            # Fall back to the in-memory registry for built-in servers.
+            resolved_id = None
+            resolved_name = None
+            status = mcp_manager.get_server_status(body.server)
+            if status and status.get("status") not in (None, "disconnected"):
+                resolved_id = body.server
+                resolved_name = status.get("name", body.server)
+            else:
+                for tool in mcp_manager.get_all_tools():
+                    if tool.get("server_name") == body.server:
+                        resolved_id = tool["server_id"]
+                        resolved_name = tool["server_name"]
+                        break
+
+        if resolved_id is None:
+            raise HTTPException(404, f"No MCP server found matching '{body.server}' (checked DB, id, and name)")
+
+        if body.agent is not None and not is_tool_allowed(body.agent, body.tool, resolved_name):
+            blocked_result = {
+                "error": "Tool not allowed",
+                "server": body.server,
+                "tool": body.tool,
+                "agent": body.agent,
+                "allowed": False,
+            }
+            record_agent_call(resolved_name, body.tool, body.arguments,
+                              {"exit_code": 1, "error": "blocked: not allowed for this agent role"}, 0.0)
+            return blocked_result
+
+        qualified_name = f"mcp__{resolved_id}__{body.tool}"
+        _start = time.monotonic()
+        result = await mcp_manager.call_tool(qualified_name, body.arguments)
+        _duration_ms = (time.monotonic() - _start) * 1000
+        record_agent_call(resolved_name, body.tool, body.arguments, result, _duration_ms)
+        return result
 
     # ── OAuth flow for Google MCP servers ──────────────────────────
 
