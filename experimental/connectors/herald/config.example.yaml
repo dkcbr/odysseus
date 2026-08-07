@@ -1,0 +1,21 @@
+# Copy to config.yaml (never commit the real filled-in version) and set
+# these as real environment variables, or load them into your deployment's
+# secret manager. This file itself contains no real secrets.
+
+# GitHub repo Settings -> Webhooks -> Secret. Used to verify
+# X-Hub-Signature-256 on every incoming delivery.
+GITHUB_WEBHOOK_SECRET: "your-github-webhook-secret-here"
+
+# A real Jarvis API token, scoped to "chat" only (see routes/webhook/webhook_routes.py
+# POST /api/v1/chat -- it explicitly checks for the "chat" scope). Use the
+# minimum scope needed, not an admin/full-access token.
+JARVIS_API_TOKEN: "jarvis-api-token-scoped-to-chat-only"
+
+# Real Odysseus app address. Port 7000 is correct for this project --
+# 8080 is not used anywhere real here, and 8000 is a separate Open WebUI
+# container, confirmed throughout this engagement.
+JARVIS_CHAT_URL: "http://localhost:7000/api/v1/chat"
+
+# Defaults to true. Must be explicitly set to "false" (as a real env var,
+# not just in this example file) before any real forwarding happens.
+GITHUB_RECEIVER_DRY_RUN: "true"
