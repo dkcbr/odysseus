@@ -220,6 +220,8 @@ against the real API (that field expects a session UUID). The bug only
 "passed" in the proposal because its test mocked the HTTP call entirely
 rather than hitting anything real.
 
+Real `POST /api/session` form fields, confirmed against routes/session_routes.py: `name, endpoint_url, model, rag, skip_validation, api_key, endpoint_id` (all Form fields, not JSON) -- this connector only ever sends `name` and `endpoint_id`.
+
 Built correctly instead: if `HERALD_TRANSCRIPT_SUMMARY_SESSION` (an
 already-known session id) isn't set but `HERALD_TRANSCRIPT_SUMMARY_ENDPOINT_ID`
 is, a real session is created once via the real, sanctioned
