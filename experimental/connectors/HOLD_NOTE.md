@@ -203,3 +203,43 @@ apply stashed WIP" that correctly preserved and rebased this exact work
 onto the current `dev` branch). Verified all Herald/transcript files and
 tests were genuinely intact on the new branch (31 passed, 7 correctly
 skipped) before proceeding.
+
+---
+
+## Durable endpoint_id config added (2026-08-07, continued)
+
+Real, tested addition: `HERALD_TRANSCRIPT_SUMMARY_ENDPOINT_ID` env var,
+distinct from the existing `HERALD_TRANSCRIPT_SUMMARY_SESSION`.
+
+Caught a real design bug in a proposal for this before building: it
+conflated a ModelEndpoint id (e.g. `77bddaa5`, identifies a model
+connection like the local Ollama endpoint) with a session id (a live,
+already-created session's UUID) -- its own test passed the endpoint_id
+directly as the `session` field sent to `/v1/chat`, which would not work
+against the real API (that field expects a session UUID). The bug only
+"passed" in the proposal because its test mocked the HTTP call entirely
+rather than hitting anything real.
+
+Built correctly instead: if `HERALD_TRANSCRIPT_SUMMARY_SESSION` (an
+already-known session id) isn't set but `HERALD_TRANSCRIPT_SUMMARY_ENDPOINT_ID`
+is, a real session is created once via the real, sanctioned
+`POST /api/session` and cached in-process for reuse (not recreated on
+every call). Verified empirically that `effective_user()` (which this
+route uses) accepts the same scoped `chat` API token Herald already
+uses everywhere else -- no broader-privilege credential needed for this
+feature, unlike Calendar's session-cookie requirement.
+
+Real regression test guards the exact bug caught above (asserts the
+resolved session id is NOT the raw endpoint_id). Real integration test
+creates an actual session via the live endpoint_id, confirms caching
+(second call reuses it, doesn't create a new one), and cleans up after.
+
+13 real tests total for transcripts (up from 10), 11 pass with real
+credentials + 2 correctly skip without. All test tokens and sessions
+created during this work were revoked/deleted and confirmed cleaned up.
+
+Also fixed, while here: two tests (test_ingest_real_transcript,
+test_ingest_chapter_tracking_real) had been accidentally duplicated
+during editing -- Python silently uses the last definition for duplicate
+function names, so this was dead code, not a functional bug, but cleaned
+up for real.
