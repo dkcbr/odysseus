@@ -2240,6 +2240,28 @@ async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperat
         # <think> blocks. Ollama /v1 accepts "think": false as a top-level param.
         if _is_ollama_openai_compat_url(url) and _supports_thinking(model):
             payload["think"] = False
+            # Known Ollama bug for this model class (ollama/ollama#14493,
+            # still open as of Apr 2026): the renderer doesn't reliably emit
+            # a generation prompt / EOS after a tool-call turn, so the model
+            # can keep generating past the closing fence and fabricate a
+            # fake continuation (observed directly: a real tool call
+            # followed immediately by an invented company name and price in
+            # the same generation, never having received the real tool
+            # result). Scoped to tool-offering requests only - an unscoped
+            # stop-on-fence would truncate legitimate answers that contain
+            # real code blocks. Known tradeoff: a genuine multi-fence answer
+            # to a tool-enabled prompt could still be cut early; accepted as
+            # strictly safer than the fabrication/hang failure mode.
+            if tools:
+                existing_stop = payload.get("stop")
+                fence_stop = "```\n"
+                if isinstance(existing_stop, list):
+                    if fence_stop not in existing_stop:
+                        payload["stop"] = existing_stop + [fence_stop]
+                elif isinstance(existing_stop, str):
+                    payload["stop"] = [existing_stop, fence_stop]
+                else:
+                    payload["stop"] = [fence_stop]
         _apply_local_cache_affinity(payload, url, session_id)
         _apply_local_generation_stability(payload, target_url, model)
         _scrub_openai_chat_tool_reasoning(payload, target_url, model)
