@@ -78,6 +78,14 @@ COPY requirements.txt requirements-optional.txt ./
 RUN pip install --no-cache-dir -r requirements.txt \
     && if [ "$INSTALL_OPTIONAL" = "true" ]; then pip install --no-cache-dir -r requirements-optional.txt; fi
 
+# Playwright's own bundled headless Chromium, for the jarvis_browser MCP
+# server (data/mcp/jarvis_browser_mcp.py) when running headless in this
+# container -- distinct from the system `chromium` apt package installed
+# above, which that script doesn't reference. --with-deps installs any
+# additional system libraries Playwright's browser needs beyond what's
+# already present.
+RUN playwright install --with-deps chromium
+
 # python-magic powers content-based MIME sniffing in src/upload_handler.py.
 # Image-only (not in requirements.txt) because it needs the libmagic1 system
 # lib installed above; see the apt note near the top of this stage.

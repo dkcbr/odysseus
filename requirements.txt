@@ -51,3 +51,6 @@ pytest-asyncio
 # TestClient import when only classic httpx is present. Runtime code keeps
 # using `httpx` above; this is test-client only.
 httpx2
+
+# Added for jarvis_browser MCP server (data/mcp/jarvis_browser_mcp.py)
+playwright>=1.48.0
