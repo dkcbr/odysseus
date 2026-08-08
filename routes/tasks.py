@@ -438,6 +438,61 @@ async def get_history_db_route(request: Request, limit: int = 200):
     return get_history_db(limit)
 
 
+@router.get("/throughput")
+async def get_throughput(request: Request, bucket_minutes: int = 15, hours: int = 24):
+    """Real throughput metrics -- computed retroactively from the tasks
+    table's own real created_at/updated_at fields, NOT a new sampling/
+    snapshot subsystem. For a terminal task (success/failed), updated_at
+    IS its completion time -- that data already exists and is already
+    retained for as long as the task row exists, so no new infrastructure
+    is needed to compute a real time-bucketed throughput series from it.
+
+    Extracted from backend/risk-surface-pipeline-20260806 (a real, but
+    stale branch not safe to merge wholesale -- 1900+ commits behind
+    current dev, would risk reintroducing already-patched issues). Only
+    this one, verified-compatible function was taken; schema checked
+    directly against the current tasks table (agent/status/updated_at
+    columns match) before inserting.
+    """
+    require_admin(request)
+    now = time.time()
+    window_start = now - (hours * 3600)
+    bucket_seconds = bucket_minutes * 60
+
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            """SELECT agent, status, updated_at FROM tasks
+               WHERE status IN ('success', 'failed') AND updated_at >= ?
+               ORDER BY updated_at ASC""",
+            (window_start,),
+        ).fetchall()
+    finally:
+        conn.close()
+
+    buckets: dict[int, dict] = {}
+    for row in rows:
+        bucket_ts = int((row["updated_at"] - window_start) // bucket_seconds) * bucket_seconds + int(window_start)
+        if bucket_ts not in buckets:
+            buckets[bucket_ts] = {"bucket_start": bucket_ts, "success": 0, "failed": 0, "by_agent": {}}
+        buckets[bucket_ts][row["status"]] += 1
+        agent = row["agent"]
+        buckets[bucket_ts]["by_agent"][agent] = buckets[bucket_ts]["by_agent"].get(agent, 0) + 1
+
+    series = sorted(buckets.values(), key=lambda b: b["bucket_start"])
+    total_completed = sum(b["success"] + b["failed"] for b in series)
+    real_hours = (now - window_start) / 3600
+
+    return {
+        "bucket_minutes": bucket_minutes,
+        "hours": hours,
+        "series": series,
+        "total_completed": total_completed,
+        "avg_per_hour": round(total_completed / real_hours, 2) if real_hours > 0 else 0,
+    }
+
+
 @router.get("/{task_id}")
 async def get_task(task_id: str, request: Request):
     """Look up a single task's current status/result."""
