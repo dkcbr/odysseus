@@ -45,6 +45,12 @@ import spinnerModule from './js/spinner.js';
 import { initKeyboardShortcuts } from './js/keyboard-shortcuts.js';
 import { initSidebarLayout, syncRailSide } from './js/sidebar-layout.js?v=20260715startupclean';
 import { initSectionCollapse, initSectionDrag } from './js/section-management.js';
+import registryModule from './js/registry.js';
+import capabilitiesModule from './js/capabilities.js';
+import tradingviewModule from './js/tradingview.js';
+import pollerStatusModule from './js/poller_status.js';
+import pollerDashboardModule from './js/poller_dashboard.js';
+import taskHistoryModule from './js/task_history.js';
 
 const API_BASE = window.location.origin;
 window.themeModule = themeModule;
@@ -3758,6 +3764,36 @@ function startOdysseusApp() {
   // Initialize search chat module
   if (searchChatModule) {
     searchChatModule.init(API_BASE);
+  }
+
+  // Initialize agent registry module
+  if (registryModule) {
+    registryModule.init();
+  }
+
+  // Initialize capability inspector module
+  if (capabilitiesModule) {
+    capabilitiesModule.init();
+  }
+
+  // Initialize TradingView module
+  if (tradingviewModule) {
+    tradingviewModule.init();
+  }
+
+  // Initialize poller status module
+  if (pollerStatusModule) {
+    pollerStatusModule.init();
+  }
+
+  // Initialize poller dashboard module
+  if (pollerDashboardModule) {
+    pollerDashboardModule.init();
+  }
+
+  // Initialize task history module
+  if (taskHistoryModule) {
+    taskHistoryModule.init();
   }
 
   // Search buttons — icon rail + sidebar
