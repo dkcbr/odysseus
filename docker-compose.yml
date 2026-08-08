@@ -16,6 +16,19 @@ services:
       # land under /app/.local for the odysseus user. Persist them so a
       # container recreate does not silently remove installed serve engines.
       - ${APP_DATA_DIR:-./data}/local:/app/.local:z
+      # Local stdio MCP server directories -- restored 2026-08-08, missing
+      # since the dev-based deploy, which is why jarvis_desktop, jarvis_system,
+      # wigolo, and risk_surface (all stdio-transport MCP servers) showed
+      # "disconnected" in the UI: they couldn't reach these host paths from
+      # inside the container. X11 passthrough (needed for jarvis_desktop's
+      # wmctrl/xdotool/imagemagick tools specifically) deliberately NOT
+      # restored yet - real security-relevant change, holding off until
+      # explicitly requested.
+      - ./mcp_servers:/app/mcp_servers
+      - /home/dk/tradingview-mcp:/app/tradingview_real:ro
+      - type: bind
+        source: /home/dk/jarvis/projects/odysseus-vault-sync
+        target: /home/dk/jarvis/projects/odysseus-vault-sync
     extra_hosts:
       # Lets the container reach local services on the Docker host, including
       # Ollama at http://host.docker.internal:11434.
