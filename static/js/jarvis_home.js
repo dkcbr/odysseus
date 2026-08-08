@@ -907,4 +907,12 @@ export function init() {
   if (closeBtn) closeBtn.addEventListener('click', _closePanel);
 }
 
+// This is a standalone entry-point module (loaded via its own <script
+// type="module"> tag in index.html, not imported by app.js or anything
+// else) - nothing else has a reference to call init(), so it must
+// self-invoke here. Real, confirmed bug: this was missing, meaning the
+// button/modal registration and click wiring never ran even after the
+// HTML markup and the broken process_table.js import were both fixed.
+init();
+
 export default { init, openPanel };
