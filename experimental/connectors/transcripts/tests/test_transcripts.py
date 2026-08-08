@@ -132,3 +132,74 @@ def test_summarizer_real_end_to_end_via_local_ollama_session(monkeypatch):
     assert summary is not None
     assert len(summary) > 20
     assert "agent" in summary.lower()  # real transcript content is genuinely about AI agents
+
+
+def test_endpoint_id_session_creation_real(monkeypatch):
+    """Real integration test: real endpoint_id, real live app, creates a
+    real session and uses it. Cleans up the session after."""
+    import httpx as _httpx
+    try:
+        _httpx.get("http://100.93.206.89:7000", timeout=2.0)
+        base = "http://100.93.206.89:7000/api"
+    except _httpx.HTTPError:
+        pytest.skip("real Odysseus app not reachable")
+
+    monkeypatch.setenv("HERALD_APP_API_BASE", base)
+    monkeypatch.delenv("HERALD_TRANSCRIPT_SUMMARY_SESSION", raising=False)
+
+    token = os.environ.get("HERALD_TRANSCRIPT_SUMMARY_TOKEN")
+    endpoint_id = os.environ.get("HERALD_TRANSCRIPT_SUMMARY_ENDPOINT_ID")
+    if not token or not endpoint_id:
+        pytest.skip("HERALD_TRANSCRIPT_SUMMARY_TOKEN / _ENDPOINT_ID not set for this real test run")
+
+    import summarizer
+    summarizer.CHAT_API_BASE = base
+    summarizer._cached_session_id = None  # real, fresh state for this test
+
+    session_id = summarizer._get_or_create_session(token)
+    assert session_id is not None
+    assert len(session_id) > 10  # real UUID-shaped, not the endpoint_id itself
+
+    # real: calling again should reuse the cached session, not create a new one
+    session_id_2 = summarizer._get_or_create_session(token)
+    assert session_id_2 == session_id
+
+    # real cleanup
+    _httpx.delete(f"{base}/session/{session_id}", headers={"Authorization": f"Bearer {token}"}, timeout=10.0)
+    summarizer._cached_session_id = None
+
+
+def test_endpoint_id_not_confused_with_session_id():
+    """Real regression guard for the exact bug caught in an earlier
+    proposal: passing a raw endpoint_id directly as if it were a session
+    id. This asserts the code path that would create a session is
+    actually invoked (via a fake POST), not that the endpoint_id itself
+    gets used as the session value."""
+    import summarizer as summarizer_module
+
+    calls = []
+
+    class FakeResponse:
+        status_code = 200
+        def json(self):
+            return {"id": "real-session-uuid-not-the-endpoint-id"}
+
+    def fake_post(url, headers=None, data=None, json=None, timeout=None):
+        calls.append({"url": url, "data": data})
+        return FakeResponse()
+
+    orig_post = summarizer_module.httpx.post
+    summarizer_module.httpx.post = fake_post
+    summarizer_module._cached_session_id = None
+    try:
+        import os as _os
+        _os.environ.pop("HERALD_TRANSCRIPT_SUMMARY_SESSION", None)
+        _os.environ["HERALD_TRANSCRIPT_SUMMARY_ENDPOINT_ID"] = "77bddaa5"
+        result = summarizer_module._get_or_create_session("fake-token")
+        assert result == "real-session-uuid-not-the-endpoint-id"
+        assert result != "77bddaa5"  # the exact bug: must NOT be the raw endpoint id
+        assert calls[0]["data"]["endpoint_id"] == "77bddaa5"  # endpoint_id used correctly to CREATE the session
+    finally:
+        summarizer_module.httpx.post = orig_post
+        summarizer_module._cached_session_id = None
+        _os.environ.pop("HERALD_TRANSCRIPT_SUMMARY_ENDPOINT_ID", None)
