@@ -490,6 +490,30 @@ class McpManager:
         if not session:
             return {"error": f"MCP server not connected: {server_id}", "exit_code": 1}
 
+        # Real, safety-critical enforcement check, added 2026-08-09:
+        # confirmed that per-server disabled_tools (used for the real
+        # public_com integration's write/destructive tool boundary)
+        # was ONLY ever applied to tool listing/filtering (mcp_routes.py)
+        # -- there was NO enforcement at actual execution time anywhere
+        # in this file. A disabled tool could still be called and reach
+        # the real, live upstream API. This is the correct architectural
+        # place for the fix: the single, shared entry point every real
+        # tool call (external HTTP and internal agent-loop) passes
+        # through, per tonight's earlier real architecture investigation.
+        db = SessionLocal()
+        try:
+            srv = db.query(McpServer).filter(McpServer.id == server_id).first()
+            if srv and srv.disabled_tools:
+                import json as _json
+                disabled_set = set(_json.loads(srv.disabled_tools))
+                if tool_name in disabled_set:
+                    return {
+                        "error": f"Tool '{tool_name}' is disabled for this server",
+                        "exit_code": 1,
+                    }
+        finally:
+            db.close()
+
         try:
             result = await self._do_call(session, tool_name, arguments)
         except Exception as e:
