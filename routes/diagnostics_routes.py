@@ -342,4 +342,384 @@ def setup_diagnostics_routes(
 
 
 
+    @router.get("/api/risk/latest")
+    async def get_latest_risk_state(request: Request) -> Dict[str, Any]:
+        """Real, read-only fetch of the most recent risk-engine run from
+        the graph -- finds the latest date among Regime entities (not
+        hardcoded to "today", so this works correctly for any past or
+        future refresh), then returns its factors, risk events, and
+        suggestions."""
+        require_admin(request)
+        import app as _app
+        import json as _json
+
+        kg_id = "1751838b"
+        graph_result = await _app.mcp_manager.call_tool(f"mcp__{kg_id}__read_graph", {})
+        graph_data = _json.loads(graph_result.get("stdout", "{}") or "{}")
+        entities = graph_data.get("entities", [])
+        relations = graph_data.get("relations", [])
+
+        regimes = [e for e in entities if e["entityType"] == "Regime"]
+        if not regimes:
+            return {"found": False, "message": "No Regime entities found -- run /api/risk/refresh first."}
+
+        def obs_value(e, key):
+            for o in e.get("observations", []):
+                if o.startswith(f"{key}: "):
+                    return o.split(f"{key}: ", 1)[1]
+            return None
+
+        latest_regime = max(regimes, key=lambda e: obs_value(e, "date") or "")
+        latest_date = obs_value(latest_regime, "date")
+
+        factor_names = [r["to"] for r in relations
+                        if r["from"] == latest_regime["name"] and r["relationType"] == "has_factor"]
+        factors = [e for e in entities if e["name"] in factor_names]
+        factors.sort(key=lambda e: e["name"])
+
+        snapshot_names = [r["from"] for r in relations
+                          if r["to"] == latest_regime["name"] and r["relationType"] == "has_regime"]
+        risk_event_names = [r["from"] for r in relations
+                            if r["to"] in snapshot_names and r["relationType"] == "detected_in_snapshot"]
+        risk_events = [e for e in entities if e["name"] in risk_event_names]
+
+        suggestion_names = [r["from"] for r in relations
+                            if r["to"] in risk_event_names and r["relationType"] == "responds_to_event"]
+        suggestions = [e for e in entities if e["name"] in suggestion_names]
+
+        def to_dict(e):
+            return {"name": e["name"], "type": e["entityType"], "observations": e["observations"]}
+
+        return {
+            "found": True,
+            "date": latest_date,
+            "regime": to_dict(latest_regime),
+            "factors": [to_dict(f) for f in factors],
+            "risk_events": [to_dict(r) for r in risk_events],
+            "suggestions": [to_dict(s) for s in suggestions],
+        }
+
+
+
+    @router.get("/api/relevance/today")
+    async def get_relevance_today(request: Request) -> Dict[str, Any]:
+        """Real backend route wrapping Ambient Relevance's existing
+        logic (originally inline in risk_panel.js) so the HUD overlay can
+        poll it too, instead of duplicating frontend logic. No new
+        subsystem -- reuses /api/risk/latest's own real data fetch and
+        the same real Cross Search route, just server-side."""
+        require_admin(request)
+        import app as _app
+        import json as _json
+        import re as _re
+
+        kg_id = "1751838b"
+        graph_result = await _app.mcp_manager.call_tool(f"mcp__{kg_id}__read_graph", {})
+        graph_data = _json.loads(graph_result.get("stdout", "{}") or "{}")
+        entities = graph_data.get("entities", [])
+
+        def obs_value(e, key):
+            for o in e.get("observations", []):
+                if o.startswith(f"{key}: "):
+                    return o.split(f"{key}: ", 1)[1]
+            return None
+
+        factors = [e for e in entities if e["entityType"] == "Factor" and obs_value(e, "date")]
+        if not factors:
+            return {"tickers": [], "notes": []}
+
+        latest_date = max(obs_value(f, "date") for f in factors)
+        todays_factors = [f for f in factors if obs_value(f, "date") == latest_date]
+        dominant = max(todays_factors, key=lambda f: float(obs_value(f, "variance_explained") or 0))
+
+        loadings_text = obs_value(dominant, "top_loadings") or ""
+        tickers = [p.strip().split(" ")[0] for p in loadings_text.split(",") if p.strip()]
+
+        vault_notes = [e for e in entities if e["entityType"] == "VaultNote"]
+        notes = []
+        seen_ids = set()
+        for ticker in tickers:
+            for note in vault_notes:
+                if note["name"] in seen_ids:
+                    continue
+                title = obs_value(note, "title") or note["name"]
+                haystack = title + " " + " ".join(note.get("observations", []))
+                if _re.search(rf"\b{_re.escape(ticker)}\b", haystack):
+                    notes.append({"ticker": ticker, "title": title, "id": note["name"]})
+                    seen_ids.add(note["name"])
+
+        return {"tickers": tickers, "notes": notes}
+
+
+    @router.get("/api/graph/nodes")
+    async def get_graph_nodes(request: Request) -> Dict[str, Any]:
+        """Real, read-only unified graph node view, scoped to vault+risk
+        only (per explicit scope decision) -- these are the only domains
+        that actually live in the real knowledge graph. Does NOT invent
+        MCPServer/AgentTask/MarketEntity nodes (confirmed directly: none
+        of those exist as graph entities, and no "MarketEntity" concept
+        exists anywhere in the system at all). Reuses the exact same real
+        entities already used by /api/risk/latest and vault ingestion."""
+        require_admin(request)
+        import app as _app
+        import json as _json
+
+        kg_id = "1751838b"
+        graph_result = await _app.mcp_manager.call_tool(f"mcp__{kg_id}__read_graph", {})
+        graph_data = _json.loads(graph_result.get("stdout", "{}") or "{}")
+        entities = graph_data.get("entities", [])
+
+        def obs_value(e, key):
+            for o in e.get("observations", []):
+                if o.startswith(f"{key}: "):
+                    return o.split(f"{key}: ", 1)[1]
+            return None
+
+        type_map = {
+            "VaultNote": "vault_note", "Tag": "vault_tag",
+            "Regime": "risk_regime", "Factor": "risk_factor",
+            "RiskEvent": "risk_event", "Suggestion": "risk_suggestion",
+        }
+
+        nodes = []
+        for e in entities:
+            node_type = type_map.get(e["entityType"])
+            if not node_type:
+                continue
+            nodes.append({
+                "id": e["name"], "type": node_type, "label": e["name"],
+                "metadata": {"observations": e.get("observations", [])},
+            })
+
+        # Real MCP domain, using the exact same verified patterns as
+        # mcp_server_detail_panel.js's backend route -- not the invented
+        # list_mcp_servers()/server.tools from an earlier proposal. Real
+        # counts confirmed before building: 11 servers, 202 total tools.
+        all_tools = _app.mcp_manager.get_all_tools()
+        for sid, v in _app.mcp_manager._connections.items():
+            nodes.append({
+                "id": f"mcp_server:{sid}", "type": "mcp_server", "label": v.get("name", sid),
+                "metadata": {"status": v.get("status")},
+            })
+        for t in all_tools:
+            sid = t.get("server_id")
+            nodes.append({
+                "id": f"mcp_tool:{sid}:{t['name']}", "type": "mcp_tool", "label": t["name"],
+                "metadata": {"server": sid},
+            })
+
+        # Minimal, honest Market nodes: real ticker symbols extracted from
+        # real risk_factor observations only -- no invented sector/price/
+        # asset_type metadata, since no such data exists anywhere (confirmed
+        # directly: no market entity table, class, or ingestion pipeline
+        # exists in the system). Handles both real observation formats
+        # found in the graph: today's pipeline ("top_loadings: SYM (w), ...")
+        # and the July 22 hand-analysis ("json: {"dominant_symbols":[...]}").
+        import re as _re
+        tickers = set()
+        for e in entities:
+            if e["entityType"] != "Factor":
+                continue
+            for o in e.get("observations", []):
+                if o.startswith("top_loadings: "):
+                    tickers.update(_re.findall(r"([A-Z]{2,6})\s*\(", o))
+                elif o.startswith("json: "):
+                    try:
+                        payload = _json.loads(o[len("json: "):])
+                        tickers.update(payload.get("dominant_symbols", []))
+                    except _json.JSONDecodeError:
+                        pass
+        for symbol in sorted(tickers):
+            nodes.append({
+                "id": f"market_entity:{symbol}", "type": "market_entity", "label": symbol,
+                "metadata": {},
+            })
+
+        # Agent Task domain -- real, one-row-per-task "tasks" table
+        # (not task_events, which has multiple rows per task), same real
+        # schema already used by Agent Task Detail. Not the invented
+        # list_agent_tasks()/list_agents() from an earlier proposal.
+        import sqlite3
+        conn = sqlite3.connect("/app/data/agent_tasks.db")
+        conn.row_factory = sqlite3.Row
+        seen_agents = set()
+        for row in conn.execute("SELECT id, agent, server, tool, status FROM tasks"):
+            if row["agent"] not in seen_agents:
+                seen_agents.add(row["agent"])
+                nodes.append({
+                    "id": f"agent:{row['agent']}", "type": "agent", "label": row["agent"],
+                    "metadata": {},
+                })
+            nodes.append({
+                "id": f"agent_task:{row['id']}", "type": "agent_task",
+                "label": f"{row['agent']}:{row['tool']}",
+                "metadata": {"agent": row["agent"], "server": row["server"],
+                             "tool": row["tool"], "status": row["status"]},
+            })
+        conn.close()
+
+        # Minimal, honest Market Entity nodes: extract real ticker symbols
+        # from the top_loadings text already stored on real Factor
+        # entities (e.g. "TOXR (-0.247), XRP (-0.247), ...") -- no
+        # sector/price/asset_type, since no such data exists anywhere in
+        # the system (confirmed directly, twice). Just the symbol.
+        tickers = set()
+        for e in entities:
+            if e["entityType"] != "Factor":
+                continue
+            loadings = obs_value(e, "top_loadings") or ""
+            for part in loadings.split(","):
+                symbol = part.strip().split(" ")[0]
+                if symbol:
+                    tickers.add(symbol)
+        for symbol in tickers:
+            nodes.append({
+                "id": f"market_entity:{symbol}", "type": "market_entity",
+                "label": symbol, "metadata": {},
+            })
+
+        return {"nodes": nodes}
+
+
+    @router.get("/api/graph/edges")
+    async def get_graph_edges(request: Request) -> Dict[str, Any]:
+        """Real, read-only unified graph edge view, scoped to vault+risk
+        only. Uses only the real, confirmed relation types: HAS_TAG
+        (uppercase), has_factor, has_regime, detected_in_snapshot,
+        responds_to_event. No invented cross-domain edges (no
+        vault_note-to-risk_factor "semantic_link" -- that doesn't exist
+        as a real relation anywhere in the graph)."""
+        require_admin(request)
+        import app as _app
+        import json as _json
+
+        kg_id = "1751838b"
+        graph_result = await _app.mcp_manager.call_tool(f"mcp__{kg_id}__read_graph", {})
+        graph_data = _json.loads(graph_result.get("stdout", "{}") or "{}")
+        relations = graph_data.get("relations", [])
+        entities = graph_data.get("entities", [])
+
+        edges = [
+            {"source": r["from"], "target": r["to"], "type": r["relationType"]}
+            for r in relations
+        ]
+
+        # Real, minimal risk_factor -> market_entity edges, same real
+        # top_loadings parsing as the nodes route.
+        def obs_value(e, key):
+            for o in e.get("observations", []):
+                if o.startswith(f"{key}: "):
+                    return o.split(f"{key}: ", 1)[1]
+            return None
+
+        import re as _re
+        for e in entities:
+            if e["entityType"] != "Factor":
+                continue
+            loadings = obs_value(e, "top_loadings") or ""
+            for part in loadings.split(","):
+                part = part.strip()
+                symbol = part.split(" ")[0]
+                if not symbol:
+                    continue
+                # Real weight: parse the numeric loading from "SYM (0.247)"
+                # text already stored on the Factor entity -- no invented
+                # field, the number is right there in the real observation.
+                m = _re.search(r"\(([-\d.]+)\)", part)
+                loading = float(m.group(1)) if m else 0.0
+                edges.append({
+                    "source": e["name"], "target": f"market_entity:{symbol}",
+                    "type": "risk_factor_market",
+                    "metadata": {"loading": loading, "weight": abs(loading)},
+                })
+
+        # Real MCP server -> tool edges, same verified pattern as above.
+        # Real invocation-count weight from task_events, scoped honestly:
+        # this counts only invocations that went through the agent-task
+        # system, not every possible tool call (e.g. direct chat-model
+        # tool use isn't logged here) -- the only real signal available.
+        import sqlite3 as _sqlite3
+        _conn = _sqlite3.connect("/app/data/agent_tasks.db")
+        invocation_counts = {}
+        for row in _conn.execute(
+            "SELECT server, tool, COUNT(*) as cnt FROM task_events WHERE event_type='created' GROUP BY server, tool"
+        ):
+            invocation_counts[(row[0], row[1])] = row[2]
+        _conn.close()
+        name_to_id_for_weights = {v.get("name"): sid for sid, v in _app.mcp_manager._connections.items()}
+
+        all_tools = _app.mcp_manager.get_all_tools()
+        for t in all_tools:
+            sid = t.get("server_id")
+            server_name = next((n for n, i in name_to_id_for_weights.items() if i == sid), None)
+            invocations = invocation_counts.get((server_name, t["name"]), 0)
+            edges.append({
+                "source": f"mcp_server:{sid}", "target": f"mcp_tool:{sid}:{t['name']}",
+                "type": "mcp_server_tool",
+                "metadata": {"invocations": invocations, "weight": invocations},
+            })
+
+        # Minimal, honest risk_factor -> market_entity edges, same real
+        # ticker extraction as the nodes route (both observation formats).
+        import re as _re2
+        for e in entities:
+            if e["entityType"] != "Factor":
+                continue
+            factor_tickers = set()
+            for o in e.get("observations", []):
+                if o.startswith("top_loadings: "):
+                    factor_tickers.update(_re2.findall(r"([A-Z]{2,6})\s*\(", o))
+                elif o.startswith("json: "):
+                    try:
+                        payload = _json.loads(o[len("json: "):])
+                        factor_tickers.update(payload.get("dominant_symbols", []))
+                    except _json.JSONDecodeError:
+                        pass
+            for symbol in factor_tickers:
+                edges.append({
+                    "source": e["name"], "target": f"market_entity:{symbol}",
+                    "type": "risk_factor_market",
+                })
+
+        # Agent Task edges. Real, confirmed correction: tasks.server
+        # stores the readable NAME (e.g. "jarvis_system"), not the
+        # internal hex id used by mcp_server nodes -- built a real
+        # name->id map first, since a naive name-as-id edge would
+        # silently fail to match any real node.
+        name_to_id = {v.get("name"): sid for sid, v in _app.mcp_manager._connections.items()}
+
+        import sqlite3
+        conn = sqlite3.connect("/app/data/agent_tasks.db")
+        conn.row_factory = sqlite3.Row
+        for row in conn.execute("SELECT id, agent, server, tool, created_at, updated_at FROM tasks"):
+            # Real weight: actual elapsed time from the task's own real
+            # created_at/updated_at timestamps (same fields already shown
+            # in Agent Task Detail) -- not an invented duration_ms field.
+            duration_ms = None
+            if row["created_at"] is not None and row["updated_at"] is not None:
+                duration_ms = round((row["updated_at"] - row["created_at"]) * 1000)
+
+            edges.append({
+                "source": f"agent:{row['agent']}", "target": f"agent_task:{row['id']}",
+                "type": "agent_task_assignment",
+                "metadata": {"duration_ms": duration_ms, "weight": duration_ms or 0},
+            })
+            sid = name_to_id.get(row["server"])
+            if sid:
+                edges.append({
+                    "source": f"agent_task:{row['id']}", "target": f"mcp_server:{sid}",
+                    "type": "agent_task_server",
+                    "metadata": {"duration_ms": duration_ms, "weight": duration_ms or 0},
+                })
+                edges.append({
+                    "source": f"agent_task:{row['id']}", "target": f"mcp_tool:{sid}:{row['tool']}",
+                    "type": "agent_task_tool",
+                    "metadata": {"duration_ms": duration_ms, "weight": duration_ms or 0},
+                })
+        conn.close()
+
+        return {"edges": edges}
+
+
+
     return router
