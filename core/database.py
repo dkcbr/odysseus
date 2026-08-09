@@ -494,7 +494,32 @@ class McpServer(TimestampMixin, Base):
     is_enabled = Column(Boolean, default=True)
     oauth_config = Column(Text, nullable=True)   # JSON: provider, keys_file, token_file, scopes
     disabled_tools = Column(Text, nullable=True)  # JSON array of tool names to hide from LLM
+    # Real, added 2026-08-09: a third tool state between enabled/disabled --
+    # a tool in this list is allowed to be prepared and explained, but
+    # blocked from executing until a specific, per-call human approval.
+    # See PendingApproval below and the enforcement check in
+    # src.mcp_manager.McpManager.call_tool().
+    approval_required_tools = Column(Text, nullable=True)  # JSON array of tool names requiring per-call approval
     oauth_tokens = Column(EncryptedText, nullable=True)  # JSON {tokens, client_info} for generic MCP OAuth, encrypted at rest
+
+
+class PendingApproval(TimestampMixin, Base):
+    """Real, added 2026-08-09 -- a tool call staged for human approval
+    (see McpServer.approval_required_tools). A call to a tool in that
+    list creates one of these instead of executing immediately;
+    call_tool() actually runs it only after status flips to 'approved'
+    (see routes/mcp_routes.py's approve/reject endpoints)."""
+    __tablename__ = "pending_approvals"
+
+    id = Column(String, primary_key=True, index=True)
+    server_id = Column(String, nullable=False, index=True)
+    server_name = Column(String, nullable=True)  # denormalized for display without a join
+    tool_name = Column(String, nullable=False)
+    arguments = Column(Text, nullable=False)  # JSON
+    status = Column(String, nullable=False, default="pending")  # pending | approved | rejected
+    resolved_at = Column(DateTime, nullable=True)
+    resolved_by = Column(String, nullable=True)  # username, when auth is present
+    result = Column(Text, nullable=True)  # JSON: the real call_tool() result, populated on approval
 
 
 class Comparison(TimestampMixin, Base):
@@ -1593,6 +1618,18 @@ def _migrate_add_disabled_tools():
     except Exception as e:
         logging.getLogger(__name__).warning(f"disabled_tools migration: {e}")
 
+def _migrate_add_approval_required_tools():
+    """Add approval_required_tools column to mcp_servers table if missing."""
+    try:
+        with engine.connect() as conn:
+            cols = [r[1] for r in conn.execute(text("PRAGMA table_info(mcp_servers)"))]
+            if "approval_required_tools" not in cols:
+                conn.execute(text("ALTER TABLE mcp_servers ADD COLUMN approval_required_tools TEXT"))
+                conn.commit()
+                logging.getLogger(__name__).info("Added approval_required_tools column to mcp_servers")
+    except Exception as e:
+        logging.getLogger(__name__).warning(f"approval_required_tools migration: {e}")
+
 def _migrate_add_mcp_oauth_tokens_column():
     """Add oauth_tokens column to mcp_servers table if missing.
 
@@ -1953,6 +1990,7 @@ def init_db():
     _migrate_add_email_oauth_columns()
     _migrate_add_task_automation_columns()
     _migrate_add_disabled_tools()
+    _migrate_add_approval_required_tools()
     _migrate_add_mcp_oauth_tokens_column()
     _migrate_add_task_v2_columns()
     _migrate_add_notifications_enabled()
