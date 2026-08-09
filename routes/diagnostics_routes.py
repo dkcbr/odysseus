@@ -137,7 +137,7 @@ def setup_diagnostics_routes(
             return t.strip("_")
 
         async def public_call(tool, arguments):
-            result = await _app.mcp_manager.call_tool(f"mcp__9dd54b8f__{tool}", arguments)
+            result = await _app.mcp_manager.call_tool(f"mcp__74167655__{tool}", arguments)
             if result.get("stderr"):
                 raise RuntimeError(f"{tool} error: {result['stderr'][:300]}")
             return _json.loads(result["stdout"])
