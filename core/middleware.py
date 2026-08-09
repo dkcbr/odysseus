@@ -119,7 +119,15 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
                 "font-src 'self' https://cdn.jsdelivr.net; "
                 "img-src 'self' data: blob: https:; "
                 "media-src 'self' blob:; "
-                "connect-src 'self'; "
+                # Real, narrow addition, 2026-08-09: poller_status.js does a
+                # direct browser-to-Oracle fetch for TradingView poller
+                # health (100.116.88.44:7010). Confirmed this can't be a
+                # server-side proxy instead -- the Odysseus container itself
+                # has no network path to Oracle (direct curl from inside the
+                # container times out); only the browser, on the real
+                # Tailscale network, can reach it. One specific host:port,
+                # not a broad relaxation.
+                "connect-src 'self' http://100.116.88.44:7010; "
                 "frame-src 'self'; "
                 "frame-ancestors 'none'"
             )
