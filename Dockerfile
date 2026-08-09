@@ -79,11 +79,22 @@ RUN pip install --no-cache-dir -r requirements.txt \
     && if [ "$INSTALL_OPTIONAL" = "true" ]; then pip install --no-cache-dir -r requirements-optional.txt; fi
 
 # Playwright's own bundled headless Chromium, for the jarvis_browser MCP
-# server (data/mcp/jarvis_browser_mcp.py) when running headless in this
-# container -- distinct from the system `chromium` apt package installed
-# above, which that script doesn't reference. --with-deps installs any
-# additional system libraries Playwright's browser needs beyond what's
-# already present.
+# server when running headless in this container -- distinct from the
+# system `chromium` apt package installed above, which that script
+# doesn't reference. --with-deps installs any additional system
+# libraries Playwright's browser needs beyond what's already present.
+#
+# PLAYWRIGHT_BROWSERS_PATH is pinned to a fixed, non-HOME path
+# deliberately: this RUN executes as root (HOME=/root) since no USER
+# switch happens until the container's entrypoint, but the app itself
+# runs at container start as the unprivileged `odysseus` user
+# (HOME=/app). Without this, the browser installs under
+# /root/.cache/ms-playwright -- unreachable to `odysseus` at runtime
+# (confirmed: /root is mode 0700, root-only) -- so jarvis_browser's
+# `open` tool fails with "Executable doesn't exist" despite the MCP
+# server itself reporting connected (connecting/listing tools never
+# launches a browser; only an actual tool call does).
+ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
 RUN playwright install --with-deps chromium
 
 # python-magic powers content-based MIME sniffing in src/upload_handler.py.

@@ -187,10 +187,20 @@ class McpManager:
             from mcp.client.stdio import stdio_client
             from contextlib import AsyncExitStack
 
+            # `env` is always a dict (default {}), never None -- so this must
+            # merge unconditionally. The previous `if env else None` treated
+            # an empty per-server override dict ({}) as falsy and passed
+            # env=None instead, which the mcp SDK's stdio_client replaces
+            # with its own minimal default environment rather than
+            # inheriting the parent process's. Confirmed live: this silently
+            # dropped PLAYWRIGHT_BROWSERS_PATH (and everything else in
+            # os.environ) for every stdio server with no custom env
+            # entries -- e.g. jarvis_browser, whose `open` tool then failed
+            # looking for the browser under the wrong HOME-relative path.
             server_params = StdioServerParameters(
                 command=command,
                 args=args,
-                env={**os.environ, **env} if env else None,
+                env={**os.environ, **env},
             )
 
             stack = AsyncExitStack()
