@@ -266,14 +266,25 @@ function _computeHealthPct(data) {
   data.servers.forEach(s => { serverByName[s.name] = s; });
 
   let healthyCount = 0;
+  let applicableCount = 0;
   agentNames.forEach(name => {
     const agent = data.registry[name];
     const enabled = agent.enabled;
-    const serversOk = (agent.servers || []).every(sName => serverByName[sName] && serverByName[sName].status === 'connected');
+    const servers = agent.servers || [];
+    const disabledCount = servers.filter(sName => serverByName[sName] && serverByName[sName].is_enabled === false).length;
+    // Real fix, 2026-08-09: an agent whose only dependencies are
+    // intentionally disabled is genuinely idle, not healthy or
+    // unhealthy -- exclude it from the percentage rather than count it
+    // either way, matching the same real distinction used in the
+    // per-agent cards below.
+    if (servers.length > 0 && disabledCount === servers.length) return;
+    applicableCount++;
+    const serversOk = servers.every(sName => serverByName[sName] && serverByName[sName].status === 'connected');
     const workerAlive = data.health[name] ? data.health[name].status === 'alive' : false;
     if (enabled && serversOk && workerAlive) healthyCount++;
   });
-  return Math.round((healthyCount / agentNames.length) * 100);
+  if (applicableCount === 0) return 100;
+  return Math.round((healthyCount / applicableCount) * 100);
 }
 
 function _computeAgentThroughput(throughput, agentName) {
@@ -326,17 +337,42 @@ function _renderAgentCards(data) {
 
   return Object.keys(data.registry).map(name => {
     const agent = data.registry[name];
-    const serversOk = (agent.servers || []).every(sName => serverByName[sName] && serverByName[sName].status === 'connected');
+    const missingServers = (agent.servers || []).filter(sName => {
+      const srv = serverByName[sName];
+      if (!srv) return true;
+      if (srv.is_enabled === false) return false;
+      return srv.status !== 'connected';
+    });
+    const disabledServers = (agent.servers || []).filter(sName => serverByName[sName] && serverByName[sName].is_enabled === false);
+    const serversOk = missingServers.length === 0;
+    // Real, honest distinction: an agent whose only listed servers are
+    // ALL intentionally disabled genuinely has no usable capability
+    // right now -- that's a real, distinct "idle" state, not the same
+    // "fully healthy" green as an agent actually doing its job. Only
+    // treat it as healthy if at least one real server is genuinely
+    // connected (or it has no server dependencies at all).
+    const hasConnectedServer = (agent.servers || []).some(sName => serverByName[sName] && serverByName[sName].status === 'connected');
+    const allServersDisabled = (agent.servers || []).length > 0 && disabledServers.length === (agent.servers || []).length;
     const workerAlive = data.health[name] ? data.health[name].status === 'alive' : false;
-    const healthy = agent.enabled && serversOk && workerAlive;
+    const isIdleDisabled = serversOk && allServersDisabled && !hasConnectedServer;
+    const healthy = agent.enabled && serversOk && workerAlive && !isIdleDisabled;
+    // Real fix, 2026-08-09: distinguish "a dependency is intentionally
+    // disabled" from "a dependency is enabled but genuinely down" --
+    // both used to render as the same alarming "server: down".
+    let serverLabel;
+    if (isIdleDisabled) {
+      serverLabel = 'disabled';
+    } else {
+      serverLabel = serversOk ? 'ok' : 'down';
+    }
     const throughputCount = _computeAgentThroughput(data.throughput, name);
     const { lastSuccess, lastFailed } = _computeAgentLastEvents(data.events || [], name);
     return `
       <div data-agent-name="${esc(name)}" class="jarvis-card" style="border:1px solid var(--hud-cyan-dim);border-radius:4px;padding:8px;background:var(--hud-panel);cursor:pointer;" title="View tasks for this agent in Process Table">
         <div style="display:flex;justify-content:space-between;align-items:center;">
           <div>
-            <div style="font-size:11px;font-weight:600;color:${CYAN};">${_statusDot(healthy, 8)}${esc(name)}</div>
-            <div style="font-size:9px;color:var(--hud-text-dim);margin-top:4px;">enabled: ${agent.enabled ? 'yes' : 'no'} \u00b7 server: ${serversOk ? 'ok' : 'down'} \u00b7 worker: ${workerAlive ? 'alive' : 'dead'}</div>
+            <div style="font-size:11px;font-weight:600;color:${CYAN};">${isIdleDisabled ? '<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--hud-text-dim);margin-right:4px;"></span>' : _statusDot(healthy, 8)}${esc(name)}</div>
+            <div style="font-size:9px;color:var(--hud-text-dim);margin-top:4px;">enabled: ${agent.enabled ? 'yes' : 'no'} \u00b7 server: ${serverLabel} \u00b7 worker: ${workerAlive ? 'alive' : 'dead'}</div>
             <div style="font-size:9px;color:var(--hud-text-dim);margin-top:2px;">throughput (6h): ${throughputCount} \u00b7 last success: ${_relativeTime(lastSuccess)} \u00b7 last fail: ${_relativeTime(lastFailed)}</div>
             <div id="jarvis-home-agent-errrate-${esc(name)}" style="font-size:9px;color:var(--hud-text-dim);margin-top:2px;">error rate: ...</div>
           </div>
@@ -358,12 +394,23 @@ function _renderMcpServerCards(data) {
       `;
     }
     const connected = s.status === 'connected';
+    // Real fix, 2026-08-09: distinguish "intentionally disabled by the
+    // user" from "enabled but genuinely down/erroring" -- the real API
+    // already returns is_enabled separately from status, but this
+    // renderer previously collapsed both into the same "disconnected"
+    // label, which reads as an unexpected failure either way. Disabled
+    // servers get a real, distinct neutral (not red) dot and label.
+    const isDisabled = s.is_enabled === false;
     const uid = s.name.replace(/[^a-z0-9]/gi, '');
+    const dotHtml = isDisabled
+      ? `<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--hud-text-dim);margin-right:4px;"></span>`
+      : _statusDot(connected, 8, true);
+    const labelText = isDisabled ? 'disabled' : (connected ? 'connected' : 'disconnected');
     return `
       <div class="jarvis-card" style="border:1px solid var(--hud-cyan-dim);border-radius:4px;padding:6px 8px;background:var(--hud-panel);">
         <div style="display:flex;justify-content:space-between;align-items:center;">
-          <div style="font-size:11px;font-weight:600;color:${CYAN};">${_statusDot(connected, 8, true)}${esc(s.name)}</div>
-          <div style="font-size:9px;color:var(--hud-text-dim);">${connected ? 'connected' : 'disconnected'}</div>
+          <div style="font-size:11px;font-weight:600;color:${CYAN};">${dotHtml}${esc(s.name)}</div>
+          <div style="font-size:9px;color:var(--hud-text-dim);">${labelText}</div>
         </div>
         <button class="jarvis-home-toggle-tools-${uid}" data-server-id="${esc(s.id)}" style="font-size:9px;padding:2px 6px;margin-top:4px;background:transparent;border:1px solid var(--hud-cyan-dim);color:var(--hud-text-dim);border-radius:3px;cursor:pointer;">${s.tool_count != null ? s.tool_count : '?'} tools \u25be</button>
         <div class="jarvis-home-tools-${uid}" style="display:none;margin-top:4px;padding-left:6px;max-height:140px;overflow-y:auto;"></div>
