@@ -11,6 +11,25 @@ import sessionModule from './sessions.js';
 import chatRenderer from './chatRenderer.js?v=20260722emailfastindex1';
 import chatStream from './chatStream.js';
 import { addAITTSButton } from './tts-ai.js';
+import { TextChunker } from './voice/textChunker.js';
+import { AudioQueuePlayer } from './voice/audioQueuePlayer.js';
+
+// Real, self-contained voice-mode toggle wiring. Deliberately isolated
+// here rather than threaded through the existing multi-file
+// mode-agent-btn/mode-chat-btn pattern, to avoid touching that
+// delicate, already-working wiring for a genuinely separate feature.
+window.__voiceModeActive = false;
+if (typeof document !== 'undefined') {
+  document.addEventListener('DOMContentLoaded', () => {
+    const _voiceBtn = document.getElementById('voice-mode-btn');
+    if (!_voiceBtn) return;
+    _voiceBtn.addEventListener('click', () => {
+      window.__voiceModeActive = !window.__voiceModeActive;
+      _voiceBtn.classList.toggle('active', window.__voiceModeActive);
+      _voiceBtn.setAttribute('aria-pressed', String(window.__voiceModeActive));
+    });
+  });
+}
 import markdownModule from './markdown.js';
 import spinnerModule from './spinner.js';
 import presetsModule from './presets.js';
@@ -1361,6 +1380,16 @@ import { wireArrowUpRecall, getUserMessagesFromChatHistory } from './composerArr
     // cycle so a multi-round agent response (one reasoning phase PER round) wraps each
     // round's reasoning in its own <think>…</think> instead of leaking rounds 2+ as text.
     let _thinkOpen = false;
+    // Real, additive voice-mode state -- only created when voice mode is
+    // actually on (window.__voiceModeActive, set by the toggle button).
+    // Purely observes json.delta/json.thinking below; never touches
+    // accumulated or _thinkOpen, so existing text rendering is
+    // completely unaffected whether voice mode is on or off.
+    const _voiceModeOn = !!(typeof window !== 'undefined' && window.__voiceModeActive);
+    const _voiceChunker = _voiceModeOn ? new TextChunker() : null;
+    const _voicePlayer = _voiceModeOn ? new AudioQueuePlayer({
+      onError: (err) => console.warn('[voice-mode] TTS error:', err),
+    }) : null;
     let holder = null;
     let finalMeta = null;
     let spinner = null;
@@ -2240,6 +2269,12 @@ import { wireArrowUpRecall, getUserMessagesFromChatHistory } from './composerArr
 
             if (data === '[DONE]') {
               _streamSawDone = true;
+              // Real, additive voice-mode flush: speak whatever real
+              // text remains buffered once the stream genuinely ends.
+              if (_voiceChunker) {
+                const _finalVoiceChunks = _voiceChunker.flush();
+                for (const _vc of _finalVoiceChunks) _voicePlayer.enqueue(_vc);
+              }
               // Always update background map if entry exists (even if user switched back)
               var bgDone = _backgroundStreams.get(streamSessionId);
               if (bgDone && !_isBg) {
@@ -2355,6 +2390,16 @@ import { wireArrowUpRecall, getUserMessagesFromChatHistory } from './composerArr
                   if (!_thinkOpen) { _delta = '<think>' + _delta; _thinkOpen = true; }
                 } else if (_thinkOpen) {
                   _delta = '</think>' + _delta; _thinkOpen = false;
+	                }
+	                // Real, additive voice-mode hook: feed ONLY real reply
+	                // text (never thinking/reasoning tokens) into the
+	                // chunker, and speak any newly-completed chunks. Reads
+	                // the raw json.delta directly (not the think-tag-
+	                // wrapped _delta above) so no HTML/tag markup ever
+	                // reaches TTS.
+	                if (_voiceChunker && !json.thinking) {
+	                  const _voiceChunks = _voiceChunker.push(json.delta);
+	                  for (const _vc of _voiceChunks) _voicePlayer.enqueue(_vc);
 	                }
 	                const wasEmpty = !accumulated;
 		                accumulated += _delta;
