@@ -119,15 +119,19 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
                 "font-src 'self' https://cdn.jsdelivr.net; "
                 "img-src 'self' data: blob: https:; "
                 "media-src 'self' blob:; "
-                # Real, narrow addition, 2026-08-09: poller_status.js does a
-                # direct browser-to-Oracle fetch for TradingView poller
-                # health (100.116.88.44:7010). Confirmed this can't be a
-                # server-side proxy instead -- the Odysseus container itself
-                # has no network path to Oracle (direct curl from inside the
-                # container times out); only the browser, on the real
-                # Tailscale network, can reach it. One specific host:port,
+                # Real, narrow addition, 2026-08-09: poller_status.js and
+                # poller_dashboard.js do direct browser fetches to three
+                # real health endpoints -- TradingView poller on Oracle
+                # (100.116.88.44:7010, confirmed unreachable from inside
+                # the container, browser-only) and the NVDA/crypto zone
+                # monitors, which run on the same Pop!_OS host as Odysseus
+                # itself but a different port (100.93.206.89:7020,
+                # confirmed reachable from the container too -- a proxy
+                # was viable here, but kept this consistent with the
+                # Oracle entry rather than building two different patterns
+                # for the same widget family). Three specific host:ports,
                 # not a broad relaxation.
-                "connect-src 'self' http://100.116.88.44:7010; "
+                "connect-src 'self' http://100.116.88.44:7010 http://100.93.206.89:7020; "
                 "frame-src 'self'; "
                 "frame-ancestors 'none'"
             )
