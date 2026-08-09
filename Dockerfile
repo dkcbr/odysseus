@@ -78,6 +78,21 @@ COPY requirements.txt requirements-optional.txt ./
 RUN pip install --no-cache-dir -r requirements.txt \
     && if [ "$INSTALL_OPTIONAL" = "true" ]; then pip install --no-cache-dir -r requirements-optional.txt; fi
 
+# Real attempt, 2026-08-09: local Kokoro-82M TTS. PyTorch itself DOES
+# install correctly here (confirmed: cu132 index, matches this host's
+# real CUDA 13.2) -- but kokoro's own dependency chain (kokoro ->
+# misaki -> spacy -> blis) does not support Python 3.14 yet. blis fails
+# to compile (Cython error) regardless of index/version choice -- a
+# real, widely-documented ecosystem gap (confirmed via web search: e.g.
+# a Kokoro-TTS-Local project explicitly states "Python 3.13+ is not
+# supported" for this same dependency chain, and this image is on
+# 3.14). Not fixable with a version pin or different index; would need
+# a Python downgrade for the whole image, a real, separate, much bigger
+# decision. Left uninstalled -- real GPU passthrough (see
+# docker/gpu.nvidia.yml, scripts/check-docker-gpu.sh) is genuinely
+# configured and verified working on this host for whenever this
+# becomes viable, or for other GPU-dependent features.
+
 # Playwright's own bundled headless Chromium, for the jarvis_browser MCP
 # server when running headless in this container -- distinct from the
 # system `chromium` apt package installed above, which that script
