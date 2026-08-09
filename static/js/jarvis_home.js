@@ -431,10 +431,20 @@ function _renderMcpServerCards(data) {
 }
 
 async function _renderApprovalsHud() {
-  const hudEl = el('jarvis-home-approvals-hud');
-  if (!hudEl) return;
+  // Real fix: don't capture the element once up front -- this function
+  // awaits a real network fetch, and _render() re-runs on a 10s interval
+  // while this panel is open, replacing the whole container's innerHTML
+  // (a fresh #jarvis-home-approvals-hud div each time). A reference
+  // captured before the await can go stale (detached from the visible
+  // DOM) by the time the fetch resolves, silently writing to an orphaned
+  // node while the real, visible placeholder never updates. Re-querying
+  // fresh at each write point, and bailing if the element genuinely
+  // isn't there, avoids this regardless of how many renders overlap.
+  if (!el('jarvis-home-approvals-hud')) return;
   try {
     const r = await _fetchJson('/api/mcp/approvals');
+    const hudEl = el('jarvis-home-approvals-hud');
+    if (!hudEl) return;  // panel closed or re-rendered away while the fetch was in flight
     const pending = r.approvals;
     if (!pending.length) {
       hudEl.innerHTML = `<div style="font-size:11px;color:${CYAN};text-shadow:0 0 4px ${CYAN};margin-bottom:8px;">PENDING APPROVALS</div><div style="font-size:11px;color:var(--hud-text-dim);">No tool calls waiting on approval.</div>`;
