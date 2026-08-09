@@ -277,9 +277,20 @@ function _computeHealthPct(data) {
     // unhealthy -- exclude it from the percentage rather than count it
     // either way, matching the same real distinction used in the
     // per-agent cards below.
-    if (servers.length > 0 && disabledCount === servers.length) return;
+    const enabledServers = servers.filter(sName => !serverByName[sName] || serverByName[sName].is_enabled !== false);
+    // Real fix, 2026-08-09 (v2): the first version of this fix only
+    // handled an agent whose dependencies are ENTIRELY disabled. A
+    // mixed case slipped through -- browser_agent depends on both
+    // jarvis_browser (enabled) and filesystem (intentionally disabled)
+    // -- so serversOk below required a genuinely-disabled server to
+    // show 'connected', which it never will, permanently zeroing this
+    // agent's health regardless of its real, working dependency.
+    // Correct fix: only enabled servers must be connected; disabled
+    // ones are excluded from the check entirely, matching the same
+    // idle/neutral distinction as the full-exclusion case above.
+    if (servers.length > 0 && enabledServers.length === 0) return;
     applicableCount++;
-    const serversOk = servers.every(sName => serverByName[sName] && serverByName[sName].status === 'connected');
+    const serversOk = enabledServers.every(sName => serverByName[sName] && serverByName[sName].status === 'connected');
     const workerAlive = data.health[name] ? data.health[name].status === 'alive' : false;
     if (enabled && serversOk && workerAlive) healthyCount++;
   });
@@ -417,6 +428,49 @@ function _renderMcpServerCards(data) {
       </div>
     `;
   }).join('');
+}
+
+async function _renderApprovalsHud() {
+  const hudEl = el('jarvis-home-approvals-hud');
+  if (!hudEl) return;
+  try {
+    const r = await _fetchJson('/api/mcp/approvals');
+    const pending = r.approvals;
+    if (!pending.length) {
+      hudEl.innerHTML = `<div style="font-size:11px;color:${CYAN};text-shadow:0 0 4px ${CYAN};margin-bottom:8px;">PENDING APPROVALS</div><div style="font-size:11px;color:var(--hud-text-dim);">No tool calls waiting on approval.</div>`;
+      return;
+    }
+    const rows = pending.map(a => `
+      <div class="jarvis-home-approval-row" data-approval-id="${esc(a.id)}" style="border-left:3px solid ${RED};padding:6px 8px;margin-bottom:6px;background:rgba(0,0,0,0.15);">
+        <div style="font-size:11px;color:var(--hud-text);"><strong>${esc(a.server_name || a.server_id)}</strong> -- ${esc(a.tool_name)}</div>
+        <div style="font-size:9px;color:var(--hud-text-dim);margin-top:2px;font-family:monospace;">${esc(JSON.stringify(a.arguments))}</div>
+        <div style="font-size:9px;color:var(--hud-text-dim);margin-top:2px;">${esc(new Date(a.created_at).toLocaleString())}</div>
+        <div style="margin-top:6px;display:flex;gap:8px;">
+          <button class="jarvis-home-approval-approve" style="font-size:10px;padding:3px 10px;background:var(--hud-cyan-dim);border:1px solid ${CYAN};color:${CYAN};border-radius:3px;cursor:pointer;">APPROVE</button>
+          <button class="jarvis-home-approval-reject" style="font-size:10px;padding:3px 10px;background:transparent;border:1px solid ${RED};color:${RED};border-radius:3px;cursor:pointer;">REJECT</button>
+        </div>
+      </div>`).join('');
+    hudEl.innerHTML = `<div style="font-size:11px;color:${RED};text-shadow:0 0 4px ${RED};margin-bottom:8px;">PENDING APPROVALS (${pending.length})</div>${rows}`;
+
+    hudEl.querySelectorAll('.jarvis-home-approval-row').forEach(row => {
+      const id = row.dataset.approvalId;
+      const approveBtn = row.querySelector('.jarvis-home-approval-approve');
+      const rejectBtn = row.querySelector('.jarvis-home-approval-reject');
+      const resolve = async (action) => {
+        approveBtn.disabled = true; rejectBtn.disabled = true;
+        try {
+          await _fetchJson(`/api/mcp/approvals/${encodeURIComponent(id)}/${action}`, { method: 'POST' });
+          _renderApprovalsHud();
+        } catch (e) {
+          row.insertAdjacentHTML('beforeend', `<div style="font-size:9px;color:${RED};margin-top:4px;">Failed: ${esc(e.message)}</div>`);
+        }
+      };
+      approveBtn.addEventListener('click', () => resolve('approve'));
+      rejectBtn.addEventListener('click', () => resolve('reject'));
+    });
+  } catch (e) {
+    hudEl.innerHTML = '<div style="font-size:11px;color:var(--hud-text-dim);">Pending approvals unavailable.</div>';
+  }
 }
 
 async function _toggleServerTools(uid, serverId, container) {
@@ -753,6 +807,8 @@ async function _render() {
       if (hudEl) hudEl.innerHTML = '<div style="font-size:11px;color:var(--hud-text-dim);">Correlation regime data unavailable.</div>';
     });
 
+    _renderApprovalsHud();
+
     Promise.all([
       _fetchJson('/api/factors/latest?domain=stock'),
       _fetchJson('/api/factors/trend?domain=stock&lookback=30').catch(() => null),
@@ -841,6 +897,10 @@ async function _render() {
           <div id="jarvis-home-correlation-hud" class="jarvis-card" style="border:1px solid var(--hud-red);border-radius:4px;padding:10px;background:var(--hud-bg);margin-bottom:12px;">
             <div style="font-size:11px;color:${RED};text-shadow:0 0 4px ${RED};margin-bottom:8px;">CORRELATION BREAKDOWN REGIME (primary risk signal)</div>
             <div style="font-size:11px;color:var(--hud-text-dim);">Loading real correlation data...</div>
+          </div>
+          <div id="jarvis-home-approvals-hud" class="jarvis-card" style="border:1px solid var(--hud-red);border-radius:4px;padding:10px;background:var(--hud-bg);margin-bottom:12px;">
+            <div style="font-size:11px;color:${RED};text-shadow:0 0 4px ${RED};margin-bottom:8px;">PENDING APPROVALS</div>
+            <div style="font-size:11px;color:var(--hud-text-dim);">Loading real pending approvals...</div>
           </div>
           <div id="jarvis-home-suggestions-hud" class="jarvis-card" style="border:1px solid var(--hud-cyan-dim);border-radius:4px;padding:10px;background:var(--hud-bg);margin-bottom:12px;">
             <div style="font-size:11px;color:${CYAN};text-shadow:0 0 4px ${CYAN};margin-bottom:8px;">ACTIVE SUGGESTIONS</div>
