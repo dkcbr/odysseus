@@ -14,6 +14,7 @@ from core.database import (  # explicit re-exports for IDE/type-checker visibili
     GalleryImage,
     ModelEndpoint,
     McpServer,
+    PendingApproval,
     Comparison,
     ApiToken,
     Signature,

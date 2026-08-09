@@ -11,7 +11,7 @@ import os
 import re
 import asyncio 
 from typing import Any, Dict, List, Optional, Set, Tuple
-from src.database import McpServer, SessionLocal
+from src.database import McpServer, PendingApproval, SessionLocal
 
 from src.runtime_paths import get_app_root
 
@@ -474,7 +474,9 @@ class McpManager:
                 "name": srv.name,
             }
 
-    async def call_tool(self, qualified_name: str, arguments: Dict) -> Dict:
+    async def call_tool(
+        self, qualified_name: str, arguments: Dict, _skip_approval_gate: bool = False
+    ) -> Dict:
         """Call an MCP tool by its qualified name (mcp__{server_id}__{tool_name}).
 
         Returns a result dict compatible with agent_tools format.
@@ -510,6 +512,35 @@ class McpManager:
                     return {
                         "error": f"Tool '{tool_name}' is disabled for this server",
                         "exit_code": 1,
+                    }
+            # Real, added 2026-08-09: a third tool state alongside
+            # enabled/disabled. Unlike a disabled tool (always blocked),
+            # an approval-required tool is allowed to be staged -- the
+            # call is recorded as a PendingApproval instead of executed,
+            # and only actually runs (via this same call_tool(), re-entered
+            # from the approve endpoint) once a human approves it. This is
+            # the same shared, single entry point as the disabled_tools
+            # check above, so it applies everywhere a tool call can
+            # originate, not just one caller.
+            if srv and srv.approval_required_tools:
+                import json as _json
+                approval_set = set(_json.loads(srv.approval_required_tools))
+                if tool_name in approval_set and not _skip_approval_gate:
+                    import uuid as _uuid
+                    approval = PendingApproval(
+                        id=_uuid.uuid4().hex[:8],
+                        server_id=server_id,
+                        server_name=srv.name,
+                        tool_name=tool_name,
+                        arguments=_json.dumps(arguments),
+                        status="pending",
+                    )
+                    db.add(approval)
+                    db.commit()
+                    return {
+                        "status": "awaiting_approval",
+                        "approval_id": approval.id,
+                        "exit_code": 0,
                     }
         finally:
             db.close()
