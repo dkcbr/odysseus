@@ -54,3 +54,9 @@ httpx2
 
 # Added for jarvis_browser MCP server (data/mcp/jarvis_browser_mcp.py)
 playwright>=1.48.0
+
+# Public.com's own official, vendor-maintained MCP server -- real,
+# complete, correct implementation (37 tools) replacing the earlier
+# hand-built public_com_mcp.py, which is being removed. Confirmed
+# real: github.com/PublicDotCom/publicdotcom-mcp-server
+publicdotcom-mcp-server
