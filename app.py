@@ -703,6 +703,11 @@ app.include_router(setup_preset_routes(preset_manager))
 from routes.diagnostics_routes import setup_diagnostics_routes
 app.include_router(setup_diagnostics_routes(rag_manager, rag_available, research_handler, memory_vector))
 
+# Real, restored 2026-08-09 -- lost in the same fork-drift event as most
+# of diagnostics_routes.py; see routes/factor_routes.py for detail.
+from routes.factor_routes import setup_factor_routes
+app.include_router(setup_factor_routes())
+
 # Cleanup
 from routes.cleanup.cleanup_routes import setup_cleanup_routes
 app.include_router(setup_cleanup_routes(session_manager))

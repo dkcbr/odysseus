@@ -20,6 +20,7 @@ route in this codebase.
 import json
 import sqlite3
 import time
+from pathlib import Path
 from uuid import uuid4
 
 from fastapi import APIRouter, HTTPException, Request
@@ -43,6 +44,10 @@ DESIRED_AGENTS: dict[str, dict] = {
     "browser_agent": {"enabled": True, "description": "Controls Playwright browser automation"},
     "filesystem_agent": {"enabled": True, "description": "Handles filesystem operations"},
 }
+
+# Real, restored 2026-08-09 -- matches the host-side path (data/agent_worker_logs)
+# agent_worker.py writes to, via the existing bind mount.
+WORKER_LOG_DIR = Path("/app/data/agent_worker_logs")
 
 
 class TaskCreate(BaseModel):
@@ -517,3 +522,45 @@ async def fail_task(task_id: str, body: TaskResult, request: Request):
     are exhausted."""
     require_admin(request)
     return fail_task_db_native(task_id, body.result)
+
+
+@router.get("/worker-logs/{agent}")
+async def get_worker_logs(agent: str, request: Request, task_id: str | None = None,
+                          phase: str | None = None, outcome: str | None = None, limit: int = 200):
+    """Real structured worker logs (JSON-lines files written by
+    agent_worker.py's real _log_event() calls -- tool_start/tool_end with
+    duration_ms, arguments, outcome). Lives under /app/data/agent_worker_logs/
+    (the existing bind-mounted data dir, no new docker-compose volume needed).
+    Newest first. Optional filters for task_id/phase/outcome.
+    """
+    require_admin(request)
+    if agent not in DESIRED_AGENTS:
+        raise HTTPException(404, f"Unknown agent: {agent}")
+
+    log_path = WORKER_LOG_DIR / f"{agent}.jsonl"
+    if not log_path.exists():
+        return {"agent": agent, "logs": [], "count": 0}
+
+    entries = []
+    with open(log_path) as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                entry = json.loads(line)
+            except json.JSONDecodeError:
+                continue  # a partially-written line (rare, non-fatal) -- skip rather than fail the whole read
+            if task_id is not None and entry.get("task_id") != task_id:
+                continue
+            if phase is not None and entry.get("phase") != phase:
+                continue
+            if outcome is not None and entry.get("outcome") != outcome:
+                continue
+            entries.append(entry)
+
+    entries.sort(key=lambda e: e.get("ts", 0), reverse=True)
+    entries = entries[:limit]
+    return {"agent": agent, "logs": entries, "count": len(entries)}
+
+

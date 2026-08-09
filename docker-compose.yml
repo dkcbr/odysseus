@@ -16,6 +16,12 @@ services:
       # land under /app/.local for the odysseus user. Persist them so a
       # container recreate does not silently remove installed serve engines.
       - ${APP_DATA_DIR:-./data}/local:/app/.local:z
+      # Real, read-only mount for the OHLCV/PCA pipeline output, needed by
+      # routes/factor_routes.py (restored 2026-08-09 alongside the rest of
+      # the Aug 5 diagnostics feature set). Read-only since this route only
+      # reads pre-computed factor files; the PCA build itself stays a
+      # separate, on-demand host-side step, not run inside the container.
+      - /home/dk/jarvis-scripts:/home/dk/jarvis-scripts:ro
       # Local stdio MCP server directories -- restored 2026-08-08, missing
       # since the dev-based deploy, which is why jarvis_desktop, jarvis_system,
       # wigolo, and risk_surface (all stdio-transport MCP servers) showed
