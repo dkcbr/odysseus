@@ -22,6 +22,13 @@ services:
       # reads pre-computed factor files; the PCA build itself stays a
       # separate, on-demand host-side step, not run inside the container.
       - /home/dk/jarvis-scripts:/home/dk/jarvis-scripts:ro
+      # Real, read-only mount for Infinite Brain OS, a real, separate
+      # knowledge-architecture repo -- indexed into the existing RAG
+      # system (search_rag tool, mcp_servers/rag_server.py) so Jarvis
+      # can search and cite it without importing or restructuring the
+      # actual Jarvis vault. Read-only, matching the same reasoning as
+      # the jarvis-scripts mount above.
+      - /home/dk/jarvis/infinite-brain-os:/home/dk/jarvis/infinite-brain-os:ro
       # Local stdio MCP server directories -- restored 2026-08-08, missing
       # since the dev-based deploy, which is why jarvis_desktop, jarvis_system,
       # wigolo, and risk_surface (all stdio-transport MCP servers) showed
