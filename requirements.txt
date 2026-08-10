@@ -60,3 +60,6 @@ playwright>=1.48.0
 # hand-built public_com_mcp.py, which is being removed. Confirmed
 # real: github.com/PublicDotCom/publicdotcom-mcp-server
 publicdotcom-mcp-server
+
+# Added for youtube_transcript MCP server (services/mcp_servers/youtube_transcript/)
+yt-dlp
