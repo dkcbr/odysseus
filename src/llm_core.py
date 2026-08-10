@@ -609,9 +609,14 @@ def _ollama_normalize_messages(messages: List[Dict]) -> List[Dict]:
 _ollama_normalize_tool_messages = _ollama_normalize_messages
 
 
-# Real, added 2026-08-10: see the real, direct comment at its use site
-# below for why this exists and how the value was chosen.
-OLLAMA_MAX_PRACTICAL_CONTEXT = 8192
+# Real, added 2026-08-10, raised same day: see the real, direct comment
+# at its use site below for why this exists. Raised from the initial,
+# conservative 8192 to 40960 -- qwen3:14b's real, confirmed native max
+# (see src/model_context.py's corrected known-models entry) -- after
+# directly, empirically confirming on the real, live hardware that the
+# true max fits with real headroom to spare (~14.6GB of 16.4GB VRAM,
+# ~1.7GB free).
+OLLAMA_MAX_PRACTICAL_CONTEXT = 40960
 
 
 def _build_ollama_payload(
