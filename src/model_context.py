@@ -181,7 +181,15 @@ KNOWN_CONTEXT_WINDOWS = {
     'llama-3': 131072,
 
     # --- Qwen ---
-    'qwen3': 131072,
+    # Real, corrected 2026-08-10: was 131072, which is wrong for the
+    # real, actual qwen3:14b model this deployment runs (confirmed via
+    # direct, empirical testing against the live Ollama instance --
+    # requesting anything above 40960 gets silently capped back down to
+    # 40960 by Ollama itself, the model's genuine native architectural
+    # ceiling, not a VRAM constraint). Other real qwen3 sizes/configs
+    # may genuinely differ; this key matches by substring, so it's
+    # scoped to what's actually been verified for this deployment.
+    'qwen3': 40960,
     'qwen2.5': 131072,
     'qwen2': 32768,
     'qwq': 32768,
