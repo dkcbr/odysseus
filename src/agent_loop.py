@@ -900,7 +900,13 @@ _ADMIN_SCHEMA_NAMES = frozenset([
     "create_session", "list_sessions", "send_to_session", "pipeline",
     "ask_teacher", "list_models", "search_chats",
 ])
-_TOOL_SELECTION_TIMEOUT_SECONDS = 1.5
+# Real, raised 2026-08-10: 1.5s was too tight once real tool count grew past
+# ~150 (confirmed via logs: real reindex attempts were timing out and
+# silently skipping, leaving newly-added tools like search_rag and
+# get_transcript permanently missing from the retrieval index until the
+# next successful reindex). 5s is a real, deliberate tradeoff -- a slower
+# worst-case reindex, in exchange for it actually completing.
+_TOOL_SELECTION_TIMEOUT_SECONDS = 5.0
 
 
 def _is_ollama_openai_compat_url(endpoint_url: str) -> bool:
