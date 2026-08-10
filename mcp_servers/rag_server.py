@@ -65,9 +65,13 @@ async def list_tools() -> list[Tool]:
         Tool(
             name="search_rag",
             description=(
-                "Search indexed RAG documents by relevance. Returns matching chunks "
-                "with their real source file path, so results can be cited back to "
-                "where they came from. Real, added 2026-08-09."
+                "Search indexed documentation, notes, and knowledge bases -- including "
+                "the Infinite Brain OS knowledge base -- by relevance. Use this whenever "
+                "a question references docs, a knowledge base, indexed files, or "
+                "something that sounds like it comes from written source material "
+                "rather than general knowledge. Returns matching chunks with their "
+                "real source file path, so results can be cited back to where they "
+                "came from."
             ),
             inputSchema={
                 "type": "object",
