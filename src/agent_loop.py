@@ -2706,6 +2706,27 @@ def _build_base_prompt(
             # Skill index is a soft enhancement — never fail prompt assembly on it.
             logger.debug(f"Skill-index injection skipped: {_e}")
 
+    # Real, minimal, added 2026-08-10: nudge the model to actually use
+    # retrieved tools rather than answer from memory. Confirmed via real,
+    # live testing tonight that the retrieval/selection system correctly
+    # offers relevant tools (e.g. search_rag) for real queries, but the
+    # local model (Qwen3-14B) often still answers from its own knowledge
+    # unless explicitly told to prefer a tool. Deliberately generic, not
+    # search_rag-specific -- the same pattern was seen with
+    # youtube_transcript. Gated on real MCP tools actually being present
+    # in this turn's set, not on every message.
+    if relevant_tools is not None and any(n.startswith("mcp__") for n in tool_names):
+        _nudge = (
+            "Tools are available for this request. If any retrieved tool can "
+            "provide factual information, documentation, or exact file "
+            "citations, prefer calling the appropriate tool rather than "
+            "answering from memory. When you use a tool, include the "
+            "returned source_path(s) in your answer. If the tool returns "
+            "nothing relevant, say \"I couldn't find a matching doc\" and "
+            "offer to search again.\n\n"
+        )
+        agent_prompt = _nudge + agent_prompt
+
     return agent_prompt, skill_index_block
 
 
