@@ -609,6 +609,11 @@ def _ollama_normalize_messages(messages: List[Dict]) -> List[Dict]:
 _ollama_normalize_tool_messages = _ollama_normalize_messages
 
 
+# Real, added 2026-08-10: see the real, direct comment at its use site
+# below for why this exists and how the value was chosen.
+OLLAMA_MAX_PRACTICAL_CONTEXT = 8192
+
+
 def _build_ollama_payload(
     model: str,
     messages: List[Dict],
@@ -640,7 +645,16 @@ def _build_ollama_payload(
     if max_tokens and max_tokens > 0:
         options["num_predict"] = max_tokens
     if num_ctx is not None and num_ctx > 0 and num_ctx != DEFAULT_CONTEXT:
-        options["num_ctx"] = num_ctx
+        # Real, added 2026-08-10: cap what actually gets requested. A
+        # model's real, advertised max (e.g. qwen3's known 131072) can be
+        # far larger than what actually fits in real, available VRAM --
+        # confirmed directly: requesting the full advertised max caused
+        # Ollama to silently fall back to a much smaller serving context
+        # (4096) rather than negotiate a size that fits. 8192 was
+        # confirmed to load correctly with real headroom to spare
+        # (~1.5GB additional VRAM over the base model, on a 16GB card
+        # already using ~9GB for model weights).
+        options["num_ctx"] = min(num_ctx, OLLAMA_MAX_PRACTICAL_CONTEXT)
     if options:
         payload["options"] = options
     if tools:
