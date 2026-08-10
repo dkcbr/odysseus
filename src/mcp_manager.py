@@ -738,8 +738,15 @@ class McpManager:
         by_server = {}
         for t in tools:
             # Skip builtin Python servers — they're already in the agent prompt
-            # But include NPX-based builtins (like browser) which aren't hardcoded
-            if self.is_builtin(t["server_id"]) and t["server_id"] != "builtin_browser":
+            # But include NPX-based builtins (like browser) which aren't hardcoded.
+            # Real, added 2026-08-10: also include "rag" -- confirmed by direct
+            # search that no actual hardcoded system-prompt description of its
+            # tools exists anywhere in this codebase (the comment above is
+            # stale for this server specifically). Without this, any tool
+            # added to the real "rag" built-in server (e.g. search_rag) is
+            # structurally invisible to the model everywhere, not just in
+            # RAG-based tool retrieval -- confirmed via a real, direct check.
+            if self.is_builtin(t["server_id"]) and t["server_id"] not in ("builtin_browser", "rag"):
                 continue
             if t.get("is_disabled"):
                 continue
