@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 from .subprocess_tools import BashTool, PythonTool
 from .web_tools import WebSearchTool, WebFetchTool
 from .finance_tools import TickerLookupTool
-from .filesystem_tools import ReadFileTool, WriteFileTool, EditFileTool, ApplyPatchTool, LsTool, GlobTool, GrepTool, GetWorkspaceTool
+from .filesystem_tools import ReadFileTool, WriteFileTool, EditFileTool, ApplyPatchTool, LsTool, GlobTool, GrepTool, GetWorkspaceTool, ProposeWriteTool, CommitWriteTool
 from .coding_tools import TodoWriteTool
 from .document_tools import CreateDocumentTool, UpdateDocumentTool, EditDocumentTool, SuggestDocumentTool, ManageDocumentTool
 from .interaction_tools import AskUserTool, UpdatePlanTool
@@ -44,6 +44,8 @@ TOOL_HANDLERS = {
     "read_file": ReadFileTool().execute,
     "write_file": WriteFileTool().execute,
     "edit_file": EditFileTool().execute,
+    "propose_write": ProposeWriteTool().execute,
+    "commit_write": CommitWriteTool().execute,
     "apply_patch": ApplyPatchTool().execute,
     "todowrite": TodoWriteTool().execute,
     "ls": LsTool().execute,
