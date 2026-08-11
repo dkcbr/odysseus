@@ -362,6 +362,17 @@ class MemoryManager:
         """Get memories that are relevant to the query based on text similarity and semantic keyword matching."""
         if not memories or not query.strip():
             return []
+
+        # Memory hygiene: exclude superseded facts from automatic retrieval.
+        # Convention: prefix the fact text with "[SUPERSEDED]" (case-insensitive,
+        # optional leading whitespace) when a fact is replaced by newer info but
+        # kept for historical record. Superseded facts are never auto-injected
+        # into chat context; they remain visible to explicit manage_memory
+        # search/list calls, since those read the raw store directly rather
+        # than going through this function.
+        memories = [m for m in memories if not m.get("text", "").lstrip().upper().startswith("[SUPERSEDED")]
+        if not memories:
+            return []
             
         # Define keyword categories for semantic matching
         identity_words = ["name", "who", "i", "am", "called", "identity", "myself", "me", "my"]
