@@ -18,7 +18,10 @@ it executes, rather than running immediately on call. See
 routes/mcp_routes.py's approval endpoints (built 2026-08-09,
 commit f12ed0b5) to change this.
 
-Exposes: run_command(command, cwd=None, timeout=60)
+Exposes: run_command(command, cwd=None, timeout=60),
+         write_file(path, content, mode="w"),
+         git_read(repo_path, action, limit=20),
+         http_probe(url, timeout=10)
 
 Registration:
     fetch('/api/mcp/servers', {
@@ -35,7 +38,10 @@ Registration:
 """
 
 import asyncio
+import os
+import tempfile
 
+import httpx
 from mcp.server.fastmcp import FastMCP
 
 mcp = FastMCP(
@@ -79,6 +85,90 @@ async def run_command(command: str, cwd: str = "", timeout: int = DEFAULT_TIMEOU
     if err:
         result += f"stderr:\n{err}\n"
     return result
+
+
+@mcp.tool()
+async def write_file(path: str, content: str, mode: str = "w") -> str:
+    """Write or append to a real file, atomically (write-to-temp-then-
+    rename, so a crash mid-write can't leave a partial file). mode: 'w'
+    to overwrite, 'a' to append. Creates parent directories if needed.
+    NOT sandboxed -- can write anywhere the host process can."""
+    if mode not in ("w", "a"):
+        return f"Error: mode must be 'w' or 'a', got {mode!r}"
+
+    try:
+        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+        if mode == "a":
+            with open(path, "a", encoding="utf-8") as f:
+                f.write(content)
+            return f"Appended {len(content)} chars to {path}"
+
+        dir_ = os.path.dirname(path) or "."
+        fd, tmp_path = tempfile.mkstemp(dir=dir_)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(content)
+            os.replace(tmp_path, path)
+        except Exception:
+            if os.path.exists(tmp_path):
+                os.unlink(tmp_path)
+            raise
+        return f"Wrote {len(content)} chars to {path}"
+    except Exception as e:
+        return f"Error: {type(e).__name__}: {e}"
+
+
+@mcp.tool()
+async def git_read(repo_path: str, action: str, limit: int = 20) -> str:
+    """Real, read-only git info -- status, current branch, or recent log
+    -- without needing a full shell git call. action: 'status' | 'log' |
+    'branch'. limit: max commits for 'log' (default 20)."""
+    if action not in ("status", "log", "branch"):
+        return f"Error: action must be 'status', 'log', or 'branch', got {action!r}"
+
+    if action == "status":
+        cmd = ["git", "-C", repo_path, "status", "--porcelain=v1", "-b"]
+    elif action == "branch":
+        cmd = ["git", "-C", repo_path, "branch", "--show-current"]
+    else:
+        cmd = ["git", "-C", repo_path, "log", f"-n{limit}", "--pretty=format:%H|%an|%ad|%s", "--date=iso"]
+
+    proc = await asyncio.create_subprocess_exec(
+        *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+    )
+    stdout, stderr = await proc.communicate()
+    if proc.returncode != 0:
+        return f"Error: {stderr.decode(errors='replace').strip()}"
+
+    out = stdout.decode(errors="replace").strip()
+    if action == "log":
+        commits = []
+        for line in out.splitlines():
+            parts = line.split("|", 3)
+            if len(parts) == 4:
+                commits.append({"sha": parts[0], "author": parts[1], "date": parts[2], "subject": parts[3]})
+        import json as _json
+        return _json.dumps(commits, indent=2)
+    return out or "(clean / no output)"
+
+
+@mcp.tool()
+async def http_probe(url: str, timeout: int = 10) -> str:
+    """Real, direct HTTP GET to any reachable URL. Returns status code,
+    headers, and a truncated body snippet. NOT restricted to a
+    whitelist -- can reach anywhere this host's network can."""
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            resp = await client.get(url)
+    except Exception as e:
+        return f"Error: {type(e).__name__}: {e}"
+
+    import json as _json
+    return _json.dumps({
+        "status": resp.status_code,
+        "headers": dict(resp.headers),
+        "body_snippet": resp.text[:1000],
+    }, indent=2)
 
 
 if __name__ == "__main__":
