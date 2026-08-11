@@ -10,7 +10,7 @@ import secrets
 import time
 from typing import Optional, Dict, Any, Tuple, List
 
-from src.constants import MAX_READ_CHARS, MAX_DIFF_LINES, MAX_OUTPUT_CHARS
+from src.constants import MAX_READ_CHARS, MAX_DIFF_LINES, MAX_OUTPUT_CHARS, DATA_DIR
 
 _CODENAV_SKIP_DIRS = frozenset({
     ".git", ".hg", ".svn", "node_modules", "venv", ".venv", "__pycache__",
@@ -88,6 +88,7 @@ class EditFileTool:
             return {"error": "edit_file: path required", "exit_code": 1}
         try:
             path = _resolve_tool_path(raw_path)
+            _reject_if_sensitive_write(path)
         except ValueError as e:
             return {"error": f"edit_file: {e}", "exit_code": 1}
         if old == "":
@@ -183,6 +184,40 @@ class ReadFileTool:
             data = data[:MAX_READ_CHARS] + f"\n... [truncated at {MAX_READ_CHARS} chars]"
         return {"output": data, "exit_code": 0}
 
+# ---------------------------------------------------------------------------
+# Sensitive-write gating: files that store real app secrets or the agent
+# capability policy itself live inside DATA_DIR (the always-on default
+# allowlist root) and are NOT covered by _is_sensitive_path's dotfile-style
+# denylist (.ssh, .env, id_rsa, ...). Direct write_file/edit_file/apply_patch
+# to these is rejected; propose_write/commit_write remains the sanctioned
+# path (diff-preview + one-time token), and is intentionally NOT gated here.
+# ---------------------------------------------------------------------------
+SENSITIVE_WRITE_GATING_ENABLED = True
+_SENSITIVE_WRITE_PATHS = frozenset(os.path.realpath(p) for p in (
+    os.path.join(DATA_DIR, ".app_key"),
+    os.path.join(DATA_DIR, "app.db"),
+    os.path.join(DATA_DIR, "auth.json"),
+    os.path.join(DATA_DIR, "integrations.json"),
+    os.path.join(DATA_DIR, "agent_capabilities.json"),
+))
+
+
+class SensitiveWritePathError(ValueError):
+    """Raised when a direct write/edit/patch targets a protected file."""
+
+
+def _reject_if_sensitive_write(resolved_path: str) -> None:
+    if not SENSITIVE_WRITE_GATING_ENABLED:
+        return
+    rp = os.path.realpath(resolved_path)
+    if rp in _SENSITIVE_WRITE_PATHS:
+        raise SensitiveWritePathError(
+            f"direct writes to {rp} are restricted -- call propose_write with "
+            '{"path": "' + rp + '", "content": "..."} to preview the diff and '
+            "get a commit_token, then commit_write with that token to apply it"
+        )
+
+
 class WriteFileTool:
     async def execute(self, content: str, ctx: dict) -> dict:
         from src.tool_execution import _resolve_tool_path, _resolve_search_root, _truncate
@@ -206,6 +241,7 @@ class WriteFileTool:
                 pass
         try:
             path = _resolve_tool_path(raw_path)
+            _reject_if_sensitive_write(path)
         except ValueError as e:
             return {"error": f"write_file: {e}", "exit_code": 1}
         try:
@@ -379,6 +415,7 @@ class ApplyPatchTool:
             prepared = []
             for op in ops:
                 path = _resolve_tool_path(op["path"])
+                _reject_if_sensitive_write(path)
                 kind = op["kind"]
                 if kind == "add":
                     if os.path.exists(path):
