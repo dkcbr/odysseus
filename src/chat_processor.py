@@ -164,6 +164,16 @@ class ChatProcessor:
         if not mem_entries or not message.strip():
             return []
 
+        # Memory hygiene: exclude superseded facts from automatic retrieval.
+        # Convention: prefix the fact text with "[SUPERSEDED]" when a fact is
+        # replaced by newer info but kept in the store for historical record.
+        # This is the real, primary path used for automatic chat injection
+        # (via build_context_preface), so this is the enforcement point that
+        # actually matters for keeping stale facts out of live conversations.
+        mem_entries = [m for m in mem_entries if not m.get("text", "").lstrip().upper().startswith("[SUPERSEDED")]
+        if not mem_entries:
+            return []
+
         now = time.time()
         query_tokens = _content_tokens(message)
 

@@ -189,6 +189,12 @@ class NativeMemoryProvider(MemoryProvider):
                 entry = by_id.get(memory_id) if memory_id else result
                 if not entry:
                     continue
+                # Memory hygiene: exclude superseded facts from vector-based
+                # recall too, same convention as the fallback path in
+                # memory.py (facts prefixed "[SUPERSEDED]" stay in the store
+                # for history/audit but are never auto-injected into chat).
+                if entry.get("text", "").lstrip().upper().startswith("[SUPERSEDED"):
+                    continue
                 if owner is not None and entry.get("owner") != owner:
                     continue
                 hits.append(
