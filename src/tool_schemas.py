@@ -193,6 +193,37 @@ FUNCTION_TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
+            "name": "propose_write",
+            "description": "Preview a file write as a diff WITHOUT writing to disk. Returns a commit_token \u2014 pass it to commit_write to actually apply the change.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "File path to write to"},
+                    "content": {"type": "string", "description": "Proposed file content"}
+                },
+                "required": ["path", "content"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "commit_write",
+            "description": "Apply a write previously previewed with propose_write. Requires the exact path, content, and commit_token returned by propose_write \u2014 the token is one-time-use and expires after 5 minutes.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "File path to write to (must match the propose_write call)"},
+                    "content": {"type": "string", "description": "File content (must match the propose_write call)"},
+                    "commit_token": {"type": "string", "description": "Token returned by propose_write for this exact path+content"}
+                },
+                "required": ["path", "content", "commit_token"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "edit_file",
             "description": "Edit a file ON DISK by exact string replacement (home folder, project files, any real path like ~/sweden.txt or /path/to/file). This is the right tool for files on disk — NOT edit_document (that's for editor-panel documents). PREFER this over bash (sed/echo) — it shows a diff. old_string must match the file exactly and be unique (or set replace_all). Use write_file to create a new file.",
             "parameters": {
