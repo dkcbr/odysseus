@@ -47,6 +47,43 @@ function _injectPulseStyle() {
   document.head.appendChild(style);
 }
 
+// Real, added 2026-08-11: ported from jarvis.html (the original,
+// pre-Odysseus single-file GUI) at DK's request -- same seamless-loop
+// technique (duplicate the content, animate translateX 0 -> -50%),
+// adapted to this file's real --hud-* variables instead of the
+// original's own --cyan/--green/--red set.
+function _injectTickerStyle() {
+  if (document.getElementById('jarvis-home-ticker-style')) return;
+  const style = document.createElement('style');
+  style.id = 'jarvis-home-ticker-style';
+  style.textContent = `
+    #jarvis-home-ticker-wrapper {
+      position: relative; overflow: hidden; white-space: nowrap;
+      border: 1px solid var(--hud-cyan-dim); border-radius: 4px;
+      background: var(--hud-bg); margin-bottom: 12px; height: 32px;
+    }
+    #jarvis-home-ticker-wrapper::before, #jarvis-home-ticker-wrapper::after {
+      content: ''; position: absolute; top: 0; bottom: 0; width: 40px; z-index: 2; pointer-events: none;
+    }
+    #jarvis-home-ticker-wrapper::before { left: 0; background: linear-gradient(to right, var(--hud-bg), transparent); }
+    #jarvis-home-ticker-wrapper::after { right: 0; background: linear-gradient(to left, var(--hud-bg), transparent); }
+    #jarvis-home-ticker-bar {
+      display: inline-flex; align-items: center; height: 32px;
+      animation: jarvis-home-ticker-scroll 60s linear infinite;
+    }
+    #jarvis-home-ticker-bar:hover { animation-play-state: paused; }
+    @keyframes jarvis-home-ticker-scroll { 0% { transform: translateX(0); } 100% { transform: translateX(-50%); } }
+    .jarvis-home-ticker-item { display: inline-flex; align-items: center; gap: 6px; padding: 0 12px; flex-shrink: 0; }
+    .jarvis-home-ticker-symbol { font-size: 9px; letter-spacing: 1px; color: var(--hud-text-dim); }
+    .jarvis-home-ticker-price { font-size: 12px; color: var(--hud-cyan); font-weight: bold; }
+    .jarvis-home-ticker-change-up { font-size: 9px; color: var(--hud-green); }
+    .jarvis-home-ticker-change-down { font-size: 9px; color: var(--hud-red); }
+    .jarvis-home-ticker-divider { width: 1px; height: 18px; background: var(--hud-cyan-dim); flex-shrink: 0; }
+    .jarvis-home-ticker-label { font-size: 8px; letter-spacing: 2px; color: var(--hud-text-dim); padding: 0 8px; flex-shrink: 0; }
+  `;
+  document.head.appendChild(style);
+}
+
 async function _fetchJson(url, opts) {
   const res = await fetch(url, { credentials: 'same-origin', ...(opts || {}) });
   if (!res.ok) throw new Error(`${url} failed: ${res.status}`);
@@ -483,6 +520,68 @@ async function _renderApprovalsHud() {
   }
 }
 
+async function _renderTickerHud() {
+  // Real, added 2026-08-11. Same fresh-requery discipline as
+  // _renderApprovalsHud (fixed 2026-08-09 after a real stale-DOM-
+  // reference bug) -- this card also lives under _render()'s 10s
+  // refresh interval, so a reference captured before the await can go
+  // stale by the time the write happens.
+  if (!el('jarvis-home-ticker-bar')) return;
+  try {
+    const r = await _fetchJson('/api/mcp/call', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ server: 'public_com', tool: 'get_portfolio', arguments: { account_id: '5OS47729' } }),
+    });
+    const bar = el('jarvis-home-ticker-bar');
+    if (!bar) return;
+    if (r.exit_code !== 0) {
+      bar.innerHTML = '<div style="font-size:10px;color:var(--hud-text-dim);padding:0 20px;">Portfolio data unavailable.</div>';
+      return;
+    }
+    const data = JSON.parse(r.stdout);
+    const positions = data.positions || [];
+    const orders = (data.orders || []).filter(o => o.status === 'NEW' || o.status === 'PENDING');
+
+    const posItems = positions.map(p => {
+      const sym = esc(p.instrument?.symbol || '?');
+      const price = parseFloat(p.lastPrice?.lastPrice || 0);
+      const chg = parseFloat(p.positionDailyGain?.gainPercentage || 0);
+      const dir = chg >= 0 ? 'up' : 'down';
+      const arrow = chg >= 0 ? '▲' : '▼';
+      return `<div class="jarvis-home-ticker-item">
+        <span class="jarvis-home-ticker-symbol">${sym}</span>
+        <span class="jarvis-home-ticker-price">$${price.toFixed(2)}</span>
+        <span class="jarvis-home-ticker-change-${dir}">${arrow}${Math.abs(chg).toFixed(2)}%</span>
+      </div>`;
+    }).join('');
+
+    const orderItems = orders.map(o => {
+      const sym = esc(o.instrument?.symbol || '?');
+      const side = esc(o.side || '?');
+      const price = parseFloat(o.limitPrice || 0);
+      return `<div class="jarvis-home-ticker-item">
+        <span class="jarvis-home-ticker-symbol">${sym}</span>
+        <span class="jarvis-home-ticker-change-${side === 'BUY' ? 'up' : 'down'}">${side} @ $${price.toFixed(2)}</span>
+      </div>`;
+    }).join('');
+
+    if (!posItems && !orderItems) {
+      bar.innerHTML = '<div style="font-size:10px;color:var(--hud-text-dim);padding:0 20px;">No real positions or pending orders.</div>';
+      return;
+    }
+
+    const div = '<div class="jarvis-home-ticker-divider"></div>';
+    const ownedLabel = '<div class="jarvis-home-ticker-label">OWNED</div>';
+    const queuedLabel = orderItems ? '<div class="jarvis-home-ticker-label">QUEUED</div>' : '';
+    const inner = ownedLabel + posItems + div + queuedLabel + orderItems + (orderItems ? div : '');
+    bar.innerHTML = inner + inner;  // duplicated for the seamless 0 -> -50% loop
+  } catch (e) {
+    const bar = el('jarvis-home-ticker-bar');
+    if (bar) bar.innerHTML = '<div style="font-size:10px;color:var(--hud-text-dim);padding:0 20px;">Portfolio data unavailable.</div>';
+  }
+}
+
 async function _toggleServerTools(uid, serverId, container) {
   const list = container.querySelector(`.jarvis-home-tools-${uid}`);
   const btn = container.querySelector(`.jarvis-home-toggle-tools-${uid}`);
@@ -741,6 +840,7 @@ async function _render() {
   const container = el('jarvis-home-content');
   if (!container) return;
   _injectPulseStyle();
+  _injectTickerStyle();
   try {
     const [data, portfolioSystem] = await Promise.all([_fetchAll(), _fetchPortfolioAndSystem()]);
     const healthPct = _computeHealthPct(data);
@@ -818,6 +918,7 @@ async function _render() {
     });
 
     _renderApprovalsHud();
+    _renderTickerHud();
 
     Promise.all([
       _fetchJson('/api/factors/latest?domain=stock'),
@@ -862,6 +963,11 @@ async function _render() {
     // every existing element ID/function call preserved so live updates
     // (cpu/mem gauge refresh, collapsible sections) keep working.
     container.innerHTML = `
+      <div id="jarvis-home-ticker-wrapper">
+        <div id="jarvis-home-ticker-bar">
+          <div style="font-size:10px;color:var(--hud-text-dim);letter-spacing:2px;padding:0 20px;">Loading real portfolio data...</div>
+        </div>
+      </div>
       <div class="jarvis-home-grid">
         <div class="jarvis-home-zone-top">
           ${_renderPortfolioSystemSection(portfolioSystem)}
