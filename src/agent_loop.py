@@ -4240,6 +4240,24 @@ async def stream_agent_loop(
             is_api_model=(_is_api_model and not guide_only),
             allow_fenced_for_api=_ody_doc_finetune_mode,
         )
+
+        # Real, observed failure mode (confirmed via direct testing: qwen3:14b
+        # produces zero text AND zero tool calls on round 1 for certain prompts,
+        # 60-90% of the time on 2 real eval scenarios). Route this into the
+        # existing, already-proven force-answer salvage path below rather than
+        # building a separate retry mechanism -- reuses tested logic instead
+        # of adding new, parallel complexity to this already-large function.
+        if (
+            round_num == 1
+            and not tool_blocks
+            and not native_tool_calls
+            and not _strip_think_blocks(strip_tool_blocks(round_response)).strip()
+        ):
+            logger.info(
+                "[agent] round 1 produced no text and no tool calls -- routing to force-answer salvage"
+            )
+            _force_answer = True
+
         if _ody_doc_stream_create_mode and tool_blocks:
             create_idx = next(
                 (idx for idx, block in enumerate(tool_blocks) if block.tool_type == "create_document"),
