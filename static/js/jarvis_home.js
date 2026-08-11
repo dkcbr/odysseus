@@ -74,8 +74,9 @@ function _injectTickerStyle() {
     #jarvis-home-ticker-bar:hover { animation-play-state: paused; }
     @keyframes jarvis-home-ticker-scroll { 0% { transform: translateX(0); } 100% { transform: translateX(-50%); } }
     .jarvis-home-ticker-item { display: inline-flex; align-items: center; gap: 6px; padding: 0 12px; flex-shrink: 0; }
-    .jarvis-home-ticker-symbol { font-size: 9px; letter-spacing: 1px; color: var(--hud-text-dim); }
-    .jarvis-home-ticker-price { font-size: 12px; color: var(--hud-cyan); font-weight: bold; }
+    .jarvis-home-ticker-symbol { font-size: 12px; letter-spacing: 1px; color: var(--hud-cyan); font-weight: bold; }
+    .jarvis-home-ticker-price { font-size: 9px; color: var(--hud-text-dim); }
+    .jarvis-home-ticker-meta { font-size: 8px; color: var(--hud-text-dim); }
     .jarvis-home-ticker-change-up { font-size: 9px; color: var(--hud-green); }
     .jarvis-home-ticker-change-down { font-size: 9px; color: var(--hud-red); }
     .jarvis-home-ticker-divider { width: 1px; height: 18px; background: var(--hud-cyan-dim); flex-shrink: 0; }
@@ -549,10 +550,13 @@ async function _renderTickerHud() {
       const chg = parseFloat(p.positionDailyGain?.gainPercentage || 0);
       const dir = chg >= 0 ? 'up' : 'down';
       const arrow = chg >= 0 ? '▲' : '▼';
+      const shares = parseFloat(p.quantity || 0);
+      const costBasis = parseFloat(p.costBasis?.unitCost || 0);
       return `<div class="jarvis-home-ticker-item">
         <span class="jarvis-home-ticker-symbol">${sym}</span>
         <span class="jarvis-home-ticker-price">$${price.toFixed(2)}</span>
         <span class="jarvis-home-ticker-change-${dir}">${arrow}${Math.abs(chg).toFixed(2)}%</span>
+        <span class="jarvis-home-ticker-meta">${shares} sh @ $${costBasis.toFixed(2)}</span>
       </div>`;
     }).join('');
 
