@@ -967,10 +967,12 @@ async function _render() {
     // every existing element ID/function call preserved so live updates
     // (cpu/mem gauge refresh, collapsible sections) keep working.
     container.innerHTML = `
-      <div id="jarvis-home-ticker-wrapper">
+      <div class="jarvis-card" style="margin-bottom:12px;">
+      <div id="jarvis-home-ticker-wrapper" style="margin-bottom:0;">
         <div id="jarvis-home-ticker-bar">
           <div style="font-size:10px;color:var(--hud-text-dim);letter-spacing:2px;padding:0 20px;">Loading real portfolio data...</div>
         </div>
+      </div>
       </div>
       <div class="jarvis-home-grid">
         <div class="jarvis-home-zone-top">
