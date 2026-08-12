@@ -155,6 +155,16 @@ KNOWN_CONTEXT_WINDOWS = {
     'gemini-1.5-pro': 1048576,
     'gemini-1.5-flash': 1048576,
     'gemma-4': 262144,
+    # Real, added 2026-08-12: Ollama's actual model name for this family is
+    # "gemma4" (no hyphen, e.g. "gemma4:e2b") -- the substring match above
+    # never fires for it, silently falling through to DEFAULT_CONTEXT/None
+    # and leaving Ollama's own bare default (confirmed directly: 4096) in
+    # place instead of the model's real, much larger capacity. Marketed at
+    # 128K-256K depending on variant; capped by OLLAMA_MAX_PRACTICAL_CONTEXT
+    # (40960) at the call site regardless, matching qwen3's real ceiling on
+    # this deployment's hardware -- not independently verified for gemma4
+    # specifically, just given the same practical cap other local models get.
+    'gemma4': 262144,
     'gemma-3': 128000,
     'gemma-2': 8192,
 
