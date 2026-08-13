@@ -15,6 +15,7 @@ from typing import List, Dict, Any, Optional, Set
 
 from src.constants import CHROMA_DIR
 from src.index_walk import prune_index_dirs, is_indexable_file
+from src.observability import timed, time_block
 from pathlib import Path
 
 from src.embedding_lanes import (
@@ -113,6 +114,7 @@ class VectorRAG:
             self._healthy = False
             return False
 
+    @timed("VectorRAG._embed", threshold_ms=100.0)
     def _embed(self, texts: List[str]) -> List[List[float]]:
         if not self._lanes:
             return []
@@ -358,40 +360,43 @@ class VectorRAG:
             query_words = set(query.lower().split())
             candidates = []
 
-            for lane, results in query_lanes(
-                self._lanes,
-                query,
-                n_results=lambda lane: min(
-                    (k * 6 if owner else k * 3),
-                    max(k, 20),
-                    lane.count(),
-                ),
-                where=where_filter,
-                include=["documents", "metadatas", "distances"],
-                raise_if_all_failed=True,
+            with time_block(
+                "VectorRAG.search.fetch_and_score", extra={"query_len": len(query), "k": k}
             ):
-                for idx in range(len(results["ids"][0])):
-                    doc_id = results["ids"][0][idx]
-                    distance = results["distances"][0][idx]
-                    doc_text = results["documents"][0][idx]
-                    meta = results["metadatas"][0][idx]
+                for lane, results in query_lanes(
+                    self._lanes,
+                    query,
+                    n_results=lambda lane: min(
+                        (k * 6 if owner else k * 3),
+                        max(k, 20),
+                        lane.count(),
+                    ),
+                    where=where_filter,
+                    include=["documents", "metadatas", "distances"],
+                    raise_if_all_failed=True,
+                ):
+                    for idx in range(len(results["ids"][0])):
+                        doc_id = results["ids"][0][idx]
+                        distance = results["distances"][0][idx]
+                        doc_text = results["documents"][0][idx]
+                        meta = results["metadatas"][0][idx]
 
-                    vector_sim = 1.0 - distance
-                    doc_words = set(doc_text.lower().split())
-                    overlap = len(query_words & doc_words)
-                    keyword_score = overlap / len(query_words) if query_words else 0.0
-                    hybrid_score = (VECTOR_WEIGHT * vector_sim) + (KEYWORD_WEIGHT * keyword_score)
+                        vector_sim = 1.0 - distance
+                        doc_words = set(doc_text.lower().split())
+                        overlap = len(query_words & doc_words)
+                        keyword_score = overlap / len(query_words) if query_words else 0.0
+                        hybrid_score = (VECTOR_WEIGHT * vector_sim) + (KEYWORD_WEIGHT * keyword_score)
 
-                    candidates.append({
-                        "id": doc_id,
-                        "document": doc_text,
-                        "metadata": meta,
-                        "distance": round(distance, 4),
-                        "similarity": round(hybrid_score, 4),
-                        "vector_similarity": round(vector_sim, 4),
-                        "keyword_score": round(keyword_score, 4),
-                        "embedding_lane": lane.name,
-                    })
+                        candidates.append({
+                            "id": doc_id,
+                            "document": doc_text,
+                            "metadata": meta,
+                            "distance": round(distance, 4),
+                            "similarity": round(hybrid_score, 4),
+                            "vector_similarity": round(vector_sim, 4),
+                            "keyword_score": round(keyword_score, 4),
+                            "embedding_lane": lane.name,
+                        })
 
             candidates.sort(key=lambda c: c["similarity"], reverse=True)
             top = dedupe_results(candidates, limit=k)
