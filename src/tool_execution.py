@@ -31,6 +31,14 @@ from src.tool_policy import ToolPolicy
 from src.constants import MAX_OUTPUT_CHARS, MAX_READ_CHARS, MAX_DIFF_LINES, DATA_DIR
 from src.tool_utils import _truncate, get_mcp_manager
 
+# TODO(recovery): an uncommitted, 11-line delta touching this file and
+# src/tool_security.py was lost on 2026-08-13 via an accidental
+# `git checkout <branch> -- .`. Confirmed via full git history (all refs,
+# entire file history back to v1.0) that it was never committed anywhere
+# and is not recoverable. No currently-failing test depends on it. If/when
+# reconstruction is needed, implement only what a concrete failing test or
+# spec requires -- do not guess at dispatch/security behavior here.
+
 # Persistent working directory for agent subprocesses.
 # Resolves to <repo_root>/data, which is the bind-mounted volume in Docker
 # (/app/data) and the local data directory for manual installs.
