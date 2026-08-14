@@ -64,6 +64,31 @@ async def run_command(command: str, cwd: str = "", timeout: int = DEFAULT_TIMEOU
     real exit code. cwd defaults to this server's own working directory
     if not given. timeout is in seconds (default 60); the process is
     killed if it exceeds this."""
+    # Real safety net, added 2026-08-13: models kept defaulting to this
+    # generic tool to "create" .docx/.pptx/.xlsx/.pdf files via echo/cat
+    # redirection, producing invalid files with the right extension but
+    # plain-text content -- they silently fail to open, and the model
+    # confidently reported false success on them (confirmed via a real,
+    # direct test tonight). This can't literally redirect to
+    # create_document_office (a different tool in a different process's
+    # own registry) -- the achievable fix is to detect the pattern and
+    # refuse, telling the model to call the correct tool instead. Only
+    # matches a real write (>/>>), not a read+pipe like `cat x.docx | grep`.
+    import re as _re
+    _office_write_pattern = _re.compile(
+        r">{1,2}\s*[\w./-]*\.(docx|pptx|xlsx|pdf)\b", _re.IGNORECASE
+    )
+    if _office_write_pattern.search(command):
+        return (
+            "REFUSED: this command appears to write a .docx/.pptx/.xlsx/.pdf "
+            "file directly via shell redirection. That produces an invalid, "
+            "corrupt file that has the right extension but cannot actually be "
+            "opened by Word/PowerPoint/Excel/a PDF reader -- do NOT retry this "
+            "with a different shell command. Call the create_document_office "
+            "tool instead (format, filename, title, sections/slides/rows) -- "
+            "it uses real document libraries and produces a genuinely valid file."
+        )
+
     proc = await asyncio.create_subprocess_shell(
         command,
         stdout=asyncio.subprocess.PIPE,
