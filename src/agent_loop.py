@@ -3465,8 +3465,8 @@ async def stream_agent_loop(
             and not _active_document_relevant
             and not active_email
         ):
-            _relevant_tools = set(_WORKSPACE_TERMINUS_TOOLS)
-            logger.info("[tool-rag] Workspace file/terminal request; using Odysseus Terminus toolset")
+            _relevant_tools |= set(_WORKSPACE_TERMINUS_TOOLS)
+            logger.info("[tool-rag] Workspace file/terminal request; adding Odysseus Terminus toolset")
 
     # If this turn targets the open document, keep editing tools available
     # regardless of which selection path (RAG, keyword, caller-provided) ran.
