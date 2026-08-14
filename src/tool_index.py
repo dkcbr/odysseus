@@ -37,6 +37,14 @@ ALWAYS_AVAILABLE = frozenset({
     # of topic. Without this, RAG drops it and the agent falls back to
     # app_api /api/memory/add which fails with 422 on first attempt.
     "manage_memory",
+    # Portfolio context, ticker lookups, and document creation are similarly
+    # ambient -- none reliably map to a domain keyword RAG can match on.
+    # Re-applied 2026-08-13 after an earlier, uncommitted version of this
+    # exact change was lost to a concurrent git checkout from another
+    # session (see 703c5b7c) -- committing this one immediately.
+    "get_portfolio_context",
+    "lookup_ticker",
+    "create_document_office",
     # Ask the user a multiple-choice question for a decision/clarification.
     # Always reachable so the agent can pause and ask at any point.
     "ask_user",
@@ -143,6 +151,8 @@ BUILTIN_TOOL_DESCRIPTIONS: Dict[str, str] = {
     "propose_write": "Preview a file write as a diff WITHOUT writing to disk. Returns a commit_token -- pass it to commit_write to actually apply the change. Use before writing to sensitive paths (data/agent_capabilities.json, data/app.db, data/auth.json, data/integrations.json, data/.app_key), which reject direct write_file calls.",
     "commit_write": "Apply a write previously previewed with propose_write. Requires the exact path, content, and commit_token returned by propose_write -- the token is single-use and expires after 5 minutes.",
     "lookup_ticker": "Look up REAL, VERIFIED company identity and quote data for a stock/crypto ticker symbol via Financial Modeling Prep. Call this before stating what company a ticker represents or its price -- small/mid-cap tickers are frequently misidentified from memory (e.g. TMC, MP). Errors (no API key, ticker not found) mean tell the user real data isn't available, never guess.",
+    "get_portfolio_context": "Fetch DK's real, current portfolio context (holdings, strategy, rules, thesis notes). ALWAYS call for any question about a specific position, balance, holding, or stored trading rule — never assume you already know the answer.",
+    "create_document_office": "Create a real Word (.docx), PowerPoint (.pptx), Excel (.xlsx), or PDF file. ALWAYS call this for requests to create a Word document, presentation, spreadsheet, or PDF specifically — the generic create_document tool cannot produce real Office/PDF files. NEVER use bash/run_command/echo to write these files directly, that produces an invalid file that appears to work but cannot be opened.",
 }
 
 

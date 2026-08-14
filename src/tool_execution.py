@@ -798,6 +798,47 @@ async def _execute_tool_block_impl(
         desc = f"{tool}: {first_line}" if first_line else tool
         result = await _document_tool_dispatch(tool, content, session_id, owner) \
             or {"error": f"{tool}: execution failed", "exit_code": 1}
+    elif tool == "create_document_office":
+        desc = "create_document_office"
+        try:
+            import json as _json
+            import os
+            import sys as _sys
+            _sys.path.insert(0, "/app/data/scripts")
+            from create_document import make_docx, make_xlsx, make_pptx, make_pdf
+
+            args = _json.loads(content) if content else {}
+            fmt = args.get("format")
+            filename = args.get("filename", f"document.{fmt}")
+            if not filename.endswith(f".{fmt}"):
+                filename = f"{filename}.{fmt}"
+            out_path = os.path.join("/app/data/uploads", filename)
+
+            if fmt == "docx":
+                path = make_docx(args.get("title", ""), args.get("sections", []), out_path)
+            elif fmt == "xlsx":
+                path = make_xlsx(args.get("rows", []), out_path)
+            elif fmt == "pptx":
+                path = make_pptx(args.get("slides", []), out_path)
+            elif fmt == "pdf":
+                path = make_pdf(args.get("title", ""), args.get("sections", []), out_path)
+            else:
+                raise ValueError(f"unsupported format: {fmt}")
+
+            size = os.path.getsize(path)
+            result = {"stdout": f"Created {path} ({size} bytes)", "stderr": "", "exit_code": 0}
+        except Exception as e:
+            result = {"error": f"create_document_office: {e}", "exit_code": 1}
+    elif tool == "get_portfolio_context":
+        desc = "get_portfolio_context"
+        try:
+            import os
+            path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "portfolio_context.md")
+            with open(path) as f:
+                text = f.read()
+            result = {"stdout": text, "stderr": "", "exit_code": 0}
+        except Exception as e:
+            result = {"error": f"get_portfolio_context: {e}", "exit_code": 1}
     elif tool in ("pipeline", "manage_memory", "ui_control"):
         from src.ai_interaction import dispatch_ai_tool
         desc, result = await dispatch_ai_tool(tool, content, session_id, owner=owner)

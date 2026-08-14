@@ -480,6 +480,37 @@ FUNCTION_TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
+            "name": "get_portfolio_context",
+            "description": "Fetch DK's real, current portfolio context (holdings, strategy, rules, thesis notes) from data/portfolio_context.md. ALWAYS call this for any question about a specific position, balance, holding, or stored trading rule -- never assume you already know the answer, since this file updates over time and you do not have it pre-loaded.",
+            "parameters": {
+                "type": "object",
+                "properties": {},
+                "required": []
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "create_document_office",
+            "description": "Create a real Word (.docx), PowerPoint (.pptx), Excel (.xlsx), or PDF file on disk, using real document-format libraries (python-docx/python-pptx/openpyxl/reportlab) -- not the generic create_document editor panel, which cannot produce real Office/PDF files. ALWAYS use this when the user asks for a Word document, PowerPoint, spreadsheet, or PDF specifically (as opposed to a plain-text or code document, which still uses create_document). NEVER use bash/run_command/python/echo/redirection to create these files directly -- writing plain text to a .docx/.pptx/.xlsx/.pdf-named file produces an invalid, corrupt file that appears to succeed but cannot actually be opened by Word/PowerPoint/Excel/a PDF reader. This tool is the only correct way to create these 4 formats.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "format": {"type": "string", "enum": ["docx", "pptx", "xlsx", "pdf"], "description": "Which real file format to create."},
+                    "filename": {"type": "string", "description": "Filename without a path, e.g. 'weekly_report.docx'. Will be saved under the user's uploads folder."},
+                    "title": {"type": "string", "description": "Document title (used by docx and pdf)."},
+                    "sections": {"type": "array", "description": "For docx/pdf: list of {heading, text} objects.", "items": {"type": "object", "properties": {"heading": {"type": "string"}, "text": {"type": "string"}}}},
+                    "slides": {"type": "array", "description": "For pptx: list of {title, text} objects, one per slide.", "items": {"type": "object", "properties": {"title": {"type": "string"}, "text": {"type": "string"}}}},
+                    "rows": {"type": "array", "description": "For xlsx: list of rows, each a list of cell values.", "items": {"type": "array"}}
+                },
+                "required": ["format", "filename"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "manage_memory",
             "description": "Manage the user's memory system: list, add, edit, delete, or search memories. Memories persist across sessions.",
             "parameters": {
