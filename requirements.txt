@@ -63,3 +63,15 @@ publicdotcom-mcp-server
 
 # Added for youtube_transcript MCP server (services/mcp_servers/youtube_transcript/)
 yt-dlp
+
+# Real document-creation libraries (docx/pptx/xlsx/pdf), added 2026-08-13
+# (re-added 2026-08-14 after the original addition was lost to a
+# concurrent uncommitted-edit git checkout, same class of incident as
+# the tool_index.py loss -- see 703c5b7c and the reconstruction commits)
+# to give the agent's existing python tool real Office/PDF file-creation
+# capability -- matches the same real, well-known Python packages Anthropic's
+# own official docx/pptx/xlsx/pdf skills use (github.com/anthropics/skills).
+python-docx
+python-pptx
+openpyxl
+reportlab
