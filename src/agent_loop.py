@@ -3467,6 +3467,21 @@ async def stream_agent_loop(
         ):
             _relevant_tools |= set(_WORKSPACE_TERMINUS_TOOLS)
             logger.info("[tool-rag] Workspace file/terminal request; adding Odysseus Terminus toolset")
+            # Real, low-volume monitoring window (added 2026-08-14, remove
+            # after ~48h once confirmed no edge cases): this is exactly the
+            # site of the real bug fixed tonight (a destructive replacement
+            # that silently dropped ALWAYS_AVAILABLE tools). Only logs -- at
+            # WARNING, not INFO -- if the invariant this fix relies on ever
+            # doesn't hold, so it stays silent (and low-volume) on every
+            # normal request and only fires on a genuine edge case.
+            from src.tool_index import ALWAYS_AVAILABLE as _AA_CHECK
+            _missing_always_available = _AA_CHECK - _relevant_tools
+            if _missing_always_available:
+                logger.warning(
+                    f"[tool-rag] MONITORING: ALWAYS_AVAILABLE tools missing after "
+                    f"workspace-terminal override despite the union fix: "
+                    f"{sorted(_missing_always_available)}"
+                )
 
     # If this turn targets the open document, keep editing tools available
     # regardless of which selection path (RAG, keyword, caller-provided) ran.
