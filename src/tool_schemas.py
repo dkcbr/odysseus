@@ -481,7 +481,7 @@ FUNCTION_TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "get_portfolio_context",
-            "description": "Fetch DK's real, current portfolio context (holdings, strategy, rules, thesis notes) from data/portfolio_context.md. ALWAYS call this for any question about a specific position, balance, holding, or stored trading rule -- never assume you already know the answer, since this file updates over time and you do not have it pre-loaded.",
+            "description": "Fetch DK's real, current portfolio context (holdings, strategy, rules, thesis notes) from data/portfolio_context.md. ALWAYS call this for any question about a specific position, balance, holding, or stored trading rule -- never assume you already know the answer, since this file updates over time and you do not have it pre-loaded. This returns a large, complete reference document -- after calling it, find and state the SPECIFIC fact the user actually asked about (e.g. one ticker's share count), not a general summary of everything in the document.",
             "parameters": {
                 "type": "object",
                 "properties": {},
