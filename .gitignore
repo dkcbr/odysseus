@@ -102,3 +102,6 @@ compound.config.json
 *.error.log
 _scratch/
 /odysseus/
+
+# Repro harness output (real test runs, not source -- see repro_harness.py)
+repro_runs/
