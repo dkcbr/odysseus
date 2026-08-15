@@ -20,7 +20,6 @@ OUTDIR.mkdir(exist_ok=True)
 API_BASE = "http://100.93.206.89:7000/api"
 SESSION_COOKIE = "5f3511cd3d94a06cd49486092cf5bb7eb538ad79bb065bff441c2b2982af6546"
 ENDPOINT_ID = "77bddaa5"
-MODEL = "qwen3:14b"
 USER_PROMPT = "How many KTOS shares do I own?"
 
 
@@ -29,19 +28,19 @@ def _curl_json(args):
     return json.loads(result.stdout)
 
 
-def create_session(run_index):
+def create_session(run_index, model):
     resp = _curl_json([
         "-X", "POST", f"{API_BASE}/session",
         "-H", f"Cookie: odysseus_session={SESSION_COOKIE}",
         "--data-urlencode", "name=repro-harness-run",
         "--data-urlencode", f"endpoint_id={ENDPOINT_ID}",
-        "--data-urlencode", f"model={MODEL}",
+        "--data-urlencode", f"model={model}",
     ])
     return resp["id"]
 
 
-def run_once(run_index):
-    session_id = create_session(run_index)
+def run_once(run_index, model):
+    session_id = create_session(run_index, model)
     start = time.time()
 
     subprocess.run(
@@ -79,7 +78,7 @@ print(json.dumps(out))
         "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "session_id": session_id,
         "user_prompt": USER_PROMPT,
-        "model": MODEL,
+        "model": model,
         "duration_seconds": round(duration, 2),
         "messages": messages,
         # Crude, honest correctness check: does the answer actually contain
@@ -97,12 +96,13 @@ print(json.dumps(out))
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--runs", type=int, default=5)
+    parser.add_argument("--model", type=str, default="qwen3:14b")
     args = parser.parse_args()
 
     results = []
     for i in range(args.runs):
-        print(f"Run {i+1}/{args.runs}...")
-        r = run_once(i)
+        print(f"Run {i+1}/{args.runs} (model={args.model})...")
+        r = run_once(i, args.model)
         results.append(r)
         print(f"  duration: {r['duration_seconds']}s, mentions correct KTOS answer: {r['mentions_ktos_16']}")
 
