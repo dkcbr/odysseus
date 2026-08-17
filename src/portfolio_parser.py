@@ -121,3 +121,49 @@ def get_confirmed_and_pending(ticker: str) -> dict:
             "orders filled."
         ),
     }
+
+
+async def get_live_holdings(ticker: str) -> Optional[dict]:
+    """Real, direct live-holdings check via the actual public_com MCP
+    connector (server id 74167655, confirmed in the real, live config
+    tonight). Returns None on any failure (server down, ticker not
+    held, auth issue, etc.) -- callers must fall back to the static
+    document in that case, not treat None as "zero shares".
+
+    Added 2026-08-17 after confirming directly that the document-only
+    verification wrapper can "correct" a genuinely correct model claim
+    into a stale, wrong one (real, confirmed case: MP -- model said 20,
+    document said 11, live brokerage data confirmed 20 was right).
+
+    NOT currently called from agent_loop.py's streaming response path --
+    tried that integration the same night and hit a real, structural
+    async error (RuntimeError: "Attempted to exit cancel scope in a
+    different task than it was entered in") calling mcp.call_tool()
+    from that specific generator context. Reverted the integration, not
+    this function -- confirmed this function itself works correctly
+    when called from a normal, non-streaming async context (tested
+    directly). Safe to reuse from a different, non-streaming call site;
+    not yet safe to call from agent_loop.py's response stream.
+    """
+    try:
+        from src.tool_utils import get_mcp_manager
+        mcp = get_mcp_manager()
+        if not mcp:
+            return None
+        result = await mcp.call_tool("mcp__74167655__get_portfolio", {})
+        if not isinstance(result, dict):
+            return None
+        stdout = result.get("stdout") or result.get("output") or ""
+        if not stdout:
+            return None
+        import json as _json
+        data = _json.loads(stdout) if isinstance(stdout, str) else stdout
+        for p in data.get("positions", []):
+            if p.get("instrument", {}).get("symbol") == ticker:
+                return {
+                    "quantity": float(p.get("quantity", 0)),
+                    "last_price_ts": p.get("lastPrice", {}).get("timestamp"),
+                }
+        return None
+    except Exception:
+        return None
