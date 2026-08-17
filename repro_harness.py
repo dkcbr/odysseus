@@ -20,7 +20,7 @@ OUTDIR.mkdir(exist_ok=True)
 API_BASE = "http://100.93.206.89:7000/api"
 SESSION_COOKIE = "5f3511cd3d94a06cd49486092cf5bb7eb538ad79bb065bff441c2b2982af6546"
 ENDPOINT_ID = "77bddaa5"
-USER_PROMPT = "How many KTOS shares do I own?"
+DEFAULT_USER_PROMPT = "How many KTOS shares do I own?"
 
 
 def _curl_json(args):
@@ -39,14 +39,14 @@ def create_session(run_index, model):
     return resp["id"]
 
 
-def run_once(run_index, model):
+def run_once(run_index, model, user_prompt):
     session_id = create_session(run_index, model)
     start = time.time()
 
     subprocess.run(
         ["curl", "-s", "-N", "-X", "POST", f"{API_BASE}/chat_stream",
          "-H", f"Cookie: odysseus_session={SESSION_COOKIE}",
-         "--data-urlencode", f"message={USER_PROMPT}",
+         "--data-urlencode", f"message={user_prompt}",
          "--data-urlencode", f"session={session_id}",
          "--data-urlencode", "mode=agent"],
         capture_output=True, timeout=120,
@@ -77,12 +77,15 @@ print(json.dumps(out))
         "run_index": run_index,
         "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "session_id": session_id,
-        "user_prompt": USER_PROMPT,
+        "user_prompt": user_prompt,
         "model": model,
         "duration_seconds": round(duration, 2),
         "messages": messages,
         # Crude, honest correctness check: does the answer actually contain
         # KTOS's real, current share count anywhere in the final text?
+        # Only meaningful for the default KTOS-share-count prompt -- always
+        # computed for backward compatibility with the aggregation script,
+        # but genuinely meaningless for other prompts (will just read False).
         "mentions_ktos_16": any("16" in m.get("content", "") and "KTOS" in m.get("content", "").upper() for m in messages if isinstance(m, dict)),
     }
 
@@ -97,12 +100,13 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--runs", type=int, default=5)
     parser.add_argument("--model", type=str, default="qwen3:14b")
+    parser.add_argument("--prompt", type=str, default=DEFAULT_USER_PROMPT)
     args = parser.parse_args()
 
     results = []
     for i in range(args.runs):
         print(f"Run {i+1}/{args.runs} (model={args.model})...")
-        r = run_once(i, args.model)
+        r = run_once(i, args.model, args.prompt)
         results.append(r)
         print(f"  duration: {r['duration_seconds']}s, mentions correct KTOS answer: {r['mentions_ktos_16']}")
 
