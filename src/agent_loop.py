@@ -670,6 +670,7 @@ Generate an image. Line 1 = description, line 2 = model name, line 3 = WxH (e.g.
     "manage_memory": "- ```manage_memory``` — Manage the user's persistent memory (facts about the USER themselves, their preferences, context that persists across chats). Line 1 = action (list/add/edit/delete/search), rest = content. Use when user says 'remember this' about themselves, states identity facts like 'my name is <name>' / 'call me <name>' / 'I live in <place>', or asks about stored memories. DO NOT use for info about another person (their address, phone, email, birthday) — that goes in `manage_contact`. If the user pastes an address/phone with a name and says 'save this for <person>', use `manage_contact add` with the address arg, NOT manage_memory.",
     "get_portfolio_context": "- ```get_portfolio_context``` — Fetch DK's real, current portfolio context (holdings, strategy, rules, thesis notes) from data/portfolio_context.md. No arguments. ALWAYS call this for any question about a specific position, balance, holding, or stored trading rule — even if you think you already know the answer, since this data updates over time and you do not have it pre-loaded. A ticker's absence from your own knowledge does NOT mean the position doesn't exist — check here first. This returns a large, complete reference document — after calling it, find and state the SPECIFIC fact the user actually asked about, not a general summary of everything in the document.",
     "create_document_office": "- ```create_document_office``` — Create a real Word (.docx), PowerPoint (.pptx), Excel (.xlsx), or PDF file on disk. Args: format (docx/pptx/xlsx/pdf, required), filename (required), title, sections (list of {heading, text} for docx/pdf), slides (list of {title, text} for pptx), rows (list of lists for xlsx). ALWAYS use this instead of create_document when the user specifically asks for a Word doc, PowerPoint, spreadsheet, or PDF — create_document only makes a plain-text/code editor panel, not a real Office/PDF file. NEVER use bash/run_command/python/echo/redirection to write these files directly — that produces an invalid file with the right extension but corrupt content, which will appear to succeed but cannot actually be opened in Word/PowerPoint/Excel/a PDF reader.",
+    "skill_introspect": "- ```skill_introspect``` — Read-only lookup of the user's skill library. Args: action (list/view/view_ref/search, required), name (for view/view_ref), path (for view_ref), query (for search). ALWAYS available regardless of domain (trading, email, browser, etc), unlike manage_skills which only appears for workspace/file-related requests. If a relevant published skill might exist for the current task, check here BEFORE saying you don't know how to do something or lack a procedure — do not assume a skill is unavailable just because you don't see it in your current tool list. To create, edit, publish, or delete a skill, use manage_skills instead.",
     "manage_skills": "- ```manage_skills``` — Skill registry (SKILL.md format). Args (JSON): {\"action\": \"list|view|view_ref|search|add|edit|patch|publish|delete\", ...}. `list` returns the index of available skills (published + teacher-escalation drafts); `view name=foo` fetches the full SKILL.md; `view_ref name=foo path=...` loads a reference file under the skill directory. For `add`, provide an explicit kebab-case `name` and only report the exact returned name, because storage may normalize or dedupe it. Use this BEFORE doing domain work — there may already be a procedure (published or draft) that prescribes the correct steps. Drafts written by the teacher loop are authoritative guidance even though they're not yet published.",
     "manage_tasks": "- ```manage_tasks``` — Create and manage scheduled background tasks (recurring AI jobs). Args (JSON): {\"action\": \"list|create|edit|delete|pause|resume|run\", ...}",
     "manage_endpoints": "- ```manage_endpoints``` — Add, remove, or configure AI model API endpoints. Args (JSON): {\"action\": \"list|add|delete|enable|disable\", ...}. Use when user wants to add a new AI provider.",
@@ -5269,13 +5270,80 @@ async def stream_agent_loop(
                     full_response = _email_summary
                 break
 
+    # Real, added 2026-08-17: holdings-claim verification. Checks the
+    # model's OWN final text for a specific-ticker share-count claim and
+    # compares it against src/portfolio_parser.py's real, direct parse of
+    # data/portfolio_context.md. Runs regardless of whether a tool was
+    # called -- added specifically because the confirmed failure case
+    # (qwen3-14b-longctx, "17 shares" for KTOS) never called a tool at
+    # all, so any check gated on tool_events would never fire for it.
+    #
+    # Honest, deliberate design choice: this APPENDS a correction rather
+    # than replacing the claim. Confirmed directly earlier tonight (the
+    # reminder-message experiment) that this streaming architecture can
+    # only add to what's already been shown to the user, not erase it --
+    # attempting a silent replacement here would repeat that same,
+    # already-documented failure.
+    # Real, honest status 2026-08-17: attempted a live-brokerage-data
+    # version of this check (calling public_com directly before trusting
+    # the static document), after confirming the document-only version
+    # below can "correct" a genuinely right answer into a wrong one
+    # (real case: MP, model said 20 correctly, document said stale 11).
+    # Reverted that attempt: it caused a real, structural async crash
+    # (RuntimeError: "Attempted to exit cancel scope in a different task
+    # than it was entered in", confirmed via live container logs) when
+    # calling mcp.call_tool() from this specific streaming-generator
+    # context. Not safely fixable with confidence tonight. Back to the
+    # simpler, document-only version below -- known-imperfect (can be
+    # wrong if the document itself is stale) but at least reliably does
+    # something rather than silently failing.
+    _holdings_correction = None
+    try:
+        import re as _hc_re
+        _candidates = _hc_re.findall(r"\b[A-Z]{2,5}\b", full_response or "")
+        if _candidates:
+            from src.portfolio_parser import parse_portfolio_context
+            with open("data/portfolio_context.md", "r", encoding="utf-8") as _hc_f:
+                _hc_parsed = parse_portfolio_context(_hc_f.read())
+            for _ticker in _candidates:
+                if _ticker not in _hc_parsed.confirmed_holdings:
+                    continue
+                _real_shares = _hc_parsed.confirmed_holdings[_ticker]
+                _real_str = f"{_real_shares:g}"
+                for _m in _hc_re.finditer(_hc_re.escape(_ticker), full_response):
+                    _window = full_response[max(0, _m.start() - 40):_m.end() + 40]
+                    _num_matches = _hc_re.findall(r"\b(\d+(?:\.\d+)?)\b", _window)
+                    for _claimed in _num_matches:
+                        if _claimed == _real_str:
+                            break
+                    else:
+                        if _num_matches:
+                            _pending_buy = _hc_parsed.pending_qty_for(_ticker, "BUY")
+                            _holdings_correction = (
+                                f"\n\n(Note: the stored reference document lists {_real_str} "
+                                f"shares of {_ticker}"
+                                + (f", with a separate, unexecuted pending buy order for {_pending_buy:g} more" if _pending_buy else "")
+                                + ". This document may not reflect the most recent trades -- "
+                                "ask for live verification if this matters for a real decision.)"
+                            )
+                    break
+                if _holdings_correction:
+                    break
+    except Exception:
+        pass  # real, deliberate: never let verification break the real response
+
+    if _holdings_correction:
+        full_response = full_response + _holdings_correction
+
     if (
-        tool_events
-        and full_response.strip()
-        and full_response.strip() != (_response_before_tool_summary or "").strip()
-        and full_response.strip() not in (_response_before_tool_summary or "")
+        full_response.strip()
+        and (
+            (tool_events and full_response.strip() != (_response_before_tool_summary or "").strip()
+             and full_response.strip() not in (_response_before_tool_summary or ""))
+            or _holdings_correction
+        )
     ):
-        _final_delta = full_response.strip()
+        _final_delta = _holdings_correction if (_holdings_correction and not tool_events) else full_response.strip()
         yield f"data: {json.dumps({'delta': _final_delta})}\n\n"
 
     # --- Final metrics ---
