@@ -5297,12 +5297,24 @@ async def stream_agent_loop(
     # simpler, document-only version below -- known-imperfect (can be
     # wrong if the document itself is stale) but at least reliably does
     # something rather than silently failing.
+    # Real, updated 2026-08-17: now consults get_freshness_recommendation()
+    # -- a fast, real, SYNCHRONOUS lookup against data/holdings_freshness.json
+    # (no network call, safe here) -- to decide between three real, distinct
+    # correction qualities rather than always using the same generic,
+    # hedged language regardless of what's actually known:
+    #   - "trust_document": a recent, real live check confirms the document
+    #     is accurate -- use confident, non-hedged language.
+    #   - "append_note" (freshness data says stale): a recent, real live
+    #     check found the document itself is wrong -- cite the REAL, live
+    #     number from the freshness record, not the known-stale document.
+    #   - "needs_live_check": no recent freshness data -- fall back to the
+    #     original, generic hedged language (unchanged from before).
     _holdings_correction = None
     try:
         import re as _hc_re
         _candidates = _hc_re.findall(r"\b[A-Z]{2,5}\b", full_response or "")
         if _candidates:
-            from src.portfolio_parser import parse_portfolio_context
+            from src.portfolio_parser import parse_portfolio_context, get_freshness_recommendation
             with open("data/portfolio_context.md", "r", encoding="utf-8") as _hc_f:
                 _hc_parsed = parse_portfolio_context(_hc_f.read())
             for _ticker in _candidates:
@@ -5318,14 +5330,39 @@ async def stream_agent_loop(
                             break
                     else:
                         if _num_matches:
+                            _fresh = get_freshness_recommendation(_ticker, _real_shares)
                             _pending_buy = _hc_parsed.pending_qty_for(_ticker, "BUY")
-                            _holdings_correction = (
-                                f"\n\n(Note: the stored reference document lists {_real_str} "
-                                f"shares of {_ticker}"
-                                + (f", with a separate, unexecuted pending buy order for {_pending_buy:g} more" if _pending_buy else "")
-                                + ". This document may not reflect the most recent trades -- "
-                                "ask for live verification if this matters for a real decision.)"
-                            )
+                            if _fresh["recommendation"] == "trust_document":
+                                _holdings_correction = (
+                                    f"\n\n(Note: confirmed {_real_str} shares of {_ticker}, "
+                                    f"verified against live brokerage data as of "
+                                    f"{_fresh['last_checked'][:10]}.)"
+                                )
+                            elif _fresh["recommendation"] == "append_note" and _fresh.get("last_checked"):
+                                # Real, live-verified data exists and disagrees with the
+                                # document too -- read the actual live qty from the
+                                # freshness record itself, don't just re-cite the
+                                # document we now know is stale.
+                                import json as _hc_json
+                                try:
+                                    with open("data/holdings_freshness.json") as _hc_ff:
+                                        _live_qty = _hc_json.load(_hc_ff)[_ticker]["qty_at_check"]
+                                    _holdings_correction = (
+                                        f"\n\n(Note: live brokerage data as of "
+                                        f"{_fresh['last_checked'][:10]} showed {_live_qty:g} "
+                                        f"shares of {_ticker} -- the stored reference document "
+                                        f"({_real_str} shares) is confirmed out of date.)"
+                                    )
+                                except Exception:
+                                    _fresh["recommendation"] = "needs_live_check"  # real, honest fallback if the file read fails here
+                            if _fresh["recommendation"] == "needs_live_check":
+                                _holdings_correction = (
+                                    f"\n\n(Note: the stored reference document lists {_real_str} "
+                                    f"shares of {_ticker}"
+                                    + (f", with a separate, unexecuted pending buy order for {_pending_buy:g} more" if _pending_buy else "")
+                                    + ". This document may not reflect the most recent trades -- "
+                                    "ask for live verification if this matters for a real decision.)"
+                                )
                     break
                 if _holdings_correction:
                     break
