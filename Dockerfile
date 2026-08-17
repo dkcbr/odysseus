@@ -35,8 +35,20 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libglib2.0-0t64 \
     libxcb1 \
     libmagic1 \
+    wmctrl \
+    xdotool \
+    imagemagick \
     && rm -rf /var/lib/apt/lists/*
 
+# wmctrl/xdotool are real, added 2026-08-17 for jarvis_desktop's real window
+# and mouse/keyboard control tools -- require a mounted X11 socket and a
+# real DISPLAY env var pointed at the host's XWayland instance (see
+# docker-compose.yml) to actually reach the host's real display. imagemagick
+# (for the real `import` binary) is separately required by the same
+# server's screenshot() tool -- confirmed via a real, direct test that it
+# was the actual missing piece (wmctrl alone got window_list working, but
+# screenshot still failed on ImageMagick's `import` specifically).
+#
 # libgl1/libglib2.0-0t64/libxcb1 are runtime shared libs (libGL.so.1,
 # libglib-2.0/libgthread, libxcb.so.1) that opencv-python (cv2) loads. The
 # slim base omits them, so the Cookbook "install realesrgan" path imports cv2
