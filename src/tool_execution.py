@@ -621,7 +621,7 @@ async def _execute_tool_block_impl(
     """
     from src.tool_implementations import (
         do_search_chats, do_manage_tasks,
-        do_manage_skills, do_api_call, do_manage_notes,
+        do_manage_skills, do_skill_introspect, do_api_call, do_manage_notes,
         do_manage_calendar,
         do_download_model, do_serve_model, do_list_served_models, do_stop_served_model,
         do_tail_serve_output,
@@ -836,6 +836,39 @@ async def _execute_tool_block_impl(
             path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "portfolio_context.md")
             with open(path) as f:
                 text = f.read()
+            # Real, added 2026-08-17: a compact, explicit confirmed-vs-pending
+            # summary, prepended ahead of the full raw document. Added after
+            # confirming directly (repro_harness.py, 3 independent models,
+            # qwen3-14b-longctx / gemma4-e2b-longctx / nemotron) that models
+            # given the full, correct context were consistently summing a
+            # confirmed holding with a real, separate, still-unexecuted
+            # pending order into a premature total (KTOS: 16 confirmed + 1
+            # pending buy -> reported as "17 shares", confidently, every
+            # time). See src/portfolio_parser.py for the real parsing logic;
+            # this does not replace the full document below, just makes the
+            # confirmed/pending distinction explicit before the model has to
+            # infer it from table position alone.
+            try:
+                from src.portfolio_parser import parse_portfolio_context
+                parsed = parse_portfolio_context(text)
+                if parsed.confirmed_holdings:
+                    summary_lines = [
+                        "## CONFIRMED vs PENDING (computed, not manually maintained -- see full tables below for source)",
+                        "Do NOT add pending_buy to confirmed_shares -- pending orders have NOT executed.",
+                        "",
+                        "| Ticker | confirmed_shares | pending_buy | pending_sell |",
+                        "|--------|------------------|-------------|--------------|",
+                    ]
+                    for ticker in sorted(parsed.confirmed_holdings):
+                        confirmed = parsed.confirmed_holdings[ticker]
+                        pb = parsed.pending_qty_for(ticker, "BUY")
+                        ps = parsed.pending_qty_for(ticker, "SELL")
+                        if pb or ps:
+                            summary_lines.append(f"| {ticker} | {confirmed:g} | {pb:g} | {ps:g} |")
+                    if len(summary_lines) > 5:
+                        text = "\n".join(summary_lines) + "\n\n---\n\n" + text
+            except Exception:
+                pass  # real, deliberate: never let the summary computation break the underlying tool
             result = {"stdout": text, "stderr": "", "exit_code": 0}
         except Exception as e:
             result = {"error": f"get_portfolio_context: {e}", "exit_code": 1}
@@ -845,6 +878,9 @@ async def _execute_tool_block_impl(
     elif tool == "manage_tasks":
         desc = "manage_tasks"
         result = await do_manage_tasks(content, owner=owner)
+    elif tool == "skill_introspect":
+        desc = "skill_introspect"
+        result = await do_skill_introspect(content, owner=owner)
     elif tool == "manage_skills":
         desc = "manage_skills"
         result = await do_manage_skills(content, owner=owner)
