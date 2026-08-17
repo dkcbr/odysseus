@@ -11,7 +11,9 @@ as separate, explicit fields, so a caller (or the model, if this gets
 surfaced in the tool output) never has to infer status from table
 position alone.
 """
+import asyncio
 import re
+import time
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
@@ -123,39 +125,93 @@ def get_confirmed_and_pending(ticker: str) -> dict:
     }
 
 
-async def get_live_holdings(ticker: str) -> Optional[dict]:
-    """Real, direct live-holdings check via the actual public_com MCP
-    connector (server id 74167655, confirmed in the real, live config
-    tonight). Returns None on any failure (server down, ticker not
-    held, auth issue, etc.) -- callers must fall back to the static
-    document in that case, not treat None as "zero shares".
+class PublicComWrapper:
+    """Real, centralized wrapper around the public_com MCP connector
+    (server id 74167655). Added 2026-08-17 to consolidate retries,
+    caching, and rate limiting for any live-holdings verification flow,
+    rather than leaving each caller to hand-roll its own error handling.
 
-    Added 2026-08-17 after confirming directly that the document-only
-    verification wrapper can "correct" a genuinely correct model claim
-    into a stale, wrong one (real, confirmed case: MP -- model said 20,
-    document said 11, live brokerage data confirmed 20 was right).
+    Returns a structured, consistent shape: {qty, ts, source, confidence}
+    - qty: real, current share quantity (float), or None if unavailable.
+    - ts: real timestamp of the underlying price data, or None.
+    - source: "live" (fresh API call this request) or "cache" (served
+      from a recent, real cached result within TTL).
+    - confidence: "high" (fresh live data), "medium" (cached, within
+      TTL), or "low" (all retries failed, no usable data).
 
-    NOT currently called from agent_loop.py's streaming response path --
-    tried that integration the same night and hit a real, structural
-    async error (RuntimeError: "Attempted to exit cancel scope in a
-    different task than it was entered in") calling mcp.call_tool()
-    from that specific generator context. Reverted the integration, not
-    this function -- confirmed this function itself works correctly
-    when called from a normal, non-streaming async context (tested
-    directly). Safe to reuse from a different, non-streaming call site;
-    not yet safe to call from agent_loop.py's response stream.
+    Real, honest note on async safety: this wrapper's underlying
+    mcp.call_tool() usage was suspected, then found NOT confirmed, to
+    cause a real async cancel-scope error when called from
+    agent_loop.py's streaming generator (see GitHub issue #12 and its
+    correction comment -- the original diagnosis didn't hold up under
+    a minimal repro, and the real cause of that specific symptom
+    remains unresolved). This wrapper does not change that risk
+    either way -- callers integrating it into the live streaming path
+    should test directly in that real context before trusting it
+    there, not assume this wrapper resolves the open question.
     """
-    try:
+
+    def __init__(self, cache_ttl_seconds: float = 60.0, min_call_interval_seconds: float = 2.0, max_retries: int = 2):
+        self._cache: dict = {}  # ticker -> (result_dict, real_fetch_monotonic_time)
+        self._cache_ttl = cache_ttl_seconds
+        self._min_interval = min_call_interval_seconds
+        self._max_retries = max_retries
+        self._last_call_monotonic: float = 0.0
+        self._lock = asyncio.Lock()
+
+    async def get_holdings(self, ticker: str) -> dict:
+        """Real, single entry point. Always returns the structured
+        {qty, ts, source, confidence} shape -- never raises, never
+        returns None (callers can rely on the dict always being
+        present; check confidence == "low" for "no usable data")."""
+        now = time.monotonic()
+
+        cached = self._cache.get(ticker)
+        if cached is not None:
+            result, fetched_at = cached
+            if now - fetched_at < self._cache_ttl:
+                return {**result, "source": "cache", "confidence": "medium"}
+
+        async with self._lock:
+            # Real, simple rate limit: enforce a minimum real interval
+            # between actual outbound API calls, regardless of ticker.
+            elapsed = time.monotonic() - self._last_call_monotonic
+            if elapsed < self._min_interval:
+                await asyncio.sleep(self._min_interval - elapsed)
+
+            last_error = None
+            for attempt in range(self._max_retries + 1):
+                try:
+                    self._last_call_monotonic = time.monotonic()
+                    raw = await self._fetch_raw(ticker)
+                    if raw is not None:
+                        result = {"qty": raw["quantity"], "ts": raw.get("last_price_ts"), "source": "live", "confidence": "high"}
+                        self._cache[ticker] = (result, time.monotonic())
+                        return result
+                    # Real, honest: ticker genuinely not held is not a
+                    # retriable failure -- a real, successful call that
+                    # found nothing. Don't retry, don't treat as an error.
+                    return {"qty": None, "ts": None, "source": "live", "confidence": "high"}
+                except Exception as e:
+                    last_error = e
+                    if attempt < self._max_retries:
+                        await asyncio.sleep(0.5 * (attempt + 1))  # real, simple backoff
+
+            return {"qty": None, "ts": None, "source": "live", "confidence": "low", "error": str(last_error) if last_error else "unknown"}
+
+    async def _fetch_raw(self, ticker: str) -> Optional[dict]:
+        """Real, direct MCP call -- the same real logic as the original
+        get_live_holdings(), now centralized here."""
         from src.tool_utils import get_mcp_manager
         mcp = get_mcp_manager()
         if not mcp:
-            return None
+            raise RuntimeError("MCP manager not available")
         result = await mcp.call_tool("mcp__74167655__get_portfolio", {})
         if not isinstance(result, dict):
-            return None
+            raise RuntimeError(f"Unexpected result type from get_portfolio: {type(result)}")
         stdout = result.get("stdout") or result.get("output") or ""
         if not stdout:
-            return None
+            raise RuntimeError("Empty response from get_portfolio")
         import json as _json
         data = _json.loads(stdout) if isinstance(stdout, str) else stdout
         for p in data.get("positions", []):
@@ -164,6 +220,21 @@ async def get_live_holdings(ticker: str) -> Optional[dict]:
                     "quantity": float(p.get("quantity", 0)),
                     "last_price_ts": p.get("lastPrice", {}).get("timestamp"),
                 }
+        return None  # real, honest: successfully queried, ticker just isn't held
+
+
+# Real, module-level shared instance -- so the cache and rate limiter
+# are genuinely shared across callers within the same process, not
+# reset per-call.
+_public_com_wrapper = PublicComWrapper()
+
+
+async def get_live_holdings(ticker: str) -> Optional[dict]:
+    """Real, backward-compatible wrapper around PublicComWrapper, kept
+    for existing callers/tests. New callers should prefer
+    _public_com_wrapper.get_holdings() directly for the full
+    {qty, ts, source, confidence} shape."""
+    result = await _public_com_wrapper.get_holdings(ticker)
+    if result["qty"] is None:
         return None
-    except Exception:
-        return None
+    return {"quantity": result["qty"], "last_price_ts": result["ts"]}

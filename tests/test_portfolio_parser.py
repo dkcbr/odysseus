@@ -76,35 +76,77 @@ def test_range_quantity_uses_low_end():
 # (test_tool_index_schema_parity.py etc. avoid pulling in heavy
 # real dependencies for unit tests).
 
+def _fresh_wrapper():
+    """Real, isolated PublicComWrapper instance -- avoids the shared,
+    module-level cache/rate-limiter causing cross-test contamination
+    (confirmed directly: without this, a success-case test's cached
+    result was being returned by later, unrelated failure-case tests)."""
+    from src.portfolio_parser import PublicComWrapper
+    return PublicComWrapper(cache_ttl_seconds=60.0, min_call_interval_seconds=0.0, max_retries=1)
+
+
 def test_get_live_holdings_returns_quantity_on_success():
     mock_mcp = AsyncMock()
     mock_mcp.call_tool.return_value = {
         "stdout": '{"positions": [{"instrument": {"symbol": "KTOS"}, "quantity": "17", "lastPrice": {"timestamp": "2026-08-17T00:00:00Z"}}]}'
     }
+    wrapper = _fresh_wrapper()
     with patch("src.tool_utils.get_mcp_manager", return_value=mock_mcp):
-        result = asyncio.run(get_live_holdings("KTOS"))
-    assert result is not None
-    assert result["quantity"] == 17.0
-    assert result["last_price_ts"] == "2026-08-17T00:00:00Z"
+        result = asyncio.run(wrapper.get_holdings("KTOS"))
+    assert result["qty"] == 17.0
+    assert result["ts"] == "2026-08-17T00:00:00Z"
+    assert result["source"] == "live"
+    assert result["confidence"] == "high"
 
 
 def test_get_live_holdings_returns_none_when_ticker_not_held():
     mock_mcp = AsyncMock()
     mock_mcp.call_tool.return_value = {"stdout": '{"positions": []}'}
+    wrapper = _fresh_wrapper()
     with patch("src.tool_utils.get_mcp_manager", return_value=mock_mcp):
-        result = asyncio.run(get_live_holdings("ZZZZ"))
-    assert result is None
+        result = asyncio.run(wrapper.get_holdings("ZZZZ"))
+    assert result["qty"] is None
+    assert result["confidence"] == "high"  # real, honest: successful call, just not held
 
 
 def test_get_live_holdings_returns_none_when_manager_unavailable():
+    wrapper = _fresh_wrapper()
     with patch("src.tool_utils.get_mcp_manager", return_value=None):
-        result = asyncio.run(get_live_holdings("KTOS"))
-    assert result is None
+        result = asyncio.run(wrapper.get_holdings("KTOS"))
+    assert result["qty"] is None
+    assert result["confidence"] == "low"
 
 
 def test_get_live_holdings_returns_none_on_exception():
     mock_mcp = AsyncMock()
     mock_mcp.call_tool.side_effect = RuntimeError("simulated failure")
+    wrapper = _fresh_wrapper()
     with patch("src.tool_utils.get_mcp_manager", return_value=mock_mcp):
-        result = asyncio.run(get_live_holdings("KTOS"))
-    assert result is None  # real, deliberate: fails safe, never raises to the caller
+        result = asyncio.run(wrapper.get_holdings("KTOS"))
+    assert result["qty"] is None  # real, deliberate: fails safe, never raises to the caller
+    assert result["confidence"] == "low"
+
+
+def test_wrapper_caches_successful_result():
+    mock_mcp = AsyncMock()
+    mock_mcp.call_tool.return_value = {
+        "stdout": '{"positions": [{"instrument": {"symbol": "KTOS"}, "quantity": "16", "lastPrice": {"timestamp": "2026-08-17T00:00:00Z"}}]}'
+    }
+    wrapper = _fresh_wrapper()
+    with patch("src.tool_utils.get_mcp_manager", return_value=mock_mcp):
+        first = asyncio.run(wrapper.get_holdings("KTOS"))
+        second = asyncio.run(wrapper.get_holdings("KTOS"))
+    assert first["source"] == "live"
+    assert second["source"] == "cache"
+    assert second["confidence"] == "medium"
+    assert mock_mcp.call_tool.call_count == 1  # real, direct proof the second call used cache, not a fresh API hit
+
+
+def test_wrapper_retries_before_giving_up():
+    mock_mcp = AsyncMock()
+    mock_mcp.call_tool.side_effect = RuntimeError("transient failure")
+    wrapper = _fresh_wrapper()
+    with patch("src.tool_utils.get_mcp_manager", return_value=mock_mcp):
+        result = asyncio.run(wrapper.get_holdings("KTOS"))
+    assert result["confidence"] == "low"
+    assert mock_mcp.call_tool.call_count == 2  # real, direct proof: max_retries=1 means 2 total real attempts
