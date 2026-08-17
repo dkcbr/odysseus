@@ -6,6 +6,9 @@ agent_loop.py's streaming path (real, structural async issue, tracked
 in GitHub issue #12).
 """
 import asyncio
+import json
+import tempfile
+from datetime import datetime, timezone, timedelta
 import os
 import sys
 from unittest.mock import AsyncMock, patch
@@ -16,6 +19,7 @@ from src.portfolio_parser import (
     parse_portfolio_context,
     get_confirmed_and_pending,
     get_live_holdings,
+    get_freshness_recommendation,
 )
 
 # Real, minimal, self-contained fixture matching the actual document's two
@@ -150,3 +154,68 @@ def test_wrapper_retries_before_giving_up():
         result = asyncio.run(wrapper.get_holdings("KTOS"))
     assert result["confidence"] == "low"
     assert mock_mcp.call_tool.call_count == 2  # real, direct proof: max_retries=1 means 2 total real attempts
+
+
+# --- get_freshness_recommendation ---
+
+def test_wrapper_persists_freshness_on_successful_check():
+    mock_mcp = AsyncMock()
+    mock_mcp.call_tool.return_value = {
+        "stdout": '{"positions": [{"instrument": {"symbol": "KTOS"}, "quantity": "17", "lastPrice": {"timestamp": "2026-08-17T00:00:00Z"}}]}'
+    }
+    from src.portfolio_parser import PublicComWrapper
+    with tempfile.TemporaryDirectory() as tmpdir:
+        fresh_path = f"{tmpdir}/freshness.json"
+        wrapper = PublicComWrapper(freshness_path=fresh_path, min_call_interval_seconds=0.0)
+        with patch("src.tool_utils.get_mcp_manager", return_value=mock_mcp):
+            asyncio.run(wrapper.get_holdings("KTOS"))
+        with open(fresh_path) as f:
+            data = json.load(f)
+    assert data["KTOS"]["qty_at_check"] == 17.0
+    assert data["KTOS"]["source"] == "live"
+    assert "last_checked" in data["KTOS"]
+
+
+def test_freshness_recommendation_trust_document_when_matching():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        fresh_path = f"{tmpdir}/freshness.json"
+        now = datetime.now(timezone.utc).isoformat()
+        with open(fresh_path, "w") as f:
+            json.dump({"KTOS": {"last_checked": now, "source": "live", "qty_at_check": 16.0}}, f)
+        result = get_freshness_recommendation("KTOS", 16.0, freshness_path=fresh_path)
+    assert result["recommendation"] == "trust_document"
+    assert result["has_recent_check"] is True
+
+
+def test_freshness_recommendation_append_note_when_mismatched():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        fresh_path = f"{tmpdir}/freshness.json"
+        now = datetime.now(timezone.utc).isoformat()
+        with open(fresh_path, "w") as f:
+            json.dump({"KTOS": {"last_checked": now, "source": "live", "qty_at_check": 17.0}}, f)
+        result = get_freshness_recommendation("KTOS", 16.0, freshness_path=fresh_path)
+    assert result["recommendation"] == "append_note"
+
+
+def test_freshness_recommendation_needs_live_check_when_no_record():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        fresh_path = f"{tmpdir}/freshness.json"
+        result = get_freshness_recommendation("ZZZZ", 5.0, freshness_path=fresh_path)
+    assert result["recommendation"] == "needs_live_check"
+    assert result["has_recent_check"] is False
+
+
+def test_freshness_recommendation_needs_live_check_when_record_stale():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        fresh_path = f"{tmpdir}/freshness.json"
+        old = (datetime.now(timezone.utc) - timedelta(hours=48)).isoformat()
+        with open(fresh_path, "w") as f:
+            json.dump({"KTOS": {"last_checked": old, "source": "live", "qty_at_check": 16.0}}, f)
+        result = get_freshness_recommendation("KTOS", 16.0, freshness_path=fresh_path, max_age_hours=24.0)
+    assert result["recommendation"] == "needs_live_check"
+    assert result["has_recent_check"] is False
+
+
+def test_freshness_recommendation_handles_missing_file_gracefully():
+    result = get_freshness_recommendation("KTOS", 16.0, freshness_path="/nonexistent/path/freshness.json")
+    assert result["recommendation"] == "needs_live_check"
