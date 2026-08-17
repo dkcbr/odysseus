@@ -69,7 +69,7 @@ function _injectTickerStyle() {
     #jarvis-home-ticker-wrapper::after { right: 0; background: linear-gradient(to left, var(--hud-bg), transparent); }
     #jarvis-home-ticker-bar {
       display: inline-flex; align-items: center; height: 32px;
-      animation: jarvis-home-ticker-scroll 60s linear infinite;
+      animation: jarvis-home-ticker-scroll 120s linear infinite;
     }
     #jarvis-home-ticker-bar:hover { animation-play-state: paused; }
     @keyframes jarvis-home-ticker-scroll { 0% { transform: translateX(0); } 100% { transform: translateX(-50%); } }
