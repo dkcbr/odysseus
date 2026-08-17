@@ -15,6 +15,7 @@ import asyncio
 import re
 import time
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Dict, List, Optional
 
 
@@ -151,13 +152,14 @@ class PublicComWrapper:
     there, not assume this wrapper resolves the open question.
     """
 
-    def __init__(self, cache_ttl_seconds: float = 60.0, min_call_interval_seconds: float = 2.0, max_retries: int = 2):
+    def __init__(self, cache_ttl_seconds: float = 60.0, min_call_interval_seconds: float = 2.0, max_retries: int = 2, freshness_path: str = "data/holdings_freshness.json"):
         self._cache: dict = {}  # ticker -> (result_dict, real_fetch_monotonic_time)
         self._cache_ttl = cache_ttl_seconds
         self._min_interval = min_call_interval_seconds
         self._max_retries = max_retries
         self._last_call_monotonic: float = 0.0
         self._lock = asyncio.Lock()
+        self._freshness_path = freshness_path
 
     async def get_holdings(self, ticker: str) -> dict:
         """Real, single entry point. Always returns the structured
@@ -187,6 +189,7 @@ class PublicComWrapper:
                     if raw is not None:
                         result = {"qty": raw["quantity"], "ts": raw.get("last_price_ts"), "source": "live", "confidence": "high"}
                         self._cache[ticker] = (result, time.monotonic())
+                        self._persist_freshness(ticker, result)
                         return result
                     # Real, honest: ticker genuinely not held is not a
                     # retriable failure -- a real, successful call that
@@ -198,6 +201,31 @@ class PublicComWrapper:
                         await asyncio.sleep(0.5 * (attempt + 1))  # real, simple backoff
 
             return {"qty": None, "ts": None, "source": "live", "confidence": "low", "error": str(last_error) if last_error else "unknown"}
+
+    def _persist_freshness(self, ticker: str, result: dict) -> None:
+        """Real, automatic freshness persistence -- writes to a small,
+        separate JSON file (NOT portfolio_context.md, which DK
+        maintains by hand) every time a real, successful live check
+        happens. No manual document editing required; this file is
+        entirely maintained by this wrapper, updated in place.
+        Fails silently: freshness tracking is a real, useful
+        enhancement, never something that should break a live check."""
+        try:
+            import json as _json
+            try:
+                with open(self._freshness_path, "r", encoding="utf-8") as f:
+                    data = _json.load(f)
+            except (FileNotFoundError, _json.JSONDecodeError):
+                data = {}
+            data[ticker] = {
+                "last_checked": datetime.now(timezone.utc).isoformat(),
+                "source": result.get("source", "live"),
+                "qty_at_check": result.get("qty"),
+            }
+            with open(self._freshness_path, "w", encoding="utf-8") as f:
+                _json.dump(data, f, indent=2)
+        except Exception:
+            pass
 
     async def _fetch_raw(self, ticker: str) -> Optional[dict]:
         """Real, direct MCP call -- the same real logic as the original
@@ -238,3 +266,62 @@ async def get_live_holdings(ticker: str) -> Optional[dict]:
     if result["qty"] is None:
         return None
     return {"quantity": result["qty"], "last_price_ts": result["ts"]}
+
+
+def get_freshness_recommendation(ticker: str, doc_confirmed_qty: Optional[float],
+                                  freshness_path: str = "data/holdings_freshness.json",
+                                  max_age_hours: float = 24.0) -> dict:
+    """Real, direct decision logic: given a ticker and the document's
+    confirmed_holdings value, checks stored freshness metadata and
+    recommends what to do -- without making any real network call
+    itself (this is a synchronous, real, fast lookup against the
+    freshness file, safe to call from anywhere including the
+    streaming path, unlike a live mcp.call_tool()).
+
+    Returns:
+        {
+            "has_recent_check": bool,
+            "last_checked": str or None,
+            "recommendation": one of:
+                "trust_document"    -- recent, real live check confirms
+                                        the document matches; no note
+                                        needed.
+                "append_note"       -- recent, real live check found a
+                                        real mismatch; the document is
+                                        confirmed stale.
+                "needs_live_check"  -- no recent freshness record; a
+                                        live check would be needed to
+                                        know either way. Does NOT mean
+                                        "call live verification now" --
+                                        that's still a separate, real
+                                        decision given the unresolved
+                                        async-safety question (issue
+                                        #12); this just reports that
+                                        no recent data exists.
+        }
+    """
+    import json as _json
+    try:
+        with open(freshness_path, "r", encoding="utf-8") as f:
+            data = _json.load(f)
+    except (FileNotFoundError, _json.JSONDecodeError):
+        data = {}
+
+    entry = data.get(ticker)
+    if entry is None:
+        return {"has_recent_check": False, "last_checked": None, "recommendation": "needs_live_check"}
+
+    try:
+        checked_at = datetime.fromisoformat(entry["last_checked"])
+        age_hours = (datetime.now(timezone.utc) - checked_at).total_seconds() / 3600.0
+    except (KeyError, ValueError):
+        return {"has_recent_check": False, "last_checked": None, "recommendation": "needs_live_check"}
+
+    if age_hours > max_age_hours:
+        return {"has_recent_check": False, "last_checked": entry["last_checked"], "recommendation": "needs_live_check"}
+
+    live_qty = entry.get("qty_at_check")
+    if doc_confirmed_qty is not None and live_qty is not None and abs(live_qty - doc_confirmed_qty) < 0.001:
+        return {"has_recent_check": True, "last_checked": entry["last_checked"], "recommendation": "trust_document"}
+
+    return {"has_recent_check": True, "last_checked": entry["last_checked"], "recommendation": "append_note"}
