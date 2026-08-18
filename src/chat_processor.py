@@ -91,6 +91,12 @@ class ChatProcessor:
     RAG_SIMILARITY_THRESHOLD = 0.35
     MEMORY_CONTEXT_LIMIT = 5
     PINNED_MEMORY_LIMIT = MEMORY_CONTEXT_LIMIT
+    # Real, added 2026-08-17: cap on always-included "correction" memories.
+    # Without a real cap, this list grows unboundedly forever (every real
+    # correction ever saved gets injected into every future conversation) --
+    # capped and most-recent-first so it stays small and prioritizes what
+    # was corrected most recently.
+    CORRECTION_MEMORY_LIMIT = 10
 
     def _is_core_memory(self, memory: Dict[str, Any]) -> bool:
         """Return whether a pinned memory is safe to keep globally available."""
@@ -322,10 +328,47 @@ class ChatProcessor:
         if use_memory:
             mem_entries = self.memory_manager.load(owner=owner)
 
-            pinned = [m for m in mem_entries if m.get("pinned")]
-            extended = [m for m in mem_entries if not m.get("pinned")]
+            # Real, added 2026-08-17: "correction" category memories (explicit
+            # user corrections or lasting behavioral preferences) are always
+            # included, checked before every task regardless of topic --
+            # NOT gated on the "pinned" field, since nothing in this codebase
+            # currently sets pinned=True for a model-added memory (confirmed
+            # directly: searched every real source file, "pinned" is only
+            # ever read, never written, outside of unrelated note-pinning
+            # and model-pinning features). Gating this on "pinned" would
+            # make the category silently inert.
+            corrections = [m for m in mem_entries if (m.get("category") or "").lower() == "correction"]
+            non_correction = [m for m in mem_entries if (m.get("category") or "").lower() != "correction"]
+
+            pinned = [m for m in non_correction if m.get("pinned")]
+            extended = [m for m in non_correction if not m.get("pinned")]
 
             _used_ids: list = []
+
+            if corrections:
+                # Real, direct sort by recency -- most recent correction
+                # first, matching the same real pattern _select_pinned_memories
+                # already uses elsewhere in this file.
+                corrections_sorted = sorted(
+                    corrections,
+                    key=lambda m: int(m.get("timestamp") or 0),
+                    reverse=True,
+                )[:self.CORRECTION_MEMORY_LIMIT]
+                corrections_text = "\n- ".join([m["text"] for m in corrections_sorted])
+                preface.append(untrusted_context_message(
+                    "saved memory: corrections and behavioral preferences",
+                    (
+                        "The user has explicitly corrected you or stated a "
+                        "lasting behavioral preference in the past. Follow "
+                        f"these on every task, not just when the topic seems "
+                        f"related:\n- {corrections_text}"
+                    ),
+                ))
+                for m in corrections_sorted:
+                    self._last_used_memories.append({"text": m["text"], "category": "correction", "type": "correction"})
+                    if m.get("id"):
+                        _used_ids.append(m["id"])
+
             selected_pinned = self._select_pinned_memories(message, pinned)
             if selected_pinned:
                 pinned_text = "\n- ".join([m["text"] for m in selected_pinned])
