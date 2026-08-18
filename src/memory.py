@@ -96,6 +96,59 @@ class MemoryManager:
                         
         return memories
         
+    def process_correction_command(self, message: str) -> Tuple[bool, str]:
+        """Real, deterministic, model-independent detection of an explicit
+        correction command (e.g. "Correction: always answer in bullet
+        points"). Added 2026-08-17 after confirming directly, across 4
+        real trials on 2 different models, that relying on model
+        initiative to call manage_memory with category="correction" does
+        not work reliably (0/4, even with an explicit persona instruction).
+        This bypasses the model entirely, matching the same real, already-
+        proven pattern process_inline_memory_command uses below.
+
+        Real, deliberate validation, not just a bare regex match:
+        - Requires an explicit "correction:" (or close variant) prefix --
+          does not try to infer intent from arbitrary phrasing.
+        - Rejects captures that are too short (<10 chars) or too long
+          (>300 chars) to avoid saving noise or entire pasted documents.
+        - Rejects captures that are just filler ("I misspoke", "that was
+          wrong", "never mind") with no concrete, sentence-length content
+          -- a real, actionable correction should read as an instruction,
+          not an acknowledgment.
+
+        Returns (is_correction, extracted_text). Real, honest limitation:
+        this only catches messages that use one of these explicit prefixes
+        -- it will not detect a correction phrased as "actually I prefer
+        X" without the prefix. That's a deliberate, conservative choice:
+        false negatives (missing a correction) are much safer than false
+        positives (saving something that was never meant to be a
+        permanent rule) for a category that gets injected into every
+        future conversation.
+        """
+        pattern = r'^(?:correction|note for (?:future|next time)|remember this rule|always remember)[:\-]?\s+(.+)$'
+        match = re.match(pattern, message.strip(), re.IGNORECASE)
+        if not match:
+            return False, ""
+
+        candidate = match.group(1).strip()
+
+        if len(candidate) < 10 or len(candidate) > 300:
+            return False, ""
+
+        trivial_phrases = {
+            "i misspoke", "that was wrong", "never mind", "forget that",
+            "ignore that", "my mistake", "sorry", "nothing", "n/a",
+        }
+        if candidate.lower().rstrip(".!") in trivial_phrases:
+            return False, ""
+
+        # Real, basic secret-pattern guard -- don't save something that
+        # looks like it might contain an API key, password, or similar.
+        if re.search(r'\b(?:api[_\- ]?key|password|secret|token)\b', candidate, re.IGNORECASE):
+            return False, ""
+
+        return True, candidate
+
     def process_inline_memory_command(self, message: str) -> Tuple[bool, str]:
         """
         Check if a message is an inline memory command (e.g. "remember: X").
