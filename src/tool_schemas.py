@@ -520,8 +520,8 @@ FUNCTION_TOOL_SCHEMAS = [
                                "description": "The action to perform"},
                     "text": {"type": "string", "description": "Memory text (for add/edit) or search query (for search)"},
                     "memory_id": {"type": "string", "description": "Memory ID (for edit/delete)"},
-                    "category": {"type": "string", "enum": ["fact", "event", "contact", "preference"],
-                                 "description": "Memory category (for add/list filter)"}
+                    "category": {"type": "string", "enum": ["fact", "event", "contact", "preference", "correction"],
+                                 "description": "Memory category (for add/list filter). Use 'correction' when the user explicitly corrects a mistake or states a lasting behavioral preference for how you should act -- this category is always included in future context, unlike other categories which are only included when relevant to the current request."}
                 },
                 "required": ["action"]
             }
