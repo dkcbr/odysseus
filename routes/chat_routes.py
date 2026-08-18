@@ -1863,6 +1863,35 @@ def setup_chat_routes(
         # buffered output + live); dropping the SSE only removes a subscriber —
         # the run keeps going and saves the assistant message on completion
         # regardless. Reconnect via /api/chat/resume.
+        # Real, added 2026-08-17: deterministic correction capture for the
+        # actual, real streaming path (mode=agent), the one genuinely used
+        # in practice -- confirmed directly that this same check, already
+        # wired into handle_memory_command() for the non-streaming route,
+        # was never reached here (a real, pre-existing gap, confirmed to
+        # also affect the original "remember: X" command, not something
+        # introduced tonight). Checked here, before the real agent/model
+        # pipeline starts, so a correction never triggers a real, wasted
+        # model call.
+        if isinstance(message, str) and not incognito and not tool_policy.blocks("manage_memory"):
+            _is_correction, _correction_text = memory_manager.process_correction_command(message)
+            if _is_correction and _correction_text:
+                _mem = memory_manager.load()
+                if not memory_manager.find_duplicates(_correction_text, _mem):
+                    _new_entry = memory_manager.add_entry(_correction_text, category="correction")
+                    _mem.append(_new_entry)
+                    memory_manager.save(_mem)
+                _confirmation = f"Saved as a correction (always included in future context): {_correction_text}"
+                sess.add_message(ChatMessage("user", message))
+                sess.add_message(ChatMessage("assistant", _confirmation))
+                session_manager.save_sessions()
+
+                async def _correction_confirmation_stream():
+                    yield f"data: {json.dumps({'delta': _confirmation})}\n\n"
+                    yield f"data: {json.dumps({'type': 'message_saved'})}\n\n"
+                    yield "data: [DONE]\n\n"
+
+                return StreamingResponse(_correction_confirmation_stream(), media_type="text/event-stream")
+
         if compare_mode:
             return StreamingResponse(_safe_stream(), media_type="text/event-stream")
 
