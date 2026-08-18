@@ -20,6 +20,14 @@ services:
       # actually reach the real host display, not just report a missing
       # socket. rw (not ro) since X11 clients need to write to the socket.
       - /tmp/.X11-unix:/tmp/.X11-unix:rw
+      # Real, added 2026-08-17: mount the real ydotool socket. xdotool's
+      # mouse/keyboard control was confirmed NOT visually working (real,
+      # repeated testing) -- XWayland rootless mode appears to isolate
+      # X11-level input injection from COSMIC's native Wayland input.
+      # ydotool injects real events at the kernel level (via /dev/uinput
+      # on the host, through the real ydotoold daemon DK started), which
+      # should bypass XWayland's isolation entirely.
+      - /tmp/.ydotool_socket:/tmp/.ydotool_socket:rw
       # Cookbook remote-server SSH identity. Odysseus can generate a key here;
       # add the shown public key to each remote server's authorized_keys.
       - ${APP_DATA_DIR:-./data}/ssh:/app/.ssh:z
@@ -65,6 +73,9 @@ services:
       # real, running XWayland instance (confirmed live: "Xwayland :1"),
       # via the X11 socket mounted above.
       - DISPLAY=:1
+      # Real, added 2026-08-17: tells ydotool client where the real,
+      # mounted socket is (see the volume mount above).
+      - YDOTOOL_SOCKET=/tmp/.ydotool_socket
       - LLM_HOST=${LLM_HOST:-localhost}
       - LLM_HOSTS=${LLM_HOSTS:-}
       - OPENAI_API_KEY=${OPENAI_API_KEY:-}
