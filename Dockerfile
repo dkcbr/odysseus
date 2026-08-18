@@ -40,6 +40,18 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     imagemagick \
     && rm -rf /var/lib/apt/lists/*
 
+# ydotool is real, added 2026-08-17: not available in the base trixie repos
+# (confirmed: "E: Unable to locate package ydotool"). Real, fixed: trixie-
+# backports has v1.0.4, but the REAL host daemon (installed by DK via
+# Pop!_OS/Ubuntu noble's own apt) is v0.1.8 -- ydotool had a complete
+# protocol rewrite at v1.0.0, so 1.0.4 client + 0.1.8 daemon genuinely
+# fails with "Protocol wrong type for socket" (confirmed directly). Using
+# Debian bookworm's repos instead, which has the matching 0.1.8-3.
+RUN echo "deb http://deb.debian.org/debian bookworm main" > /etc/apt/sources.list.d/bookworm.list \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends -t bookworm ydotool \
+    && rm -rf /var/lib/apt/lists/*
+
 # wmctrl/xdotool are real, added 2026-08-17 for jarvis_desktop's real window
 # and mouse/keyboard control tools -- require a mounted X11 socket and a
 # real DISPLAY env var pointed at the host's XWayland instance (see
