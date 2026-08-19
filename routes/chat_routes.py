@@ -1904,6 +1904,34 @@ def setup_chat_routes(
         # replace the real search_vault tool for the model's own,
         # ordinary use -- that remains available for any request this
         # narrow trigger doesn't match.
+        # Real, added 2026-08-19: deterministic trigger for the narrow
+        # "how many shares of X do I own" question. Goes one step
+        # further than a tool-selection trigger (like the vault one
+        # just below) -- answers directly from the already-parsed
+        # portfolio data, bypassing the model's synthesis step
+        # entirely, not just its tool choice. Confirmed necessary via
+        # two real, distinct failures tonight: qwen2.5:7b calling the
+        # wrong tool (lookup_ticker), and separately, models that
+        # called the RIGHT tool still mis-synthesizing the raw
+        # document into a wrong number (the real "17 shares" bug --
+        # confirmed/pending summed together). Checked before the vault
+        # trigger since this is the more specific, narrower match.
+        if isinstance(message, str) and not incognito:
+            from src.tool_execution import detect_holdings_query, answer_holdings_query
+            _holdings_ticker = detect_holdings_query(message)
+            if _holdings_ticker:
+                _holdings_answer = answer_holdings_query(_holdings_ticker)
+                sess.add_message(ChatMessage("user", message))
+                sess.add_message(ChatMessage("assistant", _holdings_answer))
+                session_manager.save_sessions()
+
+                async def _holdings_query_stream():
+                    yield f"data: {json.dumps({'delta': _holdings_answer})}\n\n"
+                    yield f"data: {json.dumps({'type': 'message_saved'})}\n\n"
+                    yield "data: [DONE]\n\n"
+
+                return StreamingResponse(_holdings_query_stream(), media_type="text/event-stream")
+
         if isinstance(message, str) and not incognito:
             from src.tool_execution import detect_vault_search_trigger, search_vault_impl
             _vault_query = detect_vault_search_trigger(message)
