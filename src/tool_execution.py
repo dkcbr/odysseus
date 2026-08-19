@@ -675,6 +675,74 @@ def detect_vault_search_trigger(message: str) -> Optional[str]:
     return None
 
 
+# Real, deliberately narrow, conservative trigger for the "how many
+# shares of X do I own" class of question -- added 2026-08-19 after
+# confirming directly (repeated live tests) that models frequently
+# either call the wrong real tool (qwen2.5:7b -> lookup_ticker instead
+# of get_portfolio_context) or correctly call the right tool but then
+# mis-synthesize the raw document (the real, earlier "17 shares" bug).
+# This goes one step further than a tool-selection trigger: it answers
+# directly from the already-parsed, confirmed holdings data
+# (src/portfolio_parser.py), bypassing the model's synthesis step
+# entirely for this narrow, high-value, unambiguous case -- not just
+# forcing the right tool call and hoping the model reads the result
+# correctly.
+HOLDINGS_QUERY_TRIGGER = re.compile(
+    r"how many shares (?:of|in) ([a-zA-Z][a-zA-Z0-9.\-]{0,9}) do i (?:own|have)\??$",
+    re.IGNORECASE,
+)
+
+
+def detect_holdings_query(message: str) -> Optional[str]:
+    """Real, direct, deterministic check: does this message
+    unambiguously ask for a specific ticker's share count? Returns the
+    extracted ticker symbol (uppercased) if so, else None. Deliberately
+    narrow -- only the single, canonical 'how many shares of X do I
+    own' phrasing, not general portfolio questions (balance, strategy,
+    trading rules), which still need the full document and remain the
+    model's responsibility via get_portfolio_context."""
+    m = HOLDINGS_QUERY_TRIGGER.search(message.strip())
+    if not m:
+        return None
+    return m.group(1).upper()
+
+
+def answer_holdings_query(ticker: str) -> str:
+    """Real, direct, deterministic answer for a holdings query --
+    reads and parses data/portfolio_context.md directly via the
+    already-built, already-tested src/portfolio_parser.py, and states
+    the confirmed share count (plus any pending order) without any
+    model synthesis step at all. This is the real, root-cause fix for
+    the "17 shares" class of bug (a confirmed holding summed with a
+    separate, unexecuted pending order): there is no synthesis step
+    here for a model to get wrong."""
+    import os
+    try:
+        from src.portfolio_parser import parse_portfolio_context
+        path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "portfolio_context.md")
+        with open(path, "r", encoding="utf-8") as f:
+            text = f.read()
+        parsed = parse_portfolio_context(text)
+    except Exception as e:
+        return f"Could not read portfolio data to answer this: {e}"
+
+    if ticker not in parsed.confirmed_holdings:
+        pending_buy = parsed.pending_qty_for(ticker, "BUY")
+        if pending_buy:
+            return f"You have no confirmed holding of {ticker}, but there is a separate, unexecuted pending buy order for {pending_buy:g} shares."
+        return f"You don't currently have a confirmed holding of {ticker} in the portfolio data."
+
+    confirmed = parsed.confirmed_holdings[ticker]
+    pending_buy = parsed.pending_qty_for(ticker, "BUY")
+    pending_sell = parsed.pending_qty_for(ticker, "SELL")
+    answer = f"You currently own {confirmed:g} shares of {ticker} (confirmed)."
+    if pending_buy:
+        answer += f" There is also a separate, unexecuted pending buy order for {pending_buy:g} more shares."
+    if pending_sell:
+        answer += f" There is also a separate, unexecuted pending sell order for {pending_sell:g} shares."
+    return answer
+
+
 async def _document_tool_dispatch(
     tool: str,
     content: str,
