@@ -628,11 +628,31 @@ def search_vault_impl(query: str) -> str:
         for fpath, text in all_files:
             if term_lower in text.lower():
                 idx = text.lower().find(term_lower)
-                start = max(0, idx - 200)
-                end = min(len(text), idx + len(term) + 200)
-                snippet = text[start:end]
+                # Real, widened from the original 200 chars (which cut
+                # snippets off mid-word/mid-sentence, confirmed directly
+                # by a real, live "onlookers picture themse..." example)
+                # to 400, and snapped to real word boundaries rather than
+                # an arbitrary character count, so snippets read cleanly.
+                raw_start = max(0, idx - 400)
+                raw_end = min(len(text), idx + len(term) + 400)
+
+                start = raw_start
+                if raw_start > 0:
+                    space_idx = text.find(" ", raw_start)
+                    if 0 <= space_idx < raw_start + 40:
+                        start = space_idx + 1
+
+                end = raw_end
+                if raw_end < len(text):
+                    space_idx = text.rfind(" ", max(raw_start, raw_end - 40), raw_end)
+                    if space_idx != -1:
+                        end = space_idx
+
+                snippet = text[start:end].strip()
+                prefix = "..." if start > 0 else ""
+                suffix = "..." if end < len(text) else ""
                 rel_path = os.path.relpath(fpath, vault_root)
-                matches.append(f"### {rel_path}\n...{snippet}...")
+                matches.append(f"### {rel_path}\n{prefix}{snippet}{suffix}")
         if matches:
             return f"Found {len(matches)} matching file(s) for query '{term}':\n\n" + "\n\n".join(matches[:5])
 
