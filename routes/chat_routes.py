@@ -1892,6 +1892,34 @@ def setup_chat_routes(
 
                 return StreamingResponse(_correction_confirmation_stream(), media_type="text/event-stream")
 
+        # Real, added 2026-08-19: deterministic vault-search trigger,
+        # checked here rather than in the non-streaming route (matches
+        # the same real placement decision made for the correction
+        # check above, since this is the real, actual endpoint used by
+        # every live mode=agent request). Confirmed directly (live test)
+        # that models don't reliably choose to call search_vault on
+        # their own -- 0 tool calls on an unambiguous query. Only
+        # triggers on genuinely explicit, unambiguous phrasing (see
+        # detect_vault_search_trigger's own docstring); does not try to
+        # replace the real search_vault tool for the model's own,
+        # ordinary use -- that remains available for any request this
+        # narrow trigger doesn't match.
+        if isinstance(message, str) and not incognito:
+            from src.tool_execution import detect_vault_search_trigger, search_vault_impl
+            _vault_query = detect_vault_search_trigger(message)
+            if _vault_query:
+                _vault_output = search_vault_impl(_vault_query)
+                sess.add_message(ChatMessage("user", message))
+                sess.add_message(ChatMessage("assistant", _vault_output))
+                session_manager.save_sessions()
+
+                async def _vault_search_stream():
+                    yield f"data: {json.dumps({'delta': _vault_output})}\n\n"
+                    yield f"data: {json.dumps({'type': 'message_saved'})}\n\n"
+                    yield "data: [DONE]\n\n"
+
+                return StreamingResponse(_vault_search_stream(), media_type="text/event-stream")
+
         if compare_mode:
             return StreamingResponse(_safe_stream(), media_type="text/event-stream")
 
