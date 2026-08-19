@@ -492,6 +492,20 @@ FUNCTION_TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
+            "name": "search_vault",
+            "description": "Search DK's real Obsidian vault (personal notes and reference material, e.g. book summaries in Thesis/) for a query string. ALWAYS call this for any question about what the vault, notes, or a specific document says -- never assume you don't have access or answer from your own training knowledge, since this searches DK's own, real, current notes. Returns matching file names and snippets. If no matches are found, say so honestly rather than guessing at content.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "The search term or phrase to look for across the vault's markdown files."}
+                },
+                "required": ["query"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "create_document_office",
             "description": "Create a real Word (.docx), PowerPoint (.pptx), Excel (.xlsx), or PDF file on disk, using real document-format libraries (python-docx/python-pptx/openpyxl/reportlab) -- not the generic create_document editor panel, which cannot produce real Office/PDF files. ALWAYS use this when the user asks for a Word document, PowerPoint, spreadsheet, or PDF specifically (as opposed to a plain-text or code document, which still uses create_document). NEVER use bash/run_command/python/echo/redirection to create these files directly -- writing plain text to a .docx/.pptx/.xlsx/.pdf-named file produces an invalid, corrupt file that appears to succeed but cannot actually be opened by Word/PowerPoint/Excel/a PDF reader. This tool is the only correct way to create these 4 formats.",
             "parameters": {
