@@ -20,6 +20,15 @@ services:
       # actually reach the real host display, not just report a missing
       # socket. rw (not ro) since X11 clients need to write to the socket.
       - /tmp/.X11-unix:/tmp/.X11-unix:rw
+      # Real, added 2026-08-19: mount the real Obsidian vault read-only.
+      # Confirmed directly (GitHub issue #14, and two live tests tonight)
+      # that no vault-search tool has ever worked, because the container
+      # had no filesystem access to this real, host-side directory at
+      # all -- every "I don't have this in my vault" answer tonight was
+      # honestly correct given the real, actual toolset, not a model
+      # failure. Read-only: this tool should never write into DK's own,
+      # hand-maintained vault.
+      - /home/dk/gdrive/Obsidian:/app/vault_data:ro
       # Real, added 2026-08-17: mount the real ydotool socket. xdotool's
       # mouse/keyboard control was confirmed NOT visually working (real,
       # repeated testing) -- XWayland rootless mode appears to isolate

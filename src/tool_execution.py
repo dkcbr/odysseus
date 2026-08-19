@@ -872,6 +872,72 @@ async def _execute_tool_block_impl(
             result = {"stdout": text, "stderr": "", "exit_code": 0}
         except Exception as e:
             result = {"error": f"get_portfolio_context: {e}", "exit_code": 1}
+    elif tool == "search_vault":
+        # Real, added 2026-08-19: direct, in-process vault search. No
+        # search tool ever existed for this deployment (confirmed
+        # directly, GitHub issue #14, and two real live tests) -- the
+        # container had no filesystem access to the real, host Obsidian
+        # vault at all. Deliberately simple: a personal vault of roughly
+        # a dozen real markdown files does not need a separate indexed
+        # search service (SQLite FTS, ripgrep, a systemd-managed HTTP
+        # API) -- a direct, in-process file walk + substring match is
+        # genuinely proportionate here, matching get_portfolio_context's
+        # own "read the real file directly" pattern above.
+        desc = "search_vault"
+        try:
+            import os
+            args = json.loads(content) if content else {}
+            query = (args.get("query") or "").strip()
+            if not query:
+                result = {"error": "search_vault requires a non-empty 'query' argument", "exit_code": 1}
+            else:
+                vault_root = "/app/vault_data"
+                # Real, deliberately does NOT scan vault_root directly --
+                # confirmed live tonight it holds 40+ unrelated files (old
+                # session notes, large PDFs, "jarvis-stack-memory-backup-*"
+                # files) that would make every search slow, especially
+                # given this mount's known, real I/O slowness (the same
+                # gdrive-backed mount that's shown transient errors from
+                # the host side all night). Scoped to just the three real,
+                # intentionally organized subfolders, matching the
+                # documented real scope from thesis-readme.md.
+                search_dirs = []
+                for sub in ("Portfolio", "Thesis", "Watchlist"):
+                    sub_path = os.path.join(vault_root, sub)
+                    if os.path.isdir(sub_path):
+                        search_dirs.append(sub_path)
+
+                query_lower = query.lower()
+                matches = []
+                seen_paths = set()
+                for d in search_dirs:
+                    for fname in os.listdir(d):
+                        if not fname.endswith(".md"):
+                            continue
+                        fpath = os.path.join(d, fname)
+                        if fpath in seen_paths or not os.path.isfile(fpath):
+                            continue
+                        seen_paths.add(fpath)
+                        try:
+                            with open(fpath, "r", encoding="utf-8") as f:
+                                text = f.read()
+                        except Exception:
+                            continue
+                        if query_lower in text.lower():
+                            idx = text.lower().find(query_lower)
+                            start = max(0, idx - 200)
+                            end = min(len(text), idx + len(query) + 200)
+                            snippet = text[start:end]
+                            rel_path = os.path.relpath(fpath, vault_root)
+                            matches.append(f"### {rel_path}\n...{snippet}...")
+
+                if matches:
+                    output = f"Found {len(matches)} matching file(s) for query '{query}':\n\n" + "\n\n".join(matches[:5])
+                    result = {"stdout": output, "stderr": "", "exit_code": 0}
+                else:
+                    result = {"stdout": f"No matches found in the vault for '{query}'.", "stderr": "", "exit_code": 0}
+        except Exception as e:
+            result = {"error": f"search_vault: {e}", "exit_code": 1}
     elif tool in ("pipeline", "manage_memory", "ui_control"):
         from src.ai_interaction import dispatch_ai_tool
         desc, result = await dispatch_ai_tool(tool, content, session_id, owner=owner)
