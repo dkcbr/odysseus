@@ -3,6 +3,16 @@ services:
     build: .
     ports:
       - "${APP_BIND:-127.0.0.1}:${APP_PORT:-7000}:7000"
+    # Real, added 2026-08-18: direct passthrough of the real host's
+    # /dev/uinput device, for jarvis_desktop's scroll() tool -- a real,
+    # separate python-evdev script that creates its own virtual input
+    # device to inject wheel events (ydotool 0.1.8 has no scroll
+    # support at all, confirmed directly; the newer ydotool that does
+    # has a real, unresolved absolute-positioning bug, not a safe
+    # trade -- see scroll()'s own docstring in jarvis_desktop_mcp.py
+    # for the full history).
+    devices:
+      - /dev/uinput:/dev/uinput
     volumes:
       - ${APP_DATA_DIR:-./data}:/app/data:z
       - ${APP_LOGS_DIR:-./logs}:/app/logs:z

@@ -75,3 +75,9 @@ python-docx
 python-pptx
 openpyxl
 reportlab
+
+# Real, added 2026-08-18: for jarvis_desktop's scroll_inject.py, which
+# creates a real virtual input device to inject wheel/scroll events
+# directly (ydotool has no working scroll support on this host -- see
+# scroll()'s own docstring for the full history).
+evdev
