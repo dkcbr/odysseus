@@ -46,6 +46,20 @@ services:
       # ydotool injects real events at the kernel level (via /dev/uinput
       # on the host, through the real ydotoold daemon DK started), which
       # should bypass XWayland's isolation entirely.
+      # Real, added 2026-08-17: mount the real ydotool socket. xdotool's
+      # mouse/keyboard control was confirmed NOT visually working (real,
+      # repeated testing) -- XWayland rootless mode appears to isolate
+      # X11-level input injection from COSMIC's native Wayland input.
+      # ydotool injects real events at the kernel level (via /dev/uinput
+      # on the host, through the real ydotoold daemon DK started), which
+      # should bypass XWayland's isolation entirely.
+      # Real, temporarily disabled 2026-08-19 after a stale, root-owned
+      # directory at this path (left behind by a prior crashed/killed
+      # daemon) blocked the container from starting entirely (exit 127).
+      # Re-enabled after DK confirmed, running as root:
+      #   sudo rm -rf /tmp/.ydotool_socket && sudo ydotoold
+      # -- confirmed directly the path is now a real socket file
+      # (srw-------, root-owned) before re-enabling this line.
       - /tmp/.ydotool_socket:/tmp/.ydotool_socket:rw
       # Cookbook remote-server SSH identity. Odysseus can generate a key here;
       # add the shown public key to each remote server's authorized_keys.
