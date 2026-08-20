@@ -23,6 +23,7 @@ from src.llm_core import (
 from src.model_context import estimate_tokens
 from src.settings import get_setting
 from src.prompt_security import untrusted_context_message
+from src.text_helpers import ReasoningGate
 from src.tool_security import blocked_tools_for_owner, plan_mode_disabled_tools
 from src.tool_policy import GUIDE_ONLY_DIRECTIVE, WEB_TOOL_NAMES, ToolPolicy
 from src.tool_utils import _truncate, get_mcp_manager
@@ -3932,6 +3933,12 @@ async def stream_agent_loop(
     for round_num in range(1, max_rounds + 1):
         round_response = ""
         round_reasoning = ""  # reasoning_content deltas (DeepSeek-thinking, vLLM --reasoning-parser)
+        # Catches untagged chain-of-thought that a model emits as plain
+        # content instead of a proper thinking delta or <think> block --
+        # buffers only the still-unclassified leading portion of the round
+        # (see ReasoningGate docstring); everything after it opens streams
+        # through with zero added overhead.
+        _reasoning_gate = ReasoningGate()
         native_tool_calls = []  # populated if model uses function calling
         # Reset doc streaming state per round
         _doc_acc = ""
@@ -4150,6 +4157,7 @@ async def stream_agent_loop(
                         # next request (DeepSeek requires this; harmless for
                         # other vendors). Regular content still flows into
                         # round_response unchanged.
+                        _gate_buffered = False
                         if data.get("thinking"):
                             round_reasoning += data["delta"]
                         else:
@@ -4160,10 +4168,26 @@ async def stream_agent_loop(
                             )
                             if _ody_qwen_finetune_model:
                                 _delta_text = _normalize_ody_qwen_text_artifacts(_delta_text)
-                            round_response += _delta_text
-                            full_response += _delta_text
-                            data["delta"] = _delta_text
-                        if not _ody_qwen_finetune_model or data.get("thinking"):
+                                # This model's content path is handled entirely
+                                # through the doc-streaming fence protocol below
+                                # (it never reaches the plain yield at the end of
+                                # this block anyway) -- leave it untouched by the
+                                # reasoning gate rather than mix two special cases.
+                                _safe_text = _delta_text
+                            else:
+                                # Buffers untagged chain-of-thought that a model
+                                # emits as plain content instead of a thinking
+                                # delta or <think> block. See ReasoningGate's
+                                # docstring in text_helpers.py for the design;
+                                # this only adds latency to the still-buffered
+                                # leading portion of a round, never the whole
+                                # response.
+                                _safe_text = _reasoning_gate.feed(_delta_text)
+                                _gate_buffered = not _safe_text
+                            round_response += _safe_text
+                            full_response += _safe_text
+                            data["delta"] = _safe_text
+                        if (not _ody_qwen_finetune_model or data.get("thinking")) and not _gate_buffered:
                             yield f"data: {json.dumps(data)}\n\n"
                         # Detect text-fence doc streaming. Normal agent prompts
                         # use ```create_document; the doc LoRA streaming path
@@ -4234,6 +4258,16 @@ async def stream_agent_loop(
                 # Forward error events to frontend as visible text
                 yield chunk
             # Intercept [DONE] — don't forward until all rounds finish
+
+        # End of this round's stream: release whatever the reasoning gate
+        # was still holding (its own flush() rule: never swallow content it
+        # was never certain about, e.g. a long final paragraph with no
+        # blank-line boundary -- see ReasoningGate.flush() docstring).
+        _gate_tail = _reasoning_gate.flush()
+        if _gate_tail:
+            round_response += _gate_tail
+            full_response += _gate_tail
+            yield f"data: {json.dumps({'delta': _gate_tail})}\n\n"
 
         logger.info(
             "[agent-timing] round_stream_done round=%s elapsed=%.3fs text_chars=%s tool_calls=%s first_event=%s first_token=%s",
