@@ -781,6 +781,34 @@ FUNCTION_TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
+            "name": "skill_introspect",
+            "description": (
+                "Read-only lookup of the user's skill library -- ALWAYS available, "
+                "regardless of domain (trading, email, browser, etc), unlike "
+                "manage_skills which only appears for workspace/file-related requests. "
+                "Use 'list' to see what skills exist, 'view' to load a specific skill's "
+                "full procedure, 'view_ref' for a sub-file, 'search' to find a relevant "
+                "skill by keyword. If a relevant published skill exists for the current "
+                "task, ALWAYS check it here before saying you don't know how to do something "
+                "or that you lack a procedure -- do not assume a skill is unavailable just "
+                "because you don't see it in your current tool list. To create, edit, "
+                "publish, or delete a skill, use manage_skills instead."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "action": {"type": "string", "enum": ["list", "view", "view_ref", "search"], "description": "list = name+description summary; view = full SKILL.md; view_ref = sub-file under the skill dir; search = relevance match on published skills."},
+                    "name": {"type": "string", "description": "Slug/name of the skill. Required for view/view_ref."},
+                    "path": {"type": "string", "description": "Sub-path under the skill directory for view_ref (e.g. 'references/example.md')."},
+                    "query": {"type": "string", "description": "Search text (for search)."}
+                },
+                "required": ["action"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "manage_skills",
             "description": (
                 "Read or modify the user's skill library. Skills are SKILL.md files "
