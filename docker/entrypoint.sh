@@ -135,6 +135,18 @@ export VLLM_USE_FLASHINFER_SAMPLER="${VLLM_USE_FLASHINFER_SAMPLER:-0}"
 # vLLM and helper scripts land here because /app is the non-root user's HOME.
 export PATH="/app/.local/bin:$PATH"
 
+# Real, added 2026-08-18: /dev/uinput (passed through via docker-compose's
+# real device mount) is root:root, 660 on the host -- the app user
+# ($ODY_USER, non-root) genuinely can't write to it otherwise. This is
+# for jarvis_desktop's scroll() tool, which uses a real, separate
+# python-evdev script that creates its own virtual input device to
+# inject wheel/scroll events (ydotool has no working scroll support on
+# this host -- see scroll()'s own docstring for the full history).
+# Confirmed directly: this chmod is scoped to the container's own view
+# of the device, the real host permissions are genuinely unaffected.
+# || true so a missing/unmounted device never prevents startup.
+chmod 666 /dev/uinput 2>/dev/null || true
+
 # Run first-time setup as the app user so data/ files get the right ownership.
 # setup.py is idempotent — skips auth.json / .env if they already exist.
 # || true so a setup failure never prevents the container from starting.
