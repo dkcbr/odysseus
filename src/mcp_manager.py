@@ -558,16 +558,31 @@ class McpManager:
                         try:
                             result = await self._do_call(session, tool_name, arguments)
                         except Exception as e2:
-                            logger.error(f"MCP tool call failed after reconnect: {qualified_name}: {e2}")
-                            return {"error": str(e2), "exit_code": 1}
+                            # Real, same fix as below -- always include the
+                            # exception type name, since some exception
+                            # types have a genuinely empty str() by design.
+                            error_detail = str(e2) or "(no message)"
+                            logger.error(f"MCP tool call failed after reconnect: {qualified_name}: [{type(e2).__name__}] {error_detail}")
+                            return {"error": f"[{type(e2).__name__}] {error_detail}", "exit_code": 1}
                     else:
                         return {"error": f"Reconnected but no session for {server_id}", "exit_code": 1}
                 else:
                     logger.error(f"MCP reconnect failed for {server_id}")
                     return {"error": f"MCP server crashed and reconnect failed: {server_id}", "exit_code": 1}
             else:
-                logger.error(f"MCP tool call failed: {qualified_name}: {e}")
-                return {"error": str(e), "exit_code": 1}
+                # Real, deliberate fix 2026-08-20: found via wigolo debugging
+                # that this logged as genuinely empty ("MCP tool call
+                # failed: <name>: "), even when something real clearly went
+                # wrong. Root cause: certain real exception types (raised
+                # without a message argument) have a genuinely empty
+                # str(e) by design -- not a logging bug, but a real gap in
+                # what gets captured. Always include the real exception
+                # type name, which is never empty, so there's always
+                # something diagnostically useful in the log even when
+                # str(e) itself is blank.
+                error_detail = str(e) or "(no message)"
+                logger.error(f"MCP tool call failed: {qualified_name}: [{type(e).__name__}] {error_detail}")
+                return {"error": f"[{type(e).__name__}] {error_detail}", "exit_code": 1}
 
         return result
 
