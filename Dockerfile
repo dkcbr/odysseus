@@ -135,6 +135,17 @@ RUN pip install --no-cache-dir -r requirements.txt \
 # launches a browser; only an actual tool call does).
 ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
 RUN playwright install --with-deps chromium
+# Real, added 2026-08-20: this build step's own chromium install gets
+# overlaid at runtime by the host's bind-mounted, already-populated
+# browser cache (see docker-compose.yml -- /home/dk/.cache/ms-playwright
+# -> /ms-playwright), which is where wigolo/playwright-mcp actually find
+# their real, expected chromium version. Confirmed directly tonight:
+# this build-time install left a genuinely orphaned, unused
+# chromium-1234/chromium_headless_shell-1234 (651MB) sitting underneath
+# that mount, matching neither wigolo's expected version (1223) nor
+# playwright-mcp's own (1237). Removed here so future builds don't
+# carry this real, unused weight forward at all.
+RUN rm -rf /ms-playwright/chromium-1234 /ms-playwright/chromium_headless_shell-1234
 
 # python-magic powers content-based MIME sniffing in src/upload_handler.py.
 # Image-only (not in requirements.txt) because it needs the libmagic1 system
