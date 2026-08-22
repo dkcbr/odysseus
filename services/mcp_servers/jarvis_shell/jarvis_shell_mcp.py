@@ -39,10 +39,38 @@ Registration:
 
 import asyncio
 import os
+import re
 import tempfile
 
 import httpx
 from mcp.server.fastmcp import FastMCP
+
+# Real, module-level so this can be imported and tested directly (pure
+# regex matching, no shell execution at all) without ever calling
+# run_command -- see tests/test_jarvis_shell_destructive_guard.py.
+# Deliberately narrow scope: only broad/wildcard/root-ish destructive
+# targets are matched (e.g. `rm -rf .`, `rm -rf *`) -- a genuinely
+# scoped, specific deletion (`rm -rf /tmp/some_real_subdir`) is not
+# flagged, since that's legitimate, ordinary cleanup work. This is an
+# accident guard, not a security boundary.
+DESTRUCTIVE_COMMAND_PATTERNS = [
+    (re.compile(r"\brm\s+-[a-z]*r[a-z]*f[a-z]*\s+(\.|\*|~|/|\.\.)(\s|$)", re.IGNORECASE),
+     "a broad, wildcard/root-ish recursive delete (rm -rf on '.', '*', '~', or '/')"),
+    (re.compile(r"\bgit\s+clean\s+-[a-z]*[xfd]{2,}[a-z]*\b", re.IGNORECASE),
+     "git clean with force+untracked+ignored flags (wipes all untracked/ignored files)"),
+    (re.compile(r"\bfind\s+.*-delete\b", re.IGNORECASE),
+     "find ... -delete"),
+    (re.compile(r"\bshred\b", re.IGNORECASE),
+     "shred (secure, unrecoverable file deletion)"),
+    (re.compile(r"\bdd\s+if=/dev/(zero|random|urandom)\b", re.IGNORECASE),
+     "dd overwriting a file/device with zeros or random data"),
+    (re.compile(r"\bchmod\s+-R\s+000\b"),
+     "chmod -R 000 (recursively removes all access)"),
+    (re.compile(r"\btruncate\s+-s\s*0\s+\*", re.IGNORECASE),
+     "truncate -s 0 against a wildcard (wipes contents of every matching file)"),
+    (re.compile(r"\bmv\s+\S+\s+/dev/null\b"),
+     "mv ... /dev/null (effectively deletes the source)"),
+]
 
 mcp = FastMCP(
     name="JARVIS Shell",
@@ -77,26 +105,7 @@ async def run_command(command: str, cwd: str = "", timeout: int = DEFAULT_TIMEOU
     # targets are blocked (e.g. `rm -rf .`, `rm -rf *`) -- a genuinely
     # scoped, specific deletion (`rm -rf /tmp/some_real_subdir`) is not
     # flagged, since that's legitimate, ordinary cleanup work.
-    import re as _re
-    _destructive_patterns = [
-        (_re.compile(r"\brm\s+-[a-z]*r[a-z]*f[a-z]*\s+(\.|\*|~|/|\.\.)(\s|$)", _re.IGNORECASE),
-         "a broad, wildcard/root-ish recursive delete (rm -rf on '.', '*', '~', or '/')"),
-        (_re.compile(r"\bgit\s+clean\s+-[a-z]*[xfd]{2,}[a-z]*\b", _re.IGNORECASE),
-         "git clean with force+untracked+ignored flags (wipes all untracked/ignored files)"),
-        (_re.compile(r"\bfind\s+.*-delete\b", _re.IGNORECASE),
-         "find ... -delete"),
-        (_re.compile(r"\bshred\b", _re.IGNORECASE),
-         "shred (secure, unrecoverable file deletion)"),
-        (_re.compile(r"\bdd\s+if=/dev/(zero|random|urandom)\b", _re.IGNORECASE),
-         "dd overwriting a file/device with zeros or random data"),
-        (_re.compile(r"\bchmod\s+-R\s+000\b"),
-         "chmod -R 000 (recursively removes all access)"),
-        (_re.compile(r"\btruncate\s+-s\s*0\s+\*", _re.IGNORECASE),
-         "truncate -s 0 against a wildcard (wipes contents of every matching file)"),
-        (_re.compile(r"\bmv\s+\S+\s+/dev/null\b"),
-         "mv ... /dev/null (effectively deletes the source)"),
-    ]
-    for _pattern, _description in _destructive_patterns:
+    for _pattern, _description in DESTRUCTIVE_COMMAND_PATTERNS:
         if _pattern.search(command):
             return (
                 f"REFUSED: this command matches a known, broad, destructive "
@@ -117,8 +126,8 @@ async def run_command(command: str, cwd: str = "", timeout: int = DEFAULT_TIMEOU
     # own registry) -- the achievable fix is to detect the pattern and
     # refuse, telling the model to call the correct tool instead. Only
     # matches a real write (>/>>), not a read+pipe like `cat x.docx | grep`.
-    _office_write_pattern = _re.compile(
-        r">{1,2}\s*[\w./-]*\.(docx|pptx|xlsx|pdf)\b", _re.IGNORECASE
+    _office_write_pattern = re.compile(
+        r">{1,2}\s*[\w./-]*\.(docx|pptx|xlsx|pdf)\b", re.IGNORECASE
     )
     if _office_write_pattern.search(command):
         return (
