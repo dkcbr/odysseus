@@ -616,16 +616,24 @@ class McpManager:
     async def _do_call(self, session, tool_name: str, arguments: Dict, agent_name: str = None) -> Dict:
         """Execute a single MCP tool call and return result dict.
 
-        Real, added 2026-08-21: agent_name accepted here now (threaded
-        from call_tool()) but genuinely not yet used for anything -- the
-        underlying session.call_tool() below is the real MCP SDK protocol
-        call, and it has no environment/working-directory parameter at
-        the protocol level at all. Actually injecting a per-agent sandbox
-        path would need a different mechanism (e.g. os.environ around
-        this call), not a parameter passed into the protocol call itself.
-        This confirms agent_name now survives to the deepest point in the
-        real call chain -- the genuine, scoped goal of this step.
+        Real, added 2026-08-21: when agent_name is known, injects a real,
+        namespaced sandbox descriptor into arguments as _jarvis_sandbox --
+        NOT via os.environ, since that's process-wide global state and
+        would create a genuine race condition between concurrent async
+        tool calls from different agents (confirmed and deliberately
+        avoided). Individual tool implementations need to actually look
+        for and use this key -- injecting it here only defines the real
+        contract, it doesn't make any existing tool respect it yet.
         """
+        if agent_name:
+            sandbox_root = f"/home/dk/jarvis/projects/odysseus/data/agent_sandboxes/{agent_name}"
+            arguments = dict(arguments)  # real, shallow copy -- never mutate the caller's own dict
+            arguments["_jarvis_sandbox"] = {
+                "agent": agent_name,
+                "tmp_dir": f"{sandbox_root}/tmp",
+                "logs_dir": f"{sandbox_root}/logs",
+                "state_dir": f"{sandbox_root}/state",
+            }
         result = await session.call_tool(tool_name, arguments)
         output_parts = []
         images = []
