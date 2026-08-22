@@ -64,6 +64,49 @@ async def run_command(command: str, cwd: str = "", timeout: int = DEFAULT_TIMEOU
     real exit code. cwd defaults to this server's own working directory
     if not given. timeout is in seconds (default 60); the process is
     killed if it exceeds this."""
+    # Real, deliberate guard against genuinely catastrophic, destructive
+    # command patterns, added 2026-08-21. Confirmed directly beforehand:
+    # this tool has zero path restrictions (unlike jarvis_desktop's
+    # read_file/find_file/etc.) and its own documented, intended
+    # mitigation (approval_required_tools staging every call for human
+    # review) is not actually configured. This is explicitly an accident
+    # guard, not a security boundary -- it catches broad, common,
+    # devastating patterns before they run; it is not designed to resist
+    # something deliberately trying to construct a bypass. Real,
+    # deliberately narrow scope: only broad/wildcard/root-ish destructive
+    # targets are blocked (e.g. `rm -rf .`, `rm -rf *`) -- a genuinely
+    # scoped, specific deletion (`rm -rf /tmp/some_real_subdir`) is not
+    # flagged, since that's legitimate, ordinary cleanup work.
+    import re as _re
+    _destructive_patterns = [
+        (_re.compile(r"\brm\s+-[a-z]*r[a-z]*f[a-z]*\s+(\.|\*|~|/|\.\.)(\s|$)", _re.IGNORECASE),
+         "a broad, wildcard/root-ish recursive delete (rm -rf on '.', '*', '~', or '/')"),
+        (_re.compile(r"\bgit\s+clean\s+-[a-z]*[xfd]{2,}[a-z]*\b", _re.IGNORECASE),
+         "git clean with force+untracked+ignored flags (wipes all untracked/ignored files)"),
+        (_re.compile(r"\bfind\s+.*-delete\b", _re.IGNORECASE),
+         "find ... -delete"),
+        (_re.compile(r"\bshred\b", _re.IGNORECASE),
+         "shred (secure, unrecoverable file deletion)"),
+        (_re.compile(r"\bdd\s+if=/dev/(zero|random|urandom)\b", _re.IGNORECASE),
+         "dd overwriting a file/device with zeros or random data"),
+        (_re.compile(r"\bchmod\s+-R\s+000\b"),
+         "chmod -R 000 (recursively removes all access)"),
+        (_re.compile(r"\btruncate\s+-s\s*0\s+\*", _re.IGNORECASE),
+         "truncate -s 0 against a wildcard (wipes contents of every matching file)"),
+        (_re.compile(r"\bmv\s+\S+\s+/dev/null\b"),
+         "mv ... /dev/null (effectively deletes the source)"),
+    ]
+    for _pattern, _description in _destructive_patterns:
+        if _pattern.search(command):
+            return (
+                f"REFUSED: this command matches a known, broad, destructive "
+                f"pattern ({_description}) and was not executed. This is an "
+                f"accident guard, not a security boundary -- if this is "
+                f"genuinely intended, a more specific, narrowly-scoped "
+                f"version of the same command (a real, named path rather "
+                f"than a wildcard or root-ish target) will not be blocked."
+            )
+
     # Real safety net, added 2026-08-13: models kept defaulting to this
     # generic tool to "create" .docx/.pptx/.xlsx/.pdf files via echo/cat
     # redirection, producing invalid files with the right extension but
@@ -74,7 +117,6 @@ async def run_command(command: str, cwd: str = "", timeout: int = DEFAULT_TIMEOU
     # own registry) -- the achievable fix is to detect the pattern and
     # refuse, telling the model to call the correct tool instead. Only
     # matches a real write (>/>>), not a read+pipe like `cat x.docx | grep`.
-    import re as _re
     _office_write_pattern = _re.compile(
         r">{1,2}\s*[\w./-]*\.(docx|pptx|xlsx|pdf)\b", _re.IGNORECASE
     )
