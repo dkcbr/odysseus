@@ -491,9 +491,20 @@ class McpManager:
             }
 
     async def call_tool(
-        self, qualified_name: str, arguments: Dict, _skip_approval_gate: bool = False
+        self, qualified_name: str, arguments: Dict, _skip_approval_gate: bool = False,
+        agent_name: str = None,
     ) -> Dict:
         """Call an MCP tool by its qualified name (mcp__{server_id}__{tool_name}).
+
+        Real, added 2026-08-21: agent_name is now threaded all the way
+        through to _do_call(), which previously discarded it immediately
+        after the is_tool_allowed() permission check in mcp_routes.py.
+        This is deliberately plumbing only -- it does not change any
+        behavior yet. It's the real, confirmed prerequisite for any future
+        per-agent sandbox routing (see the real, direct architecture trace
+        in jarvis-todo.md, 2026-08-21). Optional and defaults to None so
+        every existing caller that doesn't know/care about agent identity
+        keeps working unchanged.
 
         Returns a result dict compatible with agent_tools format.
         """
@@ -562,7 +573,7 @@ class McpManager:
             db.close()
 
         try:
-            result = await self._do_call(session, tool_name, arguments)
+            result = await self._do_call(session, tool_name, arguments, agent_name=agent_name)
         except Exception as e:
             # Auto-reconnect for builtin servers whose subprocess may have died
             if self.is_builtin(server_id):
@@ -572,7 +583,7 @@ class McpManager:
                     session = self._sessions.get(server_id)
                     if session:
                         try:
-                            result = await self._do_call(session, tool_name, arguments)
+                            result = await self._do_call(session, tool_name, arguments, agent_name=agent_name)
                         except Exception as e2:
                             # Real, same fix as below -- always include the
                             # exception type name, since some exception
@@ -602,8 +613,19 @@ class McpManager:
 
         return result
 
-    async def _do_call(self, session, tool_name: str, arguments: Dict) -> Dict:
-        """Execute a single MCP tool call and return result dict."""
+    async def _do_call(self, session, tool_name: str, arguments: Dict, agent_name: str = None) -> Dict:
+        """Execute a single MCP tool call and return result dict.
+
+        Real, added 2026-08-21: agent_name accepted here now (threaded
+        from call_tool()) but genuinely not yet used for anything -- the
+        underlying session.call_tool() below is the real MCP SDK protocol
+        call, and it has no environment/working-directory parameter at
+        the protocol level at all. Actually injecting a per-agent sandbox
+        path would need a different mechanism (e.g. os.environ around
+        this call), not a parameter passed into the protocol call itself.
+        This confirms agent_name now survives to the deepest point in the
+        real call chain -- the genuine, scoped goal of this step.
+        """
         result = await session.call_tool(tool_name, arguments)
         output_parts = []
         images = []
