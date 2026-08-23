@@ -1021,7 +1021,13 @@ def setup_diagnostics_routes(
 
         vault_root = Path("/app/vault_data").resolve()
         target = (vault_root / path).resolve()
-        if not str(target).startswith(str(vault_root)) or not target.is_file():
+        # Real, fixed 2026-08-23 (CodeQL, "Uncontrolled data used in path
+        # expression"): a plain string-prefix check is genuinely bypassable
+        # by a sibling directory sharing the same prefix (e.g. a real,
+        # different /app/vault_data_evil would also satisfy
+        # str(target).startswith(str(vault_root))). is_relative_to() does
+        # a real, correct path-component comparison instead.
+        if not target.is_relative_to(vault_root) or not target.is_file():
             raise HTTPException(status_code=404, detail="Note not found or path outside vault.")
         if target.suffix != ".md":
             raise HTTPException(status_code=400, detail="Only .md files are supported.")
