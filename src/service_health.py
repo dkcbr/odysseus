@@ -695,8 +695,21 @@ def default_model_health(owner: str = "admin") -> Dict[str, Any]:
     import json
     import urllib.request
     import urllib.error
+    from urllib.parse import urlparse
 
-    is_anthropic_style = "api.anthropic.com" in url or "messages" in url
+    # Real, fixed 2026-08-23 (CodeQL, "Incomplete URL substring
+    # sanitization"): raw substring checks against the whole URL string
+    # are genuinely bypassable -- e.g. http://evil.com/api.anthropic.com
+    # or http://evil.com/fake-messages-path would both incorrectly match
+    # the original check. Parse the URL properly and check the real
+    # hostname (exact match or a genuine api.anthropic.com subdomain)
+    # and the real path segments instead.
+    parsed = urlparse(url)
+    hostname = (parsed.hostname or "").lower()
+    is_anthropic_style = (
+        hostname == "api.anthropic.com" or hostname.endswith(".api.anthropic.com")
+        or "messages" in parsed.path.split("/")
+    )
     try:
         if is_anthropic_style:
             payload = {
