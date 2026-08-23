@@ -94,6 +94,82 @@ def setup_diagnostics_routes(
             "tools": tools,
         }
 
+    @router.get("/api/system/state")
+    async def system_state(request: Request) -> Dict[str, Any]:
+        """Real, read-only State of Jarvis dashboard: vault counts, real
+        risk status, real MCP server list, real recent agent tasks. Scoped
+        down from an earlier proposal after confirming directly: "MCP
+        servers" and agent workers (browser_agent/market_agent/etc.) are
+        two genuinely separate systems, recent tasks have no "domain"
+        field (real fields are agent/server/tool/status), and refresh
+        cadence/context-summary sections were dropped -- the systemd timer
+        lives on the host, not reachable from inside this container."""
+        require_admin(request)
+        import app as _app
+        import json as _json
+
+        kg_id = "1751838b"
+        graph_result = await _app.mcp_manager.call_tool(f"mcp__{kg_id}__read_graph", {})
+        graph_data = _json.loads(graph_result.get("stdout", "{}") or "{}")
+        entities = graph_data.get("entities", [])
+
+        vault_notes = [e for e in entities if e["entityType"] == "VaultNote"]
+        tags = [e for e in entities if e["entityType"] == "Tag"]
+
+        def obs_value(e, key):
+            for o in e.get("observations", []):
+                if o.startswith(f"{key}: "):
+                    return o.split(f"{key}: ", 1)[1]
+            return None
+
+        regimes = [e for e in entities if e["entityType"] == "Regime" and obs_value(e, "method")]
+        risk_state = {"available": False}
+        if regimes:
+            latest_regime = max(regimes, key=lambda e: obs_value(e, "date") or "")
+            factor_names_rel = [r["to"] for r in graph_data.get("relations", [])
+                                if r["from"] == latest_regime["name"] and r["relationType"] == "has_factor"]
+            factors = [e for e in entities if e["name"] in factor_names_rel]
+            dominant = max(factors, key=lambda f: float(obs_value(f, "variance_explained") or 0), default=None)
+            snapshot_names = [r["from"] for r in graph_data.get("relations", [])
+                              if r["to"] == latest_regime["name"] and r["relationType"] == "has_regime"]
+            risk_event_names = [r["from"] for r in graph_data.get("relations", [])
+                                if r["to"] in snapshot_names and r["relationType"] == "detected_in_snapshot"]
+            suggestion_names = [r["from"] for r in graph_data.get("relations", [])
+                                if r["to"] in risk_event_names and r["relationType"] == "responds_to_event"]
+            risk_state = {
+                "available": True,
+                "latest_snapshot": snapshot_names[0] if snapshot_names else None,
+                "regime": obs_value(latest_regime, "vol_level"),
+                "dominant_factor": {"id": dominant["name"], "variance_share": obs_value(dominant, "variance_explained")} if dominant else None,
+                "event_count": len(risk_event_names),
+                "suggestion_count": len(suggestion_names),
+            }
+
+        # Real, already-verified pattern from the jarvis_context route:
+        # _connections is keyed by server_id, values contain real name+status.
+        mcp_servers = [
+            {"id": sid, "name": v.get("name", sid), "status": v.get("status")}
+            for sid, v in _app.mcp_manager._connections.items()
+        ] if hasattr(_app.mcp_manager, "_connections") else []
+
+        from routes.tasks_history import get_history_db
+        try:
+            recent = get_history_db(10).get("tasks", [])
+        except Exception:
+            recent = []
+
+        return {
+            "vault": {"note_count": len(vault_notes), "tag_count": len(tags)},
+            "risk": risk_state,
+            "mcp_servers": mcp_servers,
+            "recent_tasks": [
+                {"id": t.get("id"), "agent": t.get("agent"), "server": t.get("server"),
+                 "tool": t.get("tool"), "status": t.get("status")}
+                for t in recent
+            ],
+        }
+
+
     @router.get("/api/diagnostics/logs")
     async def get_diagnostics_logs(request: Request, limit: int = 200) -> Dict[str, Any]:
         require_admin(request)
