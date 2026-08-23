@@ -87,11 +87,31 @@ DEFAULT_TIMEOUT = 60
 
 
 @mcp.tool()
-async def run_command(command: str, cwd: str = "", timeout: int = DEFAULT_TIMEOUT) -> str:
+async def run_command(command: str, cwd: str = "", timeout: int = DEFAULT_TIMEOUT,
+                       jarvis_sandbox: dict = None) -> str:
     """Run a real shell command. Returns combined stdout/stderr and the
     real exit code. cwd defaults to this server's own working directory
-    if not given. timeout is in seconds (default 60); the process is
-    killed if it exceeds this."""
+    if not given -- unless a real, per-agent sandbox is present (see
+    docs/sandbox_contract.md), in which case it defaults to that agent's
+    own tmp_dir instead, giving each agent's shell commands a real,
+    isolated default working directory without requiring the caller to
+    specify one explicitly. An explicit cwd argument always wins over
+    the sandbox default.
+
+    Real, honest note on this specific choice, added 2026-08-23 (first
+    real tool-level adoption of the sandbox contract). Discovered
+    directly, not assumed from the contract doc alone, that FastMCP's
+    own signature validation rejects any parameter name starting with
+    '_' at decoration time (a real server crash on startup, caught and
+    fixed same session) -- so this parameter is named jarvis_sandbox
+    here, without the leading underscore. Confirmed empirically
+    afterward (a real, direct test showed the sandbox value silently
+    failing to arrive) that the wire key itself also needed renaming to
+    match -- _do_call() originally injected "_jarvis_sandbox" (with
+    underscore); both the injector and docs/sandbox_contract.md were
+    corrected to jarvis_sandbox, without it, in the same fix."""
+    if not cwd and jarvis_sandbox:
+        cwd = jarvis_sandbox.get("tmp_dir", "")
     # Real, deliberate guard against genuinely catastrophic, destructive
     # command patterns, added 2026-08-21. Confirmed directly beforehand:
     # this tool has zero path restrictions (unlike jarvis_desktop's

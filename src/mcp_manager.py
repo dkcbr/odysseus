@@ -617,18 +617,28 @@ class McpManager:
         """Execute a single MCP tool call and return result dict.
 
         Real, added 2026-08-21: when agent_name is known, injects a real,
-        namespaced sandbox descriptor into arguments as _jarvis_sandbox --
+        namespaced sandbox descriptor into arguments as jarvis_sandbox --
         NOT via os.environ, since that's process-wide global state and
         would create a genuine race condition between concurrent async
         tool calls from different agents (confirmed and deliberately
         avoided). Individual tool implementations need to actually look
         for and use this key -- injecting it here only defines the real
         contract, it doesn't make any existing tool respect it yet.
+
+        Real, honest correction, 2026-08-23 (first real tool-level
+        adoption): this key was originally named _jarvis_sandbox (leading
+        underscore). Confirmed directly, via a real server crash on
+        startup during that first adoption, that FastMCP's own signature
+        validation rejects any tool parameter name starting with '_' --
+        so no FastMCP-based tool could ever declare a matching parameter
+        for the original name. Renamed here (and in
+        docs/sandbox_contract.md) to jarvis_sandbox, without the leading
+        underscore, so real tool implementations can actually receive it.
         """
         if agent_name:
             sandbox_root = f"/home/dk/jarvis/projects/odysseus/data/agent_sandboxes/{agent_name}"
             arguments = dict(arguments)  # real, shallow copy -- never mutate the caller's own dict
-            arguments["_jarvis_sandbox"] = {
+            arguments["jarvis_sandbox"] = {
                 "agent": agent_name,
                 "tmp_dir": f"{sandbox_root}/tmp",
                 "logs_dir": f"{sandbox_root}/logs",
