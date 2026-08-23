@@ -504,3 +504,99 @@ async def collect_service_health(rag_manager: Any = None,
         # datetime.utcnow() flagged in review (overlaps with #1116).
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
+
+
+def default_model_health(owner: str = "admin") -> Dict[str, Any]:
+    """Real, two-tier verification that Odysseus's default chat model is
+    genuinely the one actually in use -- not just reachable (that's what
+    providers_health already checks). This closes the exact gap that let
+    the OpenRouter->Anthropic drift sit undetected for 24 hours: the config
+    values looked correct the whole time, but the resolved endpoint/model
+    the real chat flow was using had silently reverted.
+
+    Tier 1 (cheap, always runs): resolves the real default endpoint/model
+    via the same resolve_endpoint() used by the live chat flow, with the
+    real owner -- confirmed tonight that omitting owner silently falls
+    through to an unrelated global default, which is exactly the kind of
+    false-negative this check must not have.
+
+    Tier 2 (real API call, only on demand / scheduled call from outside):
+    this function itself always performs the real completion -- callers
+    that want a cheap-only check should not call this function at all and
+    should just compare resolve_endpoint()'s output to the stored prefs.
+    """
+    try:
+        from src.endpoint_resolver import resolve_endpoint
+    except Exception as e:
+        return _svc("default_model", DOWN, "Could not import endpoint resolver.",
+                    error=_classify_error(e))
+
+    try:
+        url, model, headers = resolve_endpoint("default", owner=owner)
+    except Exception as e:
+        return _svc("default_model", DOWN, "Endpoint resolution failed.",
+                    error=_classify_error(e))
+
+    if not url or not model:
+        return _svc("default_model", DOWN,
+                    "No default model/endpoint resolved for this owner.",
+                    resolved_model=model, resolved_url=_safe_url(url))
+
+    import json
+    import urllib.request
+    import urllib.error
+
+    is_anthropic_style = "api.anthropic.com" in url or "messages" in url
+    try:
+        if is_anthropic_style:
+            payload = {
+                "model": model,
+                "max_tokens": 5,
+                "messages": [{"role": "user", "content": "Reply with exactly the word: ok"}],
+            }
+            req_headers = dict(headers or {})
+            req_headers.setdefault("anthropic-version", "2023-06-01")
+            req_headers.setdefault("Content-Type", "application/json")
+        else:
+            payload = {
+                "model": model,
+                "max_tokens": 5,
+                "messages": [{"role": "user", "content": "Reply with exactly the word: ok"}],
+            }
+            req_headers = dict(headers or {})
+            req_headers.setdefault("Content-Type", "application/json")
+
+        req = urllib.request.Request(url, data=json.dumps(payload).encode(),
+                                     headers=req_headers)
+        resp = urllib.request.urlopen(req, timeout=20)
+        data = json.loads(resp.read().decode())
+    except urllib.error.HTTPError as e:
+        try:
+            body = e.read().decode()[:300]
+        except Exception:
+            body = str(e)
+        return _svc("default_model", DOWN,
+                    f"Real completion call failed (HTTP {e.code}) -- likely a "
+                    f"credit/balance or auth issue, not just unreachable.",
+                    resolved_model=model, resolved_url=_safe_url(url),
+                    http_status=e.code, error_body=body)
+    except Exception as e:
+        return _svc("default_model", DOWN, "Real completion call failed.",
+                    resolved_model=model, resolved_url=_safe_url(url),
+                    error=_classify_error(e))
+
+    # Confirm the response actually reports back the model we intended --
+    # not just that *some* call to *some* endpoint succeeded.
+    returned_model = data.get("model") or ""
+    if returned_model and returned_model != model:
+        return _svc("default_model", DEGRADED,
+                    f"Completion succeeded but returned model '{returned_model}' "
+                    f"does not match intended default '{model}' -- possible drift.",
+                    resolved_model=model, returned_model=returned_model,
+                    resolved_url=_safe_url(url))
+
+    return _svc("default_model", OK,
+                f"Default model '{model}' resolved correctly and completed a real request.",
+                resolved_model=model, resolved_url=_safe_url(url))
+
+
