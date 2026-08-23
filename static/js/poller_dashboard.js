@@ -8,7 +8,7 @@ import uiModule from './ui.js';
 import * as Modals from './modalManager.js';
 
 const ENDPOINTS = [
-  { label: 'TradingView Poller (Oracle)', url: 'http://100.116.88.44:7010/poller/health' },
+  { label: 'TradingView Poller (laptop)', url: 'http://192.168.1.253:7010/poller/health' },  // real, moved from Oracle, 2026-08-22
   { label: 'NVDA Zone Monitor (Pop!_OS)', url: 'http://100.93.206.89:7020/nvda/health' },
   { label: 'Crypto Zone Monitor (Pop!_OS)', url: 'http://100.93.206.89:7020/crypto/health' },
 ];

@@ -169,6 +169,42 @@ def setup_diagnostics_routes(
             ],
         }
 
+    @router.get("/api/timeline")
+    async def get_unified_timeline(request: Request, limit: int = 100) -> Dict[str, Any]:
+        """Real, read-only unified timeline, scoped to risk + agent tasks
+        only (per explicit scope decision). Combines the real, existing
+        task_events table (no changes made to it or to any task-completion
+        code) with the new, purely additive timeline_events table (written
+        by /api/risk/refresh). Sorted by timestamp, newest first."""
+        require_admin(request)
+        import sqlite3
+
+        conn = sqlite3.connect("/app/data/agent_tasks.db")
+        conn.row_factory = sqlite3.Row
+        events = []
+
+        for row in conn.execute(
+            "SELECT ts, event_type, agent, server, tool, task_id, status FROM task_events ORDER BY ts DESC LIMIT ?", (limit,)
+        ):
+            events.append({
+                "ts": row["ts"], "source": "agent",
+                "event_type": f"agent.task_{row['event_type']}",
+                "summary": f"{row['agent']} → {row['server']} / {row['tool']} [{row['status']}]",
+                "entity_id": row["task_id"], "entity_type": "agent-task",
+            })
+
+        try:
+            for row in conn.execute(
+                "SELECT ts, source, event_type, summary, entity_id, entity_type FROM timeline_events ORDER BY ts DESC LIMIT ?", (limit,)
+            ):
+                events.append(dict(row))
+        except sqlite3.OperationalError:
+            pass  # table not created yet -- real, first-run case, not an error
+
+        conn.close()
+        events.sort(key=lambda e: e["ts"], reverse=True)
+        return {"events": events[:limit]}
+
 
     @router.get("/api/diagnostics/logs")
     async def get_diagnostics_logs(request: Request, limit: int = 200) -> Dict[str, Any]:
@@ -699,25 +735,12 @@ def setup_diagnostics_routes(
             })
         conn.close()
 
-        # Minimal, honest Market Entity nodes: extract real ticker symbols
-        # from the top_loadings text already stored on real Factor
-        # entities (e.g. "TOXR (-0.247), XRP (-0.247), ...") -- no
-        # sector/price/asset_type, since no such data exists anywhere in
-        # the system (confirmed directly, twice). Just the symbol.
-        tickers = set()
-        for e in entities:
-            if e["entityType"] != "Factor":
-                continue
-            loadings = obs_value(e, "top_loadings") or ""
-            for part in loadings.split(","):
-                symbol = part.strip().split(" ")[0]
-                if symbol:
-                    tickers.add(symbol)
-        for symbol in tickers:
-            nodes.append({
-                "id": f"market_entity:{symbol}", "type": "market_entity",
-                "label": symbol, "metadata": {},
-            })
+        # Real, fixed 2026-08-23: this was a second, duplicate market_entity
+        # extraction block -- confirmed directly (via the actual graph data)
+        # that its output exactly, 100% overlapped with the earlier block
+        # above (both cover top_loadings; the earlier block also covers the
+        # "json:" observation format this one didn't). Removing this
+        # duplicate block, not the earlier, more complete one.
 
         return {"nodes": nodes}
 
@@ -745,8 +768,16 @@ def setup_diagnostics_routes(
             for r in relations
         ]
 
-        # Real, minimal risk_factor -> market_entity edges, same real
-        # top_loadings parsing as the nodes route.
+        # Real, risk_factor -> market_entity edges. Fixed 2026-08-23:
+        # this was originally two separate blocks -- one handling only
+        # the "top_loadings" observation format (with real loading/weight
+        # metadata), a second, near-duplicate block handling both
+        # "top_loadings" and "json:" (the real, single 2026-07-22
+        # hand-analysis entity, factor:1_crypto) but with no metadata.
+        # Merged into one block covering both real formats, keeping the
+        # loading/weight metadata where the source data actually has it
+        # (top_loadings entries) and using weight=None, not a fabricated
+        # 0.0, for the json: entries, which carry no real loading number.
         def obs_value(e, key):
             for o in e.get("observations", []):
                 if o.startswith(f"{key}: "):
@@ -757,22 +788,35 @@ def setup_diagnostics_routes(
         for e in entities:
             if e["entityType"] != "Factor":
                 continue
-            loadings = obs_value(e, "top_loadings") or ""
-            for part in loadings.split(","):
-                part = part.strip()
-                symbol = part.split(" ")[0]
-                if not symbol:
-                    continue
-                # Real weight: parse the numeric loading from "SYM (0.247)"
-                # text already stored on the Factor entity -- no invented
-                # field, the number is right there in the real observation.
-                m = _re.search(r"\(([-\d.]+)\)", part)
-                loading = float(m.group(1)) if m else 0.0
-                edges.append({
-                    "source": e["name"], "target": f"market_entity:{symbol}",
-                    "type": "risk_factor_market",
-                    "metadata": {"loading": loading, "weight": abs(loading)},
-                })
+            for o in e.get("observations", []):
+                if o.startswith("top_loadings: "):
+                    for part in o[len("top_loadings: "):].split(","):
+                        part = part.strip()
+                        symbol = part.split(" ")[0]
+                        if not symbol:
+                            continue
+                        # Real weight: parse the numeric loading from
+                        # "SYM (0.247)" text already stored on the Factor
+                        # entity -- no invented field, the number is
+                        # right there in the real observation.
+                        m = _re.search(r"\(([-\d.]+)\)", part)
+                        loading = float(m.group(1)) if m else 0.0
+                        edges.append({
+                            "source": e["name"], "target": f"market_entity:{symbol}",
+                            "type": "risk_factor_market",
+                            "metadata": {"loading": loading, "weight": abs(loading)},
+                        })
+                elif o.startswith("json: "):
+                    try:
+                        payload = _json.loads(o[len("json: "):])
+                    except _json.JSONDecodeError:
+                        continue
+                    for symbol in payload.get("dominant_symbols", []):
+                        edges.append({
+                            "source": e["name"], "target": f"market_entity:{symbol}",
+                            "type": "risk_factor_market",
+                            "metadata": {"loading": None, "weight": None},
+                        })
 
         # Real MCP server -> tool edges, same verified pattern as above.
         # Real invocation-count weight from task_events, scoped honestly:
@@ -799,28 +843,6 @@ def setup_diagnostics_routes(
                 "type": "mcp_server_tool",
                 "metadata": {"invocations": invocations, "weight": invocations},
             })
-
-        # Minimal, honest risk_factor -> market_entity edges, same real
-        # ticker extraction as the nodes route (both observation formats).
-        import re as _re2
-        for e in entities:
-            if e["entityType"] != "Factor":
-                continue
-            factor_tickers = set()
-            for o in e.get("observations", []):
-                if o.startswith("top_loadings: "):
-                    factor_tickers.update(_re2.findall(r"([A-Z]{2,6})\s*\(", o))
-                elif o.startswith("json: "):
-                    try:
-                        payload = _json.loads(o[len("json: "):])
-                        factor_tickers.update(payload.get("dominant_symbols", []))
-                    except _json.JSONDecodeError:
-                        pass
-            for symbol in factor_tickers:
-                edges.append({
-                    "source": e["name"], "target": f"market_entity:{symbol}",
-                    "type": "risk_factor_market",
-                })
 
         # Agent Task edges. Real, confirmed correction: tasks.server
         # stores the readable NAME (e.g. "jarvis_system"), not the
