@@ -15,7 +15,7 @@ underlying MCP protocol call:
 ```json
 {
   "...(the tool's own real arguments, unchanged)...": "...",
-  "_jarvis_sandbox": {
+  "jarvis_sandbox": {
     "agent": "browser_agent",
     "tmp_dir": "/home/dk/jarvis/projects/odysseus/data/agent_sandboxes/browser_agent/tmp",
     "logs_dir": "/home/dk/jarvis/projects/odysseus/data/agent_sandboxes/browser_agent/logs",
@@ -29,14 +29,14 @@ underlying MCP protocol call:
 1. **This key is optional-in, optional-out.** If `agent_name` is `None`
    (the overwhelming majority of calls today -- e.g. this claude.ai
    conversation's own direct tool use, which never passes an `agent`
-   parameter at all), `_jarvis_sandbox` is not added at all. A tool
+   parameter at all), `jarvis_sandbox` is not added at all. A tool
    must not assume it's always present.
 
 2. **A tool that doesn't know about this key must be unaffected.**
    Confirmed directly (2026-08-21): `tradingview`'s `market_snapshot`,
    called with `agent=market_agent`, still returned correct, valid
    results with the extra key present and unused. Any real tool
-   implementation is free to simply ignore `_jarvis_sandbox` if it has
+   implementation is free to simply ignore `jarvis_sandbox` if it has
    no sandbox behavior to implement -- this is not a breaking change
    for anyone.
 
@@ -52,24 +52,42 @@ underlying MCP protocol call:
 
 4. **This is not process isolation.** All tools, regardless of
    `agent_name`, still run inside the same, single, shared Odysseus
-   Python process. `_jarvis_sandbox` gives a tool a real, conventional
+   Python process. `jarvis_sandbox` gives a tool a real, conventional
    place to put its own files -- it does not sandbox CPU, memory,
    network, or crash behavior at all. See the real, honest
    architecture notes in `jarvis-todo.md`'s "per-agent isolated
    sandboxes" entry for the full, current scope and what's still not
    built.
 
-5. **`_jarvis_sandbox` should never be treated as a real tool argument
+5. **`jarvis_sandbox` should never be treated as a real tool argument
    to validate/require.** It's injected by the dispatcher, not
    supplied by the caller of the `/call` API -- a tool's own input
    schema/validation should not require or reference this key
-   directly; it should be read defensively (`arguments.get("_jarvis_sandbox")`),
+   directly; it should be read defensively (`arguments.get("jarvis_sandbox")`),
    never assumed present.
+
+6. **For a FastMCP-based tool (any `@mcp.tool()`-decorated function),
+   this key must be declared as an explicit, named parameter -- it
+   cannot be read from a raw arguments dict inside the function body.**
+   FastMCP maps the wire-level arguments payload onto the tool
+   function's own declared parameters; any key with no matching
+   parameter name is silently dropped before the function ever runs.
+   Real, important, related constraint discovered directly (2026-08-23,
+   during the first real tool-level adoption, via an actual server
+   crash on startup): **FastMCP's own signature validation rejects any
+   parameter name starting with `_`** at decoration time. This is why
+   the key itself is named `jarvis_sandbox`, without a leading
+   underscore, unlike many of this codebase's other internal/private
+   naming conventions -- a FastMCP tool genuinely cannot declare a
+   parameter called `_jarvis_sandbox` at all.
 
 ## What a cooperative tool implementation should actually do
 
+For a plain Python function (not a FastMCP tool), reading from a raw
+arguments dict as shown below is fine:
+
 ```python
-sandbox = arguments.get("_jarvis_sandbox")
+sandbox = arguments.get("jarvis_sandbox")
 if sandbox:
     # Use sandbox["tmp_dir"] for any real, temporary files this call
     # creates, instead of a shared /tmp or a hardcoded path.
@@ -79,11 +97,31 @@ else:
     ...
 ```
 
-## Status as of 2026-08-21
+For a real FastMCP `@mcp.tool()` function, per rule 6 above, declare an
+explicit, named parameter instead (see `run_command` in
+`services/mcp_servers/jarvis_shell/jarvis_shell_mcp.py` for the real,
+first working example):
+
+```python
+@mcp.tool()
+async def some_tool(existing_arg: str, jarvis_sandbox: dict = None) -> str:
+    if jarvis_sandbox:
+        tmp_dir = jarvis_sandbox.get("tmp_dir")
+        ...
+```
+
+## Status as of 2026-08-23
 
 - Injection mechanism: done (`a10724c3`), verified live.
 - Sandbox directories: created for all 5 real agent profiles.
-- Tool-level adoption: **not started for any real tool yet.** Every
-  existing tool implementation currently ignores `_jarvis_sandbox`
-  entirely (correctly, per rule 2 above) -- adopting it per-tool is
-  real, separate, future work, tool by tool, not a single change.
+- Key name corrected from `_jarvis_sandbox` to `jarvis_sandbox` (no
+  leading underscore) -- the original name could never actually work
+  for any FastMCP-based tool; see rule 6 above.
+- Tool-level adoption: **one real tool adopted.** `jarvis_shell`'s
+  `run_command` now defaults `cwd` to the agent's `tmp_dir` when the
+  caller didn't specify one, confirmed live: baseline (no agent)
+  behavior unchanged, and a real, direct test with the corrected key
+  name confirmed the sandbox value now actually arrives. Every other
+  existing tool implementation still ignores `jarvis_sandbox` entirely
+  (correctly, per rule 2) -- remaining adoption is real, separate,
+  future work, tool by tool, not a single change.
