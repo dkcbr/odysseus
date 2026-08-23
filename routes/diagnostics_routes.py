@@ -29,6 +29,28 @@ def setup_diagnostics_routes(
         from src.service_health import collect_service_health
         return await collect_service_health(rag_manager, memory_vector)
 
+    @router.get("/api/diagnostics/default-model")
+    async def get_default_model_health(request: Request) -> Dict[str, Any]:
+        """Real, on-demand (costly) verification that the default chat model
+        genuinely resolves and completes a real request as intended -- not
+        just that some endpoint is reachable. Deliberately NOT included in
+        the automatic /api/diagnostics/services aggregation since that runs
+        on every diagnostics-panel view; this makes a real, metered API
+        call and should only run on-demand or from a real scheduled task at
+        a controlled cadence.
+
+        Real, honest note on restoration, 2026-08-23: this endpoint (and its
+        own backing function, default_model_health in src/service_health.py)
+        existed once before, confirmed via git history (99f7fe2f), and was
+        silently lost in the same merge that also dropped the Market
+        Dashboard/Worker Logs/Process Table Jarvis Home features earlier
+        this same engagement. Restored here after model_drift_verifier.py
+        (a real, scheduled systemd service) started failing against it with
+        a genuine 404."""
+        require_admin(request)
+        from src.service_health import default_model_health
+        return default_model_health(owner="admin")
+
     @router.get("/api/diagnostics/logs")
     async def get_diagnostics_logs(request: Request, limit: int = 200) -> Dict[str, Any]:
         require_admin(request)
