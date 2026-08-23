@@ -448,6 +448,60 @@ def _gather_inputs() -> Dict[str, Any]:
             "accounts": accounts, "endpoints": endpoints}
 
 
+# Real, module-level alert-throttling state, restored 2026-08-23
+# alongside the functions that use it (lost in 99f7fe2f).
+_last_alerted_status: Dict[str, str] = {}
+_last_system_health: Optional[str] = None
+
+
+def _real_ntfy_base_url() -> Optional[str]:
+    """Find the real, configured ntfy integration's base_url (the actual
+    topic URL, used as-is -- unlike the Reminders test route, this is not
+    overridden by reminder_ntfy_topic, since health alerts are a genuinely
+    separate use case from reminders)."""
+    try:
+        from src.integrations import load_integrations
+        for i in load_integrations() or []:
+            if (i.get("preset") == "ntfy" and i.get("enabled", True)
+                    and i.get("base_url")):
+                return i["base_url"]
+    except Exception as e:
+        logger.debug(f"service_health: ntfy integration lookup failed: {e}")
+    return None
+
+
+async def _alert_ntfy(subsystem_name: str, status: str, detail: str) -> None:
+    """Send a real ntfy push using the same httpx pattern already confirmed
+    working in routes/auth_routes.py's integration test endpoint -- no
+    invented helper module, since none exists in the real codebase."""
+    base_url = _real_ntfy_base_url()
+    if not base_url:
+        logger.debug("service_health: no configured ntfy integration, skipping alert")
+        return
+    try:
+        import httpx
+        async with httpx.AsyncClient(timeout=8.0) as client:
+            await client.post(
+                base_url,
+                content=f"[Odysseus Health] {subsystem_name} is {status}: {detail}",
+                headers={"Title": "Odysseus health alert", "Priority": "high",
+                        "Tags": "warning"},
+            )
+    except Exception as e:
+        logger.debug(f"service_health: ntfy alert send failed: {e}")
+
+
+async def _maybe_alert(name: str, result: Dict[str, Any]) -> None:
+    """Alert on DOWN/DEGRADED, throttled so a subsystem stuck down doesn't
+    re-alert on every collect_service_health() call -- only fires again if
+    the status actually changes (including recovering then failing again)."""
+    status = result.get("status")
+    prev = _last_alerted_status.get(name)
+    if status in (DOWN, DEGRADED) and prev != status:
+        await _alert_ntfy(name, status, result.get("detail", ""))
+    _last_alerted_status[name] = status
+
+
 async def _run_subsystem(name: str, fn: Callable, *args: Any) -> Dict[str, Any]:
     """Run one (sync) subsystem probe in a thread under a hard deadline.
 
@@ -481,12 +535,13 @@ async def collect_service_health(rag_manager: Any = None,
     # ChromaDB is in-process and synchronous (just reads flags).
     chroma = chromadb_health(rag_manager, memory_vector)
 
-    names = ["searxng", "ntfy", "email", "providers"]
+    names = ["searxng", "ntfy", "email", "providers", "default_model_config"]
     coros = [
         _run_subsystem("searxng", searxng_health, settings),
         _run_subsystem("ntfy", ntfy_health, inputs["integrations"], settings),
         _run_subsystem("email", email_health, inputs["accounts"]),
         _run_subsystem("providers", providers_health, inputs["endpoints"]),
+        _run_subsystem("default_model_config", default_model_config_health),
     ]
     try:
         results = await asyncio.wait_for(asyncio.gather(*coros),
@@ -497,13 +552,108 @@ async def collect_service_health(rag_manager: Any = None,
                    for n in names]
 
     services = [chroma, *results]
+
+    # Real ntfy alerting: fires on any DOWN/DEGRADED subsystem, throttled
+    # by _maybe_alert so a subsystem stuck down for hours doesn't re-alert
+    # on every call. Restored 2026-08-23 (99f7fe2f). Real, deliberate
+    # omission from the historical version: that version also wrote two
+    # durable facts via NativeMemoryProvider.replace_fact() here -- that
+    # method was confirmed, independently, to no longer exist anywhere in
+    # the current codebase (a separate, concurrent audit found the same
+    # thing). Restoring calls to a genuinely dead method would break this
+    # currently-working, frequently-polled function, so that section is
+    # deliberately not restored; only the alerting, which has no such
+    # dependency, is.
+    for svc in services:
+        await _maybe_alert(svc["name"], svc)
+
+    overall = _rollup(services)
+
+    # Real, transition-only ntfy alert on the unified severity -- distinct
+    # from the per-subsystem _last_alerted_status/_maybe_alert throttling
+    # above (that alerts per-subsystem on DOWN/DEGRADED; this alerts once
+    # on the *overall* rollup changing, including recovery transitions).
+    global _last_system_health
+    if overall != _last_system_health:
+        await _alert_ntfy("system", overall,
+                          f"Unified system health changed to '{overall}'.")
+        _last_system_health = overall
+
     return {
-        "overall": _rollup(services),
+        "overall": overall,
         "services": services,
         # Timezone-aware UTC (…+00:00). Avoids the deprecated naive
         # datetime.utcnow() flagged in review (overlaps with #1116).
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
+
+
+def default_model_config_health(owner: str = "admin") -> Dict[str, Any]:
+    """Real, cheap (no network call) Tier-1 check: confirms the stored
+    default_model/default_endpoint_id prefs and what resolve_endpoint()
+    actually returns are internally consistent. This is a genuinely
+    different, complementary check from default_model_health() below --
+    it catches config-level bugs (stale endpoint id, resolver falling
+    through to an unrelated default, a deleted endpoint row) cheaply and
+    safely enough to run on every diagnostics view. It does NOT catch the
+    kind of drift that already happened once (correct config, but the
+    actual completion silently failing due to credits) -- that class of
+    bug is real and can only be caught by an actual API call, which is
+    exactly why default_model_health() exists as a separate, deliberately
+    NOT-auto-run, real Tier-2 check.
+
+    Real, honest restoration note, 2026-08-23: lost in the same commit
+    (99f7fe2f) as default_model_health (already restored separately)."""
+    try:
+        from src.settings import load_settings
+        from src.endpoint_resolver import resolve_endpoint
+        from core.database import SessionLocal, ModelEndpoint
+    except Exception as e:
+        return _svc("default_model_config", DOWN, "Could not import config/resolver.",
+                    error=_classify_error(e))
+
+    try:
+        settings = load_settings() or {}
+        intended_model = settings.get("default_model") or ""
+        intended_endpoint_id = settings.get("default_endpoint_id") or ""
+
+        db = SessionLocal()
+        try:
+            row = db.query(ModelEndpoint).filter(
+                ModelEndpoint.id == intended_endpoint_id).first()
+            intended_base_url = row.base_url if row else ""
+        finally:
+            db.close()
+
+        resolved_url, resolved_model, _headers = resolve_endpoint("default", owner=owner)
+    except Exception as e:
+        return _svc("default_model_config", DOWN, "Config/resolution check failed.",
+                    error=_classify_error(e))
+
+    issues = []
+    if not intended_model or not intended_endpoint_id:
+        issues.append("No default_model/default_endpoint_id configured.")
+    if intended_model and resolved_model != intended_model:
+        issues.append(
+            f"Resolved model '{resolved_model}' does not match configured "
+            f"default_model '{intended_model}'.")
+    if intended_base_url and resolved_url and intended_base_url.rstrip("/") not in resolved_url:
+        issues.append(
+            f"Resolved URL does not correspond to the configured endpoint "
+            f"'{_safe_url(intended_base_url)}'.")
+    if intended_endpoint_id and not row:
+        issues.append(
+            f"Configured default_endpoint_id '{intended_endpoint_id}' does "
+            f"not match any real, existing endpoint row.")
+
+    if issues:
+        return _svc("default_model_config", DEGRADED, " ".join(issues),
+                    intended_model=intended_model, resolved_model=resolved_model,
+                    resolved_url=_safe_url(resolved_url))
+
+    return _svc("default_model_config", OK,
+                f"Default model config is internally consistent ('{resolved_model}').",
+                resolved_model=resolved_model, resolved_url=_safe_url(resolved_url))
 
 
 def default_model_health(owner: str = "admin") -> Dict[str, Any]:
