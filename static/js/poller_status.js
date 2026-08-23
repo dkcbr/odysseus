@@ -1,15 +1,16 @@
 // static/js/poller_status.js — Poller Status panel (ES6)
-// Fetches TradingView poller health from a real, dedicated HTTP server on
-// Oracle (100.116.88.44:7010) -- Odysseus itself, running in a container on
-// Pop!_OS, has no filesystem access to Oracle at all, so this can't be a
-// local Odysseus MCP tool; it has to be a real cross-machine HTTP fetch.
-// Real, verified table/column names on the Oracle side: market_snapshots
+// Fetches TradingView poller health from a real, dedicated HTTP server,
+// originally on Oracle, moved to the laptop 2026-08-22 -- Odysseus itself,
+// running in a container on Pop!_OS, has no filesystem access to the
+// laptop either, so this can't be a local Odysseus MCP tool; it has to be
+// a real cross-machine HTTP fetch, same as it was for Oracle.
+// Real, verified table/column names on the source side: market_snapshots
 // (plural), ts (not timestamp).
 
 import uiModule from './ui.js';
 import * as Modals from './modalManager.js';
 
-const POLLER_HEALTH_URL = 'http://100.116.88.44:7010/poller/health';
+const POLLER_HEALTH_URL = 'http://192.168.1.253:7010/poller/health';  // real, moved from Oracle, 2026-08-22
 const REFRESH_INTERVAL_MS = 10000;
 
 function el(id) { return document.getElementById(id); }

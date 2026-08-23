@@ -557,37 +557,148 @@ async def _direct_fallback(
     return None
 
 
+# Real, the index was built by vault_ingest.py running on the HOST, where
+# the vault lives at /home/dk/gdrive/Obsidian. Inside this container, the
+# same content is mounted at /app/vault_data instead -- confirmed directly
+# (2026-08-23) that body_path values from the index do not exist as-is
+# inside the container without this translation.
+_VAULT_INDEX_HOST_ROOT = "/home/dk/gdrive/Obsidian"
+_VAULT_INDEX_CONTAINER_ROOT = "/app/vault_data"
+
+
+def _load_vault_index():
+    """Real, loads the structured vault index built on the host by
+    vault_ingest.py, mounted read-only at /app/vault_index.jsonl (added
+    2026-08-23). Returns an empty list, not an error, if the index isn't
+    present -- callers fall back to the pre-2026-08-23 three-folder scan
+    so this never becomes a hard dependency.
+
+    Translates each record's body_path from the host path (where
+    vault_ingest.py actually ran) to this container's own mount point,
+    since the two are different paths to the same underlying content."""
+    index_path = "/app/vault_index.jsonl"
+    if not os.path.isfile(index_path):
+        return []
+    records = []
+    try:
+        with open(index_path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                bp = record.get("body_path", "")
+                if bp.startswith(_VAULT_INDEX_HOST_ROOT):
+                    record["body_path"] = bp.replace(
+                        _VAULT_INDEX_HOST_ROOT, _VAULT_INDEX_CONTAINER_ROOT, 1
+                    )
+                records.append(record)
+    except OSError:
+        return []
+    return records
+
+
 def search_vault_impl(query: str) -> str:
-    """Real, direct, in-process vault search. No search tool ever
-    existed for this deployment (confirmed directly, GitHub issue
-    #14, and two real live tests) -- the container had no filesystem
-    access to the real, host Obsidian vault at all. Deliberately
-    simple: a personal vault of roughly a dozen real markdown files
-    does not need a separate indexed search service -- a direct,
-    in-process file walk + substring match is genuinely proportionate
-    here, matching get_portfolio_context's own "read the real file
-    directly" pattern elsewhere in this file.
+    """Real, in-process vault search. No search tool existed for this
+    deployment before 2026-08-19 (confirmed directly, GitHub issue #14,
+    and two real live tests) -- the container had no filesystem access
+    to the real, host Obsidian vault at all.
 
     Extracted 2026-08-19 into a standalone function so both the real
     tool dispatch (below) and the deterministic trigger
     (detect_vault_search_trigger + its real caller in
     routes/chat_routes.py) share the same real logic, rather than
     duplicating it.
+
+    Backend swapped 2026-08-23 to use the structured index built by
+    vault_ingest.py/vault_search.py (see
+    knowledge/infrastructure-constraints/operations/never-ingest-generated-directories.md
+    for why a denylist-based ingestion pipeline was built separately from
+    this tool's own, pre-existing allowlist-based scope). The external
+    interface (single query string in, formatted snippet string out) is
+    deliberately unchanged -- this is a backend swap, not a new tool, so
+    existing trigger wiring, schema, and UI expectations keep working
+    without modification.
     """
     vault_root = "/app/vault_data"
-    # Real, deliberately does NOT scan vault_root directly -- confirmed
-    # live tonight it holds 40+ unrelated files (old session notes,
-    # large PDFs, "jarvis-stack-memory-backup-*" files) that would make
-    # every search slow, especially given this mount's known, real I/O
-    # slowness (the same gdrive-backed mount that's shown transient
-    # errors from the host side all night). Scoped to just the three
-    # real, intentionally organized subfolders, matching the documented
-    # real scope from thesis-readme.md.
-    search_dirs = []
-    for sub in ("Portfolio", "Thesis", "Watchlist"):
-        sub_path = os.path.join(vault_root, sub)
-        if os.path.isdir(sub_path):
-            search_dirs.append(sub_path)
+    index_records = _load_vault_index()
+    effective_query = query  # real, safe default; only overridden below when a category is actually detected
+
+    if index_records:
+        # Real, structured path: use the index to find candidate files,
+        # optionally narrowed if the query text names one of the real,
+        # actual top-level vault categories directly (e.g. "search my
+        # Portfolio notes for X"). Falls through to a full-index scan if
+        # no category name appears in the query.
+        query_lower = query.lower()
+        known_categories = {r["category"].lower() for r in index_records}
+        matched_category = next(
+            (c for c in known_categories if c != "root" and c in query_lower),
+            None,
+        )
+        # Real, when a category name is detected, strip it (and common
+        # framing words around it) out of the actual search text -- the
+        # raw query otherwise never matches any real file verbatim (e.g.
+        # "search my Portfolio notes for rung" is not a real substring
+        # anywhere, even though "rung" alone genuinely is). Confirmed
+        # directly this was needed: the unmodified query returned zero
+        # matches for a real, valid category-scoped search.
+        effective_query = query
+        if matched_category:
+            for framing_word in (matched_category, "notes", "note", "search", "my", "for", "in"):
+                pattern = re.compile(re.escape(framing_word), re.IGNORECASE)
+                effective_query = pattern.sub(" ", effective_query)
+            effective_query = " ".join(effective_query.split()) or query
+        # Real, preserves the original function's own deliberate choice to
+        # never scan the vault root (confirmed directly: 40+ unrelated
+        # files there would slow every search on an already I/O-slow
+        # mount). Root-level records are only included if the query
+        # explicitly names "root" as a category -- never by default.
+        candidates = [
+            r for r in index_records
+            if r["category"].lower() != "root"
+            and (matched_category is None or r["category"].lower() == matched_category)
+        ]
+        search_dirs = None  # not used on this path
+        all_files = []
+        seen_paths = set()
+        for r in candidates:
+            fpath = r.get("body_path")
+            if not fpath or fpath in seen_paths or not os.path.isfile(fpath):
+                continue
+            seen_paths.add(fpath)
+            try:
+                with open(fpath, "r", encoding="utf-8") as f:
+                    all_files.append((fpath, f.read()))
+            except Exception:
+                continue
+    else:
+        # Real, pre-2026-08-23 fallback: the original three-folder scan,
+        # kept so this tool degrades gracefully rather than breaking if
+        # the index mount or the index file itself is ever unavailable.
+        search_dirs = []
+        for sub in ("Portfolio", "Thesis", "Watchlist"):
+            sub_path = os.path.join(vault_root, sub)
+            if os.path.isdir(sub_path):
+                search_dirs.append(sub_path)
+        all_files = []
+        seen_paths = set()
+        for d in search_dirs:
+            for fname in os.listdir(d):
+                if not fname.endswith(".md"):
+                    continue
+                fpath = os.path.join(d, fname)
+                if fpath in seen_paths or not os.path.isfile(fpath):
+                    continue
+                seen_paths.add(fpath)
+                try:
+                    with open(fpath, "r", encoding="utf-8") as f:
+                        all_files.append((fpath, f.read()))
+                except Exception:
+                    continue
 
     # Real, added 2026-08-19 after a live test caught this directly:
     # a natural, verbose query like "the 'Man in the Car Paradox'
@@ -599,28 +710,7 @@ def search_vault_impl(query: str) -> str:
     # back to the full, literal query string if no quotes are present
     # or the quoted portion itself doesn't match anything.
     quoted = re.findall(r"['\u2018\u2019\"]([^'\u2018\u2019\"]{3,})['\u2018\u2019\"]", query)
-    search_terms = quoted + [query] if quoted else [query]
-
-    # Real, all real, mounted .md files under the three scoped
-    # subfolders, read once -- tried against each search term in order
-    # (quoted phrase first, then the full original query) until one
-    # produces a match, rather than giving up after the first, most
-    # literal interpretation fails.
-    all_files = []
-    seen_paths = set()
-    for d in search_dirs:
-        for fname in os.listdir(d):
-            if not fname.endswith(".md"):
-                continue
-            fpath = os.path.join(d, fname)
-            if fpath in seen_paths or not os.path.isfile(fpath):
-                continue
-            seen_paths.add(fpath)
-            try:
-                with open(fpath, "r", encoding="utf-8") as f:
-                    all_files.append((fpath, f.read()))
-            except Exception:
-                continue
+    search_terms = quoted + [effective_query] if quoted else [effective_query]
 
     for term in search_terms:
         term_lower = term.lower()

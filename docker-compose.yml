@@ -39,6 +39,12 @@ services:
       # failure. Read-only: this tool should never write into DK's own,
       # hand-maintained vault.
       - /home/dk/gdrive/Obsidian:/app/vault_data:ro
+      # Real, added 2026-08-23: mount the real vault_index.jsonl (built by
+      # vault_ingest.py on the host, via cron/manual run, not inside this
+      # container) so search_vault's backend can use structured
+      # category/tag/title metadata instead of only a raw substring scan.
+      # Read-only: this container should never write the index itself.
+      - /home/dk/jarvis/data/vault_index.jsonl:/app/vault_index.jsonl:ro
       # Real, added 2026-08-17: mount the real ydotool socket. xdotool's
       # mouse/keyboard control was confirmed NOT visually working (real,
       # repeated testing) -- XWayland rootless mode appears to isolate
@@ -61,6 +67,16 @@ services:
       # -- confirmed directly the path is now a real socket file
       # (srw-------, root-owned) before re-enabling this line.
       - /tmp/.ydotool_socket:/tmp/.ydotool_socket:rw
+      # Real, added 2026-08-20: mount the real host's already-populated
+      # ms-playwright browser cache. Confirmed directly: wigolo's live
+      # fetch calls hang in this container because the chromium binary
+      # download times out (real, restricted-bandwidth network from
+      # inside the container). DK confirmed the exact version wigolo
+      # needs (chromium-1223) already exists on the real host, from an
+      # earlier local install. rw (not ro): this is a live cache
+      # directory these tools may legitimately add new browser versions
+      # to over time, not a static resource.
+      - /home/dk/.cache/ms-playwright:/ms-playwright:rw
       # Cookbook remote-server SSH identity. Odysseus can generate a key here;
       # add the shown public key to each remote server's authorized_keys.
       - ${APP_DATA_DIR:-./data}/ssh:/app/.ssh:z
