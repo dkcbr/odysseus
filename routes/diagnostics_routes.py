@@ -51,6 +51,49 @@ def setup_diagnostics_routes(
         from src.service_health import default_model_health
         return default_model_health(owner="admin")
 
+    @router.get("/api/mcp/server-detail")
+    async def get_mcp_server_detail(request: Request, id: str) -> Dict[str, Any]:
+        """Real, read-only single-server detail, using only real,
+        confirmed fields (no "ping"/"type"/"last_ping" -- those don't
+        exist; confirmed directly against a live server object before
+        building). Reuses the existing real /api/mcp/servers list and the
+        confirmed real per-server tools route.
+
+        Real, honest restoration note, 2026-08-23: lost in the same
+        commit (99f7fe2f) that dropped the Jarvis Home features and
+        default-model diagnostics endpoint earlier this engagement.
+        Verified both real dependencies (mcp_manager._connections,
+        mcp_manager.get_all_tools()) still exist with a compatible
+        shape before restoring."""
+        require_admin(request)
+        import app as _app
+
+        server = None
+        for sid, v in _app.mcp_manager._connections.items():
+            if sid == id or v.get("name") == id:
+                server = {"id": sid, **v}
+                break
+        if server is None:
+            raise HTTPException(status_code=404, detail=f"No MCP server found with id/name {id}")
+
+        # Real, confirmed method (same one the existing, already-used
+        # /api/mcp/servers/{id}/tools route calls internally).
+        all_tools = _app.mcp_manager.get_all_tools()
+        tools = [t["name"] for t in all_tools if t.get("server_id") == server["id"]]
+
+        return {
+            "id": server.get("id"),
+            "name": server.get("name"),
+            "status": server.get("status"),
+            "transport": server.get("transport"),
+            "command": server.get("command"),
+            "url": server.get("url"),
+            "error": server.get("error"),
+            "has_oauth": server.get("has_oauth"),
+            "tool_count": server.get("tool_count"),
+            "tools": tools,
+        }
+
     @router.get("/api/diagnostics/logs")
     async def get_diagnostics_logs(request: Request, limit: int = 200) -> Dict[str, Any]:
         require_admin(request)
