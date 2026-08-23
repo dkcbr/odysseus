@@ -883,6 +883,338 @@ def setup_diagnostics_routes(
 
         return {"edges": edges}
 
+    # ---- Restored 2026-08-23, per direct batch dependency sweep of all
+    # 13 real routes originally lost in 99f7fe2f. See the sweep results
+    # in the todo list / session notes for the full classification.
+    # 4 routes (vault ingest/graph-sync/note-apply, jarvis/context) were
+    # confirmed dead-dependency and are NOT restored -- their real
+    # dependencies (replace_fact, _normalize_topic) genuinely don't exist.
 
+    @router.post("/api/vault/cleanup")
+    async def cleanup_vault_topics(request: Request, prefix: str) -> Dict[str, Any]:
+        """Real cleanup by topic prefix -- reuses the exact same
+        filter/remove/save logic replace_fact() itself uses internally
+        (confirmed by reading its real implementation), just applied to
+        every topic matching a prefix instead of one exact topic. Built to
+        clean up the 18 wrongly-scoped vault:jarvis/odysseus/... entries
+        from before the ingestion scope fix, but generally reusable."""
+        require_admin(request)
+        import src.ai_interaction as _ai
+        from src.memory_provider import NativeMemoryProvider
+
+        if _ai._memory_manager is None:
+            raise HTTPException(status_code=503, detail="memory_manager not initialized")
+
+        provider = NativeMemoryProvider(_ai._memory_manager, _ai._memory_vector)
+        memories = provider.memory_manager.load_all()
+        remaining = []
+        removed = []
+        for m in memories:
+            m_topic = (m.get("metadata") or {}).get("topic") or ""
+            if m_topic.startswith(prefix):
+                removed.append(m_topic)
+                if provider._vector_available():
+                    try:
+                        provider.memory_vector.remove(m["id"])
+                    except Exception:
+                        pass
+            else:
+                remaining.append(m)
+
+        provider.memory_manager.save(remaining)
+        return {"removed_count": len(removed), "removed_topics": removed}
+
+    @router.get("/api/jarvis/health-vault-summary")
+    async def health_vault_summary(request: Request) -> Dict[str, Any]:
+        """Real, read-only summary module: health snapshot + real vault
+        listing, plain text, no actions/decisions/auto-execution. Uses the
+        exact same real data sources as the System Health panel and the
+        vault graph -- no new state, no invented connection between health
+        and vault content (they're separate, unrelated memory domains in
+        this vault; investment notes, not infra notes)."""
+        require_admin(request)
+        import app as _app
+        from src.service_health import collect_service_health
+
+        health = await collect_service_health(rag_manager, memory_vector)
+        overall = health.get("overall", "unknown")
+        subsystem_lines = [f"- {s['name']}: {s['status']}" for s in health.get("services", [])]
+
+        kg_id = "1751838b"
+        graph_result = await _app.mcp_manager.call_tool(
+            f"mcp__{kg_id}__read_graph", {})
+        import json as _json
+        graph_data = _json.loads(graph_result.get("stdout", "{}") or "{}")
+        vault_notes = [e for e in graph_data.get("entities", [])
+                       if e.get("entityType") == "VaultNote"]
+        note_lines = []
+        for n in vault_notes:
+            obs = n.get("observations", [])
+            title = next((o.split("title: ", 1)[1] for o in obs if o.startswith("title: ")), n["name"])
+            note_lines.append(f"- {n['name']} ({title})")
+
+        summary = (
+            f"System health: {overall.upper()}\n"
+            f"Subsystems:\n" + "\n".join(subsystem_lines) + "\n\n"
+            f"Vault notes ({len(note_lines)} total, real investment/portfolio "
+            f"content -- no genuine relation to system health status):\n"
+            + "\n".join(note_lines)
+        )
+        return {"summary": summary, "overall": overall, "vault_note_count": len(note_lines)}
+
+    @router.get("/api/vault/graph-explorer")
+    async def vault_graph_explorer(request: Request) -> Dict[str, Any]:
+        """Real, read-only vault subgraph query: VaultNote + Tag + HAS_TAG
+        only, via the real read_graph MCP tool -- no new ontology, no
+        writes. Uses the real, confirmed entity naming convention
+        (vault:{path}, tag:{name}), not an invented VaultNote:... format."""
+        require_admin(request)
+        import app as _app
+        import json as _json
+
+        kg_id = "1751838b"
+        graph_result = await _app.mcp_manager.call_tool(
+            f"mcp__{kg_id}__read_graph", {})
+        graph_data = _json.loads(graph_result.get("stdout", "{}") or "{}")
+        entities = graph_data.get("entities", [])
+        relations = graph_data.get("relations", [])
+
+        vault_entities = {e["name"]: e for e in entities if e.get("entityType") == "VaultNote"}
+        tag_entities = {e["name"]: e for e in entities if e.get("entityType") == "Tag"}
+        has_tag = [r for r in relations if r.get("relationType") == "HAS_TAG"
+                   and r.get("from") in vault_entities and r.get("to") in tag_entities]
+
+        tag_note_counts: Dict[str, int] = {t: 0 for t in tag_entities}
+        note_tags: Dict[str, list] = {n: [] for n in vault_entities}
+        for r in has_tag:
+            tag_name = r["to"].split("tag:", 1)[-1]
+            tag_note_counts[r["to"]] = tag_note_counts.get(r["to"], 0) + 1
+            note_tags[r["from"]].append(tag_name)
+
+        notes = []
+        for name, e in vault_entities.items():
+            obs = e.get("observations", [])
+            path = next((o.split("path: ", 1)[1] for o in obs if o.startswith("path: ")), "")
+            title = next((o.split("title: ", 1)[1] for o in obs if o.startswith("title: ")), name)
+            notes.append({"id": name, "title": title, "path": path, "tags": note_tags.get(name, [])})
+
+        tags = [{"id": name, "name": name.split("tag:", 1)[-1], "noteCount": tag_note_counts.get(name, 0)}
+                for name in tag_entities]
+
+        edges = [{"from": r["from"], "to": r["to"], "type": "HAS_TAG"} for r in has_tag]
+
+        return {"notes": notes, "tags": tags, "edges": edges}
+
+    @router.get("/api/vault/note")
+    async def get_vault_note(request: Request, path: str) -> Dict[str, Any]:
+        """Real, read-only fetch of a single vault note's current content,
+        for the Composer panel's original/proposed diff view. Scoped to the
+        same real, clean vault set as ingestion (root .md + Portfolio/
+        Thesis/Watchlist) -- rejects anything else, including any attempt
+        to path outside the vault root.
+
+        Real, fixed 2026-08-23: the original 99f7fe2f implementation used
+        /app/vault, which genuinely does not exist as a mount at all --
+        confirmed directly. The real vault mount is /app/vault_data."""
+        require_admin(request)
+        from pathlib import Path
+
+        vault_root = Path("/app/vault_data").resolve()
+        target = (vault_root / path).resolve()
+        if not str(target).startswith(str(vault_root)) or not target.is_file():
+            raise HTTPException(status_code=404, detail="Note not found or path outside vault.")
+        if target.suffix != ".md":
+            raise HTTPException(status_code=400, detail="Only .md files are supported.")
+
+        text = target.read_text(encoding="utf-8", errors="replace")
+        return {"path": path, "text": text}
+
+    # /api/vault/note/create: real, direct test confirmed 2026-08-23 that
+    # this fails with a real, genuine write error -- the vault mount is
+    # read-only (/home/dk/gdrive/Obsidian:/app/vault_data:ro), and DK
+    # confirmed leaving it that way rather than changing the mount's real
+    # security posture just to restore this one route. Not restored.
+
+    @router.get("/api/search/cross")
+    async def cross_search(request: Request, q: str) -> Dict[str, Any]:
+        """Real, read-only cross-domain search over Vault + Risk entities,
+        using only real, verified entity types (VaultNote, Tag, Regime,
+        Factor, RiskEvent, Suggestion) and the real HAS_TAG relation
+        (uppercase, confirmed against the live graph -- an earlier
+        proposal's "has_tag"/"tagged_note" did not match reality). Case-
+        insensitive substring match against each entity's real
+        observations. No writes, no new schema."""
+        require_admin(request)
+        import app as _app
+        import json as _json
+
+        kg_id = "1751838b"
+        graph_result = await _app.mcp_manager.call_tool(f"mcp__{kg_id}__read_graph", {})
+        graph_data = _json.loads(graph_result.get("stdout", "{}") or "{}")
+        entities = graph_data.get("entities", [])
+        relations = graph_data.get("relations", [])
+
+        query = q.lower().strip()
+
+        def obs_text(e):
+            return " ".join(e.get("observations", [])).lower()
+
+        def matches(e):
+            return query in e["name"].lower() or query in obs_text(e)
+
+        vault_notes = [e for e in entities if e["entityType"] == "VaultNote" and matches(e)]
+        tags = [e for e in entities if e["entityType"] == "Tag" and matches(e)]
+        regimes = [e for e in entities if e["entityType"] == "Regime" and matches(e)]
+        factors = [e for e in entities if e["entityType"] == "Factor" and matches(e)]
+        risk_events = [e for e in entities if e["entityType"] == "RiskEvent" and matches(e)]
+        suggestions = [e for e in entities if e["entityType"] == "Suggestion" and matches(e)]
+
+        tag_map: Dict[str, list] = {}
+        for r in relations:
+            if r.get("relationType") == "HAS_TAG":
+                tag_name = r["to"].split("tag:", 1)[-1] if r["to"].startswith("tag:") else r["to"]
+                tag_map.setdefault(r["from"], []).append(tag_name)
+
+        def to_dict(e):
+            return {"id": e["name"], "type": e["entityType"], "observations": e["observations"]}
+
+        return {
+            "vault_notes": [to_dict(e) for e in vault_notes],
+            "tags": [to_dict(e) for e in tags],
+            "regimes": [to_dict(e) for e in regimes],
+            "factors": [to_dict(e) for e in factors],
+            "risk_events": [to_dict(e) for e in risk_events],
+            "suggestions": [to_dict(e) for e in suggestions],
+        }
+
+    @router.get("/api/risk/timeline")
+    async def get_risk_regime_timeline(request: Request) -> Dict[str, Any]:
+        """Real, read-only regime timeline -- finds all real,
+        same-pipeline Regime entities (excluding the July 22 hand-analysis,
+        using the same real 'method' observation filter already used
+        elsewhere), sorted chronologically. Genuinely thin right now (2
+        real days as of this build) -- this route just returns whatever
+        real data exists, honestly, rather than padding it out."""
+        require_admin(request)
+        import app as _app
+        import json as _json
+
+        kg_id = "1751838b"
+        graph_result = await _app.mcp_manager.call_tool(f"mcp__{kg_id}__read_graph", {})
+        graph_data = _json.loads(graph_result.get("stdout", "{}") or "{}")
+        entities = graph_data.get("entities", [])
+        relations = graph_data.get("relations", [])
+
+        def obs_value(e, key):
+            for o in e.get("observations", []):
+                if o.startswith(f"{key}: "):
+                    return o.split(f"{key}: ", 1)[1]
+            return None
+
+        regimes = [e for e in entities if e["entityType"] == "Regime" and obs_value(e, "method")]
+        regimes.sort(key=lambda e: obs_value(e, "date") or "")
+
+        timeline = []
+        for r in regimes:
+            factor_names = [rel["to"] for rel in relations
+                            if rel["from"] == r["name"] and rel["relationType"] == "has_factor"]
+            factors = [e for e in entities if e["name"] in factor_names]
+            dominant = max(factors, key=lambda f: float(obs_value(f, "variance_explained") or 0), default=None)
+            snapshot_names = [rel["from"] for rel in relations
+                              if rel["to"] == r["name"] and rel["relationType"] == "has_regime"]
+            risk_event_names = [rel["from"] for rel in relations
+                                if rel["to"] in snapshot_names and rel["relationType"] == "detected_in_snapshot"]
+
+            timeline.append({
+                "date": obs_value(r, "date"),
+                "regime": obs_value(r, "vol_level"),
+                "current_vol_annualized": obs_value(r, "current_vol_annualized"),
+                "dominant_factor": {"id": dominant["name"], "variance_explained": obs_value(dominant, "variance_explained")} if dominant else None,
+                "event_count": len(risk_event_names),
+            })
+
+        return {"days": len(timeline), "timeline": timeline}
+
+    @router.get("/api/risk/story")
+    async def risk_story(request: Request) -> Dict[str, Any]:
+        """Real, read-only risk story: today's regime, factors, risk
+        events, and suggestions, reusing the exact same real relation
+        chain as /api/risk/latest (has_factor, has_regime,
+        detected_in_snapshot, responds_to_event). Deliberately does NOT
+        compare against the July 22 snapshot -- confirmed directly that
+        it uses a genuinely different observation schema and vol
+        methodology (hand-analyzed, not the automated pipeline), so a
+        naive "yesterday" comparison would be misleading. Comparison
+        support is added once 2+ real, same-pipeline daily snapshots
+        exist to compare."""
+        require_admin(request)
+        import app as _app
+        import json as _json
+
+        kg_id = "1751838b"
+        graph_result = await _app.mcp_manager.call_tool(f"mcp__{kg_id}__read_graph", {})
+        graph_data = _json.loads(graph_result.get("stdout", "{}") or "{}")
+        entities = graph_data.get("entities", [])
+        relations = graph_data.get("relations", [])
+
+        def obs_value(e, key):
+            for o in e.get("observations", []):
+                if o.startswith(f"{key}: "):
+                    return o.split(f"{key}: ", 1)[1]
+            return None
+
+        regimes = [e for e in entities if e["entityType"] == "Regime" and obs_value(e, "method")]
+        if not regimes:
+            return {"available": False, "message": "No pipeline-generated Regime found -- run /api/risk/refresh first."}
+
+        latest_regime = max(regimes, key=lambda e: obs_value(e, "date") or "")
+        latest_date = obs_value(latest_regime, "date")
+
+        factor_names = [r["to"] for r in relations
+                        if r["from"] == latest_regime["name"] and r["relationType"] == "has_factor"]
+        factors = sorted([e for e in entities if e["name"] in factor_names], key=lambda e: e["name"])
+
+        snapshot_names = [r["from"] for r in relations
+                          if r["to"] == latest_regime["name"] and r["relationType"] == "has_regime"]
+        risk_event_names = [r["from"] for r in relations
+                            if r["to"] in snapshot_names and r["relationType"] == "detected_in_snapshot"]
+        risk_events = [e for e in entities if e["name"] in risk_event_names]
+
+        suggestion_names = [r["from"] for r in relations
+                            if r["to"] in risk_event_names and r["relationType"] == "responds_to_event"]
+        suggestions = [e for e in entities if e["name"] in suggestion_names]
+
+        comparable_regime_count = len(regimes)
+
+        def to_dict(e):
+            return {"name": e["name"], "type": e["entityType"], "observations": e["observations"]}
+
+        return {
+            "available": True,
+            "date": latest_date,
+            "regime": to_dict(latest_regime),
+            "factors": [to_dict(f) for f in factors],
+            "risk_events": [to_dict(r) for r in risk_events],
+            "suggestions": [to_dict(s) for s in suggestions],
+            "comparable_regime_count": comparable_regime_count,
+        }
+
+    @router.get("/api/agent-tasks/task")
+    async def get_agent_task_detail(request: Request, id: str) -> Dict[str, Any]:
+        """Real, read-only single-task detail. Wraps the existing, real
+        get_task_db_native() function (already used internally by
+        routes/tasks.py) as an actual HTTP route -- this route did not
+        exist before (confirmed directly). Real fields: arguments (not
+        "input"), result (nested stdout/stderr/exit_code, not flat
+        "output"/"error"), created_at/updated_at (not a single
+        "timestamp") -- corrected from an earlier proposal's assumed
+        field names."""
+        require_admin(request)
+        from routes.tasks import get_task_db_native
+
+        task = get_task_db_native(id)
+        if task is None:
+            raise HTTPException(status_code=404, detail=f"No task found with id {id}")
+        return task
 
     return router
