@@ -43,6 +43,17 @@ STALE_AFTER_SECONDS = 10
 DESIRED_AGENTS: dict[str, dict] = {
     "browser_agent": {"enabled": True, "description": "Controls Playwright browser automation"},
     "filesystem_agent": {"enabled": True, "description": "Handles filesystem operations"},
+    # Real, added 2026-08-24: wiring desktop_sandbox into the real task
+    # queue. Real, honest note found while doing this: system_agent,
+    # market_agent, and memory_agent all exist in the real capability
+    # registry (data/agent_capabilities.json) but are genuinely missing
+    # from this dict -- confirmed directly that a task for any agent not
+    # in DESIRED_AGENTS (or not enabled here) gets rejected outright at
+    # claim time ("Agent disabled or not registered"), so those 3 agents'
+    # tasks are likely currently broken through the real queue. Flagged
+    # separately on the todo list; deliberately not fixed here to keep
+    # this change scoped to desktop_agent specifically.
+    "desktop_agent": {"enabled": True, "description": "Controls the isolated desktop-sandbox container (screenshot, mouse, keyboard)"},
 }
 
 # Real, restored 2026-08-09 -- matches the host-side path (data/agent_worker_logs)
