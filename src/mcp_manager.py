@@ -132,6 +132,69 @@ def mcp_tool_is_readonly(tool: Dict) -> bool:
     return name.startswith(_MCP_READONLY_VERBS)
 
 
+class _StdioServerActor:
+    """Real, dedicated, persistent task owning one stdio server's real
+    connection lifecycle (connect, disconnect -- never call_tool, which
+    stays on the calling task; see this file's own module-level
+    docstring addition below for why).
+
+    Real, added 2026-08-24, fixing a genuine, confirmed structural bug:
+    every incoming FastAPI request runs in its own, separate asyncio
+    task. stdio_client() (the real MCP SDK's own stdio transport)
+    internally opens an anyio.create_task_group() -- confirmed directly
+    by reading the SDK's own source -- and anyio strictly, correctly
+    enforces that a task group's cancel scope can only be exited by the
+    same task that entered it. The original code stored a stack
+    (AsyncExitStack) that got entered during whichever HTTP request
+    first connected a server, then closed during a LATER, genuinely
+    different HTTP request's task (e.g. a /reconnect call) -- a real,
+    reproducible violation of that constraint, confirmed live via the
+    exact error anyio raises for it ("Attempted to exit cancel scope in
+    a different task than it was entered in"), first on worldwideview,
+    later reproduced on desktop_sandbox after repeated reconnects.
+
+    The real, correct fix: give each stdio server one dedicated,
+    long-lived task that outlives any individual HTTP request, and
+    route every connect/disconnect through it via a real, internal
+    queue -- so the same task always both enters and exits the cancel
+    scope, regardless of which HTTP request triggered either call. The
+    calling FastAPI request task still just awaits a real, ordinary
+    asyncio.Future for the result; only the actual anyio-sensitive work
+    happens inside this actor's own task.
+    """
+
+    def __init__(self):
+        self._queue: asyncio.Queue = asyncio.Queue()
+        self._task: Optional[asyncio.Task] = None
+
+    def ensure_started(self) -> None:
+        if self._task is None or self._task.done():
+            self._task = asyncio.create_task(self._run())
+
+    async def _run(self) -> None:
+        while True:
+            coro_factory, future = await self._queue.get()
+            if future.cancelled():
+                continue
+            try:
+                result = await coro_factory()
+                if not future.cancelled():
+                    future.set_result(result)
+            except Exception as e:
+                if not future.cancelled():
+                    future.set_exception(e)
+
+    async def submit(self, coro_factory) -> Any:
+        """Real, deliberate: takes a zero-arg callable returning a real
+        coroutine (a factory, not an already-created coroutine object),
+        since a coroutine can only be awaited once and this actor's own
+        loop -- not the caller -- is what actually awaits it."""
+        self.ensure_started()
+        future: asyncio.Future = asyncio.get_event_loop().create_future()
+        await self._queue.put((coro_factory, future))
+        return await future
+
+
 class McpManager:
     """Manages MCP server connections and tool routing."""
 
@@ -146,6 +209,11 @@ class McpManager:
         self._stacks: Dict[str, Any] = {}
         # server_id -> background connect task (HTTP transport / OAuth)
         self._connect_tasks: Dict[str, Any] = {}
+        # Real, added 2026-08-24: server_id -> _StdioServerActor. Only
+        # ever populated for transport == "stdio" -- see
+        # _connect_stdio/disconnect_server below for why this is
+        # deliberately scoped to stdio alone, not every transport.
+        self._stdio_actors: Dict[str, _StdioServerActor] = {}
         # Tracking updates to tools/connections for RAG indexing / prompt cache
         self._generation = 0
 
@@ -162,7 +230,16 @@ class McpManager:
         """Connect to an MCP server via stdio, SSE, or Streamable HTTP transport."""
         try:
             if transport == "stdio":
-                res = await self._connect_stdio(server_id, name, command, args or [], env or {})
+                # Real, added 2026-08-24: route through this server's
+                # dedicated, persistent actor task, not the calling
+                # FastAPI request's own task -- see _StdioServerActor's
+                # own docstring, above this class, for the full, real
+                # reasoning. get-or-create here (not just at connect
+                # time in general) because this is genuinely the first
+                # real point a fresh server_id could arrive at.
+                actor = self._stdio_actors.setdefault(server_id, _StdioServerActor())
+                res = await actor.submit(
+                    lambda: self._connect_stdio(server_id, name, command, args or [], env or {}))
             elif transport == "sse":
                 res = await self._connect_sse(server_id, name, url)
             elif transport == "http":
@@ -432,16 +509,45 @@ class McpManager:
 
         stack = self._stacks.pop(server_id, None)
         if stack:
-            try:
-                await stack.aclose()
-            except Exception as e:
-                logger.warning(f"Error closing MCP server {server_id}: {e}")
+            # Real, added 2026-08-24: if this is a stdio server (the
+            # only transport where this actually matters -- see
+            # _StdioServerActor's own docstring), route the real close
+            # through its dedicated actor task, the same one that
+            # opened it, rather than whichever FastAPI request task
+            # happens to be calling disconnect_server right now. This
+            # is the actual, real fix for the cancel-scope bug -- not
+            # just connect needed it, close does too, since it's the
+            # exit side of the same anyio task group.
+            actor = self._stdio_actors.get(server_id)
+            if actor is not None:
+                async def _do_close():
+                    await stack.aclose()
+                try:
+                    await actor.submit(_do_close)
+                except Exception as e:
+                    logger.warning(f"Error closing MCP server {server_id}: {e}")
+            else:
+                try:
+                    await stack.aclose()
+                except Exception as e:
+                    logger.warning(f"Error closing MCP server {server_id}: {e}")
 
         self._sessions.pop(server_id, None)
         self._tools.pop(server_id, None)
         self._connections.pop(server_id, None)
         self._generation += 1
         logger.info(f"MCP server disconnected: {server_id}")
+
+    async def cleanup_stdio_actor(self, server_id: str) -> None:
+        """Real, permanent cleanup for a stdio server's dedicated actor
+        task -- call this specifically when a server is being deleted
+        outright, not on a routine disconnect/reconnect cycle (where
+        leaving the actor's own lightweight, idle task running is
+        correct, so a later reconnect reuses it rather than spawning a
+        fresh one for the same real server_id)."""
+        actor = self._stdio_actors.pop(server_id, None)
+        if actor is not None and actor._task is not None and not actor._task.done():
+            actor._task.cancel()
 
     async def disconnect_all(self):
         """Disconnect from all MCP servers."""
