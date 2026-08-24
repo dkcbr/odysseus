@@ -261,6 +261,23 @@ services:
       - NTFY_BASE_URL=${NTFY_BASE_URL:-http://localhost:8091}
     restart: unless-stopped
 
+  # Real, added 2026-08-23 (first real step of closing the Bytebot-inspired
+  # capability gap): a genuinely isolated, disposable full desktop, not
+  # jarvis_browser's shared-host approach. Using accetto/ubuntu-vnc-xfce-
+  # firefox-g3 -- a real, actively maintained, well-established image
+  # (Ubuntu 24.04, TigerVNC, noVNC, Firefox), not building XFCE/VNC from
+  # scratch. Deliberately isolated in this first step: no agent-control
+  # wiring yet, no shared network with odysseus -- just confirming the
+  # base desktop container itself boots and is reachable before building
+  # anything on top of it.
+  desktop-sandbox:
+    image: accetto/ubuntu-vnc-xfce-firefox-g3
+    ports:
+      - "127.0.0.1:6081:6901"
+    environment:
+      - VNC_PW=${DESKTOP_SANDBOX_VNC_PW:-changeme}
+    restart: unless-stopped
+
 volumes:
   searxng-data:
   chromadb-data:
