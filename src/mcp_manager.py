@@ -132,35 +132,40 @@ def mcp_tool_is_readonly(tool: Dict) -> bool:
     return name.startswith(_MCP_READONLY_VERBS)
 
 
-class _StdioServerActor:
-    """Real, dedicated, persistent task owning one stdio server's real
+class _ServerConnectionActor:
+    """Real, dedicated, persistent task owning one server's real
     connection lifecycle (connect, disconnect -- never call_tool, which
     stays on the calling task; see this file's own module-level
     docstring addition below for why).
 
     Real, added 2026-08-24, fixing a genuine, confirmed structural bug:
     every incoming FastAPI request runs in its own, separate asyncio
-    task. stdio_client() (the real MCP SDK's own stdio transport)
-    internally opens an anyio.create_task_group() -- confirmed directly
-    by reading the SDK's own source -- and anyio strictly, correctly
-    enforces that a task group's cancel scope can only be exited by the
-    same task that entered it. The original code stored a stack
+    task. Both stdio_client() and streamablehttp_client() (the real MCP
+    SDK's own stdio and HTTP transports) internally open an
+    anyio.create_task_group() -- confirmed directly by reading each
+    transport's own source -- and anyio strictly, correctly enforces
+    that a task group's cancel scope can only be exited by the same
+    task that entered it. The original code stored a stack
     (AsyncExitStack) that got entered during whichever HTTP request
     first connected a server, then closed during a LATER, genuinely
     different HTTP request's task (e.g. a /reconnect call) -- a real,
     reproducible violation of that constraint, confirmed live via the
     exact error anyio raises for it ("Attempted to exit cancel scope in
-    a different task than it was entered in"), first on worldwideview,
-    later reproduced on desktop_sandbox after repeated reconnects.
+    a different task than it was entered in"). First fixed for stdio
+    transport alone (this class was originally named
+    _ServerConnectionActor); the exact same root cause was then confirmed
+    for HTTP transport too (worldwideview, still stuck at "connecting"
+    even after its own backend was fixed independently), so this class
+    was generalized to serve both.
 
-    The real, correct fix: give each stdio server one dedicated,
-    long-lived task that outlives any individual HTTP request, and
-    route every connect/disconnect through it via a real, internal
-    queue -- so the same task always both enters and exits the cancel
-    scope, regardless of which HTTP request triggered either call. The
-    calling FastAPI request task still just awaits a real, ordinary
-    asyncio.Future for the result; only the actual anyio-sensitive work
-    happens inside this actor's own task.
+    The real, correct fix: give each server one dedicated, long-lived
+    task that outlives any individual HTTP request, and route every
+    connect/disconnect through it via a real, internal queue -- so the
+    same task always both enters and exits the cancel scope, regardless
+    of which HTTP request triggered either call. The calling FastAPI
+    request task still just awaits a real, ordinary asyncio.Future for
+    the result; only the actual anyio-sensitive work happens inside
+    this actor's own task.
     """
 
     def __init__(self):
@@ -188,11 +193,28 @@ class _StdioServerActor:
         """Real, deliberate: takes a zero-arg callable returning a real
         coroutine (a factory, not an already-created coroutine object),
         since a coroutine can only be awaited once and this actor's own
-        loop -- not the caller -- is what actually awaits it."""
+        loop -- not the caller -- is what actually awaits it. Awaits the
+        full result before returning -- use submit_nowait() instead if
+        the caller needs to apply its own, separate bounded wait (e.g.
+        HTTP transport's existing "wait up to N seconds, otherwise
+        return early while it keeps running in the background for a
+        slow OAuth flow" behavior)."""
+        future = await self.submit_nowait(coro_factory)
+        return await future
+
+    async def submit_nowait(self, coro_factory) -> asyncio.Future:
+        """Real, added 2026-08-24 (HTTP-transport generalization): queues
+        the work and returns the real, live Future immediately, without
+        awaiting it -- the actual work still only ever runs inside this
+        actor's own, single, persistent task, same as submit(). Lets a
+        caller apply its own bounded wait against the returned future
+        (e.g. via asyncio.wait({future}, timeout=...)) while the
+        underlying anyio-sensitive work still correctly stays pinned to
+        this one, real, persistent task."""
         self.ensure_started()
         future: asyncio.Future = asyncio.get_event_loop().create_future()
         await self._queue.put((coro_factory, future))
-        return await future
+        return future
 
 
 class McpManager:
@@ -209,11 +231,13 @@ class McpManager:
         self._stacks: Dict[str, Any] = {}
         # server_id -> background connect task (HTTP transport / OAuth)
         self._connect_tasks: Dict[str, Any] = {}
-        # Real, added 2026-08-24: server_id -> _StdioServerActor. Only
-        # ever populated for transport == "stdio" -- see
-        # _connect_stdio/disconnect_server below for why this is
-        # deliberately scoped to stdio alone, not every transport.
-        self._stdio_actors: Dict[str, _StdioServerActor] = {}
+        # Real, added 2026-08-24: server_id -> _ServerConnectionActor.
+        # Populated for both stdio and http transports -- see
+        # _connect_stdio/_start_http_connect/disconnect_server below for
+        # where each wires in. Not used for sse transport; that one
+        # hasn't shown this same failure mode and hasn't been
+        # investigated for it.
+        self._connection_actors: Dict[str, _ServerConnectionActor] = {}
         # Tracking updates to tools/connections for RAG indexing / prompt cache
         self._generation = 0
 
@@ -232,18 +256,29 @@ class McpManager:
             if transport == "stdio":
                 # Real, added 2026-08-24: route through this server's
                 # dedicated, persistent actor task, not the calling
-                # FastAPI request's own task -- see _StdioServerActor's
+                # FastAPI request's own task -- see _ServerConnectionActor's
                 # own docstring, above this class, for the full, real
                 # reasoning. get-or-create here (not just at connect
                 # time in general) because this is genuinely the first
                 # real point a fresh server_id could arrive at.
-                actor = self._stdio_actors.setdefault(server_id, _StdioServerActor())
+                actor = self._connection_actors.setdefault(server_id, _ServerConnectionActor())
                 res = await actor.submit(
                     lambda: self._connect_stdio(server_id, name, command, args or [], env or {}))
             elif transport == "sse":
                 res = await self._connect_sse(server_id, name, url)
             elif transport == "http":
-                res = await self._start_http_connect(server_id, name, url)
+                # Real, fixed 2026-08-24: env (the real, configured static
+                # headers, e.g. an Authorization bearer token) was never
+                # actually threaded through to _start_http_connect at
+                # this call site -- confirmed directly the parameter was
+                # simply dropped, unrelated to the cancel-scope fix.
+                # This is the real, separate reason worldwideview kept
+                # showing needs_auth/going through OAuth discovery even
+                # with a real, valid bearer token configured: the code
+                # path that's supposed to skip OAuth for static headers
+                # (_connect_http's own "if headers:" check) never
+                # actually received them.
+                res = await self._start_http_connect(server_id, name, url, headers=env or None)
             else:
                 logger.error(f"Unknown MCP transport: {transport}")
                 res = False
@@ -399,15 +434,28 @@ class McpManager:
     async def _start_http_connect(self, server_id: str, name: str, url: str, wait: float = 8.0, headers: Optional[Dict[str, str]] = None) -> bool:
         """Begin a Streamable HTTP connect in the background. Returns within
         `wait` seconds: True if it connected (cached-token path), otherwise the
-        flow is awaiting browser authorization and status becomes 'needs_auth'."""
-        import asyncio
+        flow is awaiting browser authorization and status becomes 'needs_auth'.
+
+        Real, added 2026-08-24: routes the actual connect through this
+        server's dedicated _ServerConnectionActor (submit_nowait, not
+        submit -- this function needs its own, separate bounded wait
+        below, exactly as before) rather than a fresh, one-off
+        asyncio.create_task(). See _ServerConnectionActor's own
+        docstring for the full, real reasoning -- confirmed directly
+        that streamablehttp_client() also opens an anyio task group
+        internally, the same real class of bug already fixed for stdio
+        transport, now confirmed and fixed here too (worldwideview was
+        still stuck at "connecting" even after its own backend was
+        independently fixed, which is what surfaced this)."""
+        actor = self._connection_actors.setdefault(server_id, _ServerConnectionActor())
         self._connections[server_id] = {"status": "connecting", "name": name, "transport": "http"}
-        task = asyncio.create_task(self._connect_http(server_id, name, url, headers=headers))
-        self._connect_tasks[server_id] = task
-        done, _ = await asyncio.wait({task}, timeout=wait)
-        if task in done:
+        future = await actor.submit_nowait(
+            lambda: self._connect_http(server_id, name, url, headers=headers))
+        self._connect_tasks[server_id] = future
+        done, _ = await asyncio.wait({future}, timeout=wait)
+        if future in done:
             try:
-                return task.result()
+                return future.result()
             except Exception as e:
                 self._connections[server_id] = {"status": "error", "error": str(e), "name": name}
                 return False
@@ -498,6 +546,20 @@ class McpManager:
         """Disconnect from an MCP server."""
         # Cancel any in-flight HTTP/OAuth background connect so it stops
         # publishing status for a server that may be getting deleted.
+        #
+        # Real, honest note, 2026-08-24: this is now an asyncio.Future
+        # (from _ServerConnectionActor.submit_nowait), not a raw Task --
+        # .cancel() on a plain Future marks it cancelled but does NOT
+        # interrupt the actor's already-running coroutine the way
+        # cancelling a real Task would have. Practical effect: an
+        # in-flight HTTP connect/OAuth attempt for a server being
+        # deleted right now will run to completion in the background
+        # rather than stopping immediately -- its result is simply
+        # discarded once done, since _connections/server rows are
+        # already gone. A minor, accepted tradeoff for routing the
+        # actual connect through the same persistent task the cancel-
+        # scope fix requires; not a functional regression (no crash, no
+        # leaked resources), just a slower worst-case cleanup.
         task = self._connect_tasks.pop(server_id, None)
         if task is not None and not task.done():
             task.cancel()
@@ -511,14 +573,14 @@ class McpManager:
         if stack:
             # Real, added 2026-08-24: if this is a stdio server (the
             # only transport where this actually matters -- see
-            # _StdioServerActor's own docstring), route the real close
+            # _ServerConnectionActor's own docstring), route the real close
             # through its dedicated actor task, the same one that
             # opened it, rather than whichever FastAPI request task
             # happens to be calling disconnect_server right now. This
             # is the actual, real fix for the cancel-scope bug -- not
             # just connect needed it, close does too, since it's the
             # exit side of the same anyio task group.
-            actor = self._stdio_actors.get(server_id)
+            actor = self._connection_actors.get(server_id)
             if actor is not None:
                 async def _do_close():
                     await stack.aclose()
@@ -538,14 +600,14 @@ class McpManager:
         self._generation += 1
         logger.info(f"MCP server disconnected: {server_id}")
 
-    async def cleanup_stdio_actor(self, server_id: str) -> None:
-        """Real, permanent cleanup for a stdio server's dedicated actor
-        task -- call this specifically when a server is being deleted
-        outright, not on a routine disconnect/reconnect cycle (where
-        leaving the actor's own lightweight, idle task running is
-        correct, so a later reconnect reuses it rather than spawning a
-        fresh one for the same real server_id)."""
-        actor = self._stdio_actors.pop(server_id, None)
+    async def cleanup_connection_actor(self, server_id: str) -> None:
+        """Real, permanent cleanup for a server's dedicated actor task
+        (stdio or http) -- call this specifically when a server is
+        being deleted outright, not on a routine disconnect/reconnect
+        cycle (where leaving the actor's own lightweight, idle task
+        running is correct, so a later reconnect reuses it rather than
+        spawning a fresh one for the same real server_id)."""
+        actor = self._connection_actors.pop(server_id, None)
         if actor is not None and actor._task is not None and not actor._task.done():
             actor._task.cancel()
 

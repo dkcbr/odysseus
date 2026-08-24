@@ -380,7 +380,7 @@ def setup_mcp_routes(mcp_manager: McpManager):
             # this server is being permanently removed -- clean up its
             # dedicated stdio actor task too, so it doesn't linger for a
             # server_id that no longer exists at all.
-            await mcp_manager.cleanup_stdio_actor(server_id)
+            await mcp_manager.cleanup_connection_actor(server_id)
 
             db.delete(srv)
             db.commit()
