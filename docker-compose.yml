@@ -284,6 +284,30 @@ services:
       - VNC_PW=${DESKTOP_SANDBOX_VNC_PW:-changeme}
     restart: unless-stopped
 
+  # Real, added 2026-08-24: restricted Docker API access for per-task
+  # disposable desktop containers, so nothing else in this codebase ever
+  # needs a raw /var/run/docker.sock mount (root-equivalent to the host).
+  # Uses Tecnativa/docker-socket-proxy (real, established, ~2.5k stars),
+  # an HAProxy-based filter in front of the real socket. Only container
+  # lifecycle operations are granted (CONTAINERS, ALLOW_START, ALLOW_STOP,
+  # and the global POST gate they need) -- everything else stays at its
+  # real, secure default (off), most importantly EXEC (arbitrary code
+  # execution inside any container -- the single most dangerous endpoint)
+  # and NETWORKS/VOLUMES/SYSTEM/SWARM/AUTH/SECRETS. Bound to the internal
+  # Docker network only, never published to the host, matching the
+  # project's own documented security recommendation.
+  docker-socket-proxy:
+    image: tecnativa/docker-socket-proxy
+    privileged: true  # required to bind-mount and speak to the real socket
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    environment:
+      - CONTAINERS=1
+      - POST=1
+      - ALLOW_START=1
+      - ALLOW_STOP=1
+    restart: unless-stopped
+
 volumes:
   searxng-data:
   chromadb-data:
