@@ -72,6 +72,7 @@ from desktop_container_lifecycle import (
     create_task_container, wait_for_vnc_ready, destroy_task_container,
     ContainerLifecycleError,
 )
+from desktop_sandbox_sessions import save_registry, reconcile_on_startup
 
 mcp = FastMCP("desktop_sandbox")
 
@@ -90,7 +91,21 @@ REAPER_INTERVAL_SECONDS = 60
 # last_used}. A plain dict is safe here without a lock -- every real
 # access happens on this same, single asyncio event loop; there's no
 # actual concurrent-thread mutation to guard against.
+#
+# Real, added 2026-08-24 (desktop_sandbox_sessions.py): this starts
+# empty and gets populated by reconcile_on_startup() in _run() below,
+# not initialized directly here -- see that module's own docstring for
+# why a plain in-memory dict alone was a real, silent resource-leak
+# risk (a crash/restart forgets every container it was tracking, while
+# the real containers themselves keep running).
 _sessions: dict[str, dict] = {}
+
+
+def _persist_sessions() -> None:
+    """Real, write-through: every real mutation of _sessions below calls
+    this immediately afterward, so the persisted registry never drifts
+    out of sync with in-memory state -- not a periodic/batched save."""
+    save_registry(_sessions)
 
 
 def _safe_session_key(session_id: str) -> str:
@@ -123,6 +138,7 @@ async def _get_or_create_session(session_id: str) -> dict:
         "last_used": time.monotonic(),
     }
     _sessions[session_id] = session
+    _persist_sessions()
     return session
 
 
@@ -155,10 +171,12 @@ async def _reap_idle_sessions_loop() -> None:
             now = time.monotonic()
             idle = [sid for sid, s in _sessions.items()
                     if now - s["last_used"] > SESSION_IDLE_TIMEOUT_SECONDS]
-            for sid in idle:
-                session = _sessions.pop(sid, None)
-                if session:
-                    await destroy_task_container(session["name"])
+            if idle:
+                for sid in idle:
+                    session = _sessions.pop(sid, None)
+                    if session:
+                        await destroy_task_container(session["name"])
+                _persist_sessions()
         except Exception:
             continue
 
@@ -222,6 +240,7 @@ async def close_session(session_id: str) -> str:
     session = _sessions.pop(session_id, None)
     if session is None:
         return f"No active session for {session_id!r} (already closed, or never created)."
+    _persist_sessions()
     try:
         await destroy_task_container(session["name"])
     except ContainerLifecycleError as e:
@@ -229,8 +248,29 @@ async def close_session(session_id: str) -> str:
     return f"Session {session_id!r} closed."
 
 
+@mcp.tool()
+async def list_sessions() -> list[dict]:
+    """Real, direct observability into every currently-tracked session --
+    not a black box only visible by querying Docker directly. Returns
+    each session's real id, container name, and idle time in seconds."""
+    now = time.monotonic()
+    return [
+        {
+            "session_id": sid,
+            "container_name": s["name"],
+            "idle_seconds": round(now - s["last_used"], 1),
+        }
+        for sid, s in _sessions.items()
+    ]
+
+
 if __name__ == "__main__":
     async def _run() -> None:
+        global _sessions
+        # Real, added 2026-08-24: ground-truth reconciliation before
+        # anything else runs -- see desktop_sandbox_sessions.py's own
+        # docstring for the full, real reasoning.
+        _sessions = await reconcile_on_startup()
         asyncio.create_task(_reap_idle_sessions_loop())
         await mcp.run_stdio_async()
 
