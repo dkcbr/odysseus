@@ -81,3 +81,20 @@ reportlab
 # directly (ydotool has no working scroll support on this host -- see
 # scroll()'s own docstring for the full history).
 evdev
+
+# Real, added 2026-08-23: scriptable VNC control for desktop_sandbox_mcp.py
+# (screenshot/mouse/keyboard against the isolated desktop-sandbox container,
+# part of closing a real Bytebot-inspired capability gap -- full desktop
+# isolation, not just browser/host-shared control). MIT licensed, genuinely
+# lightweight -- not staged in requirements-optional.txt, unlike this
+# codebase's other optional deps, since none of the same licensing/weight
+# concerns apply here. Used via its own CLI (vncdo), spawned as a real,
+# separate subprocess -- NOT via vncdotool's own Python API imported
+# directly into this process. Confirmed directly: importing the API (which
+# manages its own internal Twisted reactor thread) into a FastMCP async
+# server hangs the whole server completely, even for tool calls unrelated
+# to any VNC operation -- a known, real category of Twisted/asyncio
+# incompatibility when mixed in one process. Running vncdo as a separate
+# subprocess sidesteps this entirely, since Twisted's reactor then lives in
+# its own, separate process, never touching this process's asyncio loop.
+vncdotool
