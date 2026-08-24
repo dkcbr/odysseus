@@ -122,6 +122,30 @@ async def wait_for_vnc_ready(name: str) -> None:
         f"{VNC_READY_TIMEOUT_SECONDS}s (last error: {last_error})")
 
 
+async def list_running_task_containers() -> list[str]:
+    """Real, direct query of every currently-running desktop-task-*
+    container name, via the same restricted socket-proxy as every other
+    operation in this module. Used for startup reconciliation -- see
+    desktop_sandbox_sessions.py -- to compare "what's actually running"
+    against "what the persisted registry believes exists"."""
+    status, body = await asyncio.to_thread(
+        _sync_request, "GET", "/containers/json")
+    if status != 200:
+        raise ContainerLifecycleError(
+            f"Real container list failed (HTTP {status}): "
+            f"{body.decode('utf-8', errors='replace')}")
+    containers = json.loads(body)
+    names = []
+    for c in containers:
+        for raw_name in c.get("Names", []):
+            # Real, Docker's own convention: names come back with a
+            # leading "/" (e.g. "/desktop-task-abc123").
+            clean = raw_name.lstrip("/")
+            if clean.startswith("desktop-task-"):
+                names.append(clean)
+    return names
+
+
 async def destroy_task_container(name: str) -> None:
     """Real, unconditional teardown -- force-removes regardless of the
     container's current state, and never raises on failure (a task's
