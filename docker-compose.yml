@@ -274,6 +274,12 @@ services:
     image: accetto/ubuntu-vnc-xfce-firefox-g3
     ports:
       - "127.0.0.1:6081:6901"
+      # Real, added 2026-08-23: the raw VNC port (5901), separate from
+      # noVNC's websocket port (6901) above. vncdotool (the real client
+      # library used for actual agent control -- screenshots, mouse,
+      # keyboard) speaks the raw RFB/VNC protocol directly, not
+      # websockets, so it needs this port specifically, not 6901.
+      - "127.0.0.1:5901:5901"
     environment:
       - VNC_PW=${DESKTOP_SANDBOX_VNC_PW:-changeme}
     restart: unless-stopped
