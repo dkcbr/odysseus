@@ -42,6 +42,39 @@ SESSION_RETRY_SECONDS = 5
 # server-side) rather than a general-purpose backoff library.
 RETRY_BACKOFF_SECONDS = {1: 2, 2: 5, 3: 10, 4: 20}
 
+# Real, added 2026-08-26: per-(server, tool) cooldown, kept entirely
+# in-memory in this one worker process -- deliberately NOT
+# supervisor_state.json, confirmed directly that file is already, really
+# owned by a separate process-supervision subsystem (tracks per-agent
+# alive/restart_count/locked_until, not tool failures at all) -- adding
+# an unrelated "tool_failures" key to it risked a real, genuine conflict
+# with whatever process legitimately writes it. Keyed by (server, tool),
+# not tool name alone, since two different, real MCP servers could
+# expose a tool with the same name but unrelated behavior.
+#
+# Real, honest tradeoff worth naming: this is a genuinely coarser
+# safeguard than the per-task backoff above -- a single hard failure
+# blocks ALL tasks using that (server, tool) pair for the cooldown
+# window, including unrelated, would-have-succeeded ones. Chosen
+# anyway because a tool/server that's genuinely broken shouldn't get
+# hammered by every task that happens to reach for it while it's down.
+TOOL_COOLDOWN_SECONDS = 30
+_tool_failures: dict[tuple[str, str], float] = {}
+
+
+def _record_tool_failure(server: str, tool: str) -> None:
+    _tool_failures[(server, tool)] = time.time()
+
+
+def _tool_on_cooldown(server: str, tool: str) -> float | None:
+    """Returns the real, remaining cooldown in seconds if this (server,
+    tool) pair recently failed, or None if it's clear to use."""
+    ts = _tool_failures.get((server, tool))
+    if ts is None:
+        return None
+    remaining = TOOL_COOLDOWN_SECONDS - (time.time() - ts)
+    return remaining if remaining > 0 else None
+
 
 def run_agent(agent_name: str = DEFAULT_AGENT_NAME):
     print(f"[agent_worker] Starting as '{agent_name}', polling every {POLL_INTERVAL_SECONDS}s...")
@@ -98,6 +131,20 @@ def run_agent(agent_name: str = DEFAULT_AGENT_NAME):
                           f"backing off {delay}s before re-attempting.")
                     time.sleep(delay)
 
+                # Real, added 2026-08-26: skip execution entirely if this
+                # (server, tool) pair recently hard-failed -- see
+                # TOOL_COOLDOWN_SECONDS's own comment for the full, real
+                # reasoning and honest tradeoff.
+                cooldown_remaining = _tool_on_cooldown(server, tool)
+                if cooldown_remaining is not None:
+                    dash.fail_task(task["id"], {
+                        "error": f"Tool '{tool}' on server '{server}' is on cooldown "
+                                 f"({cooldown_remaining:.0f}s remaining) due to a recent, real failure."
+                    })
+                    print(f"[agent_worker] Task {task['id']} skipped -- {server}.{tool} "
+                          f"on cooldown ({cooldown_remaining:.0f}s remaining).")
+                    continue
+
                 print(f"[agent_worker] Executing task {task['id']}: {server}.{tool}({arguments})")
                 try:
                     result = dash.call_tool(server, tool, arguments, agent=agent_name)
@@ -105,6 +152,7 @@ def run_agent(agent_name: str = DEFAULT_AGENT_NAME):
                         # Enforcement blocked it -- record as a failure,
                         # not a crash, since this is an expected outcome.
                         dash.fail_task(task["id"], result)
+                        _record_tool_failure(server, tool)
                         print(f"[agent_worker] Task {task['id']} blocked by capability enforcement.")
                     elif result.get("exit_code", 0) != 0:
                         # The tool itself reported failure (non-zero exit
@@ -114,12 +162,14 @@ def run_agent(agent_name: str = DEFAULT_AGENT_NAME):
                         # non-blocked result was marked "success" even when
                         # exit_code was 1.
                         dash.fail_task(task["id"], result)
+                        _record_tool_failure(server, tool)
                         print(f"[agent_worker] Task {task['id']} failed (exit_code={result.get('exit_code')}).")
                     else:
                         dash.complete_task(task["id"], result)
                         print(f"[agent_worker] Task {task['id']} completed.")
                 except Exception as e:
                     dash.fail_task(task["id"], {"error": str(e)})
+                    _record_tool_failure(server, tool)
                     print(f"[agent_worker] Task {task['id']} failed: {e}")
 
         except Exception as e:
