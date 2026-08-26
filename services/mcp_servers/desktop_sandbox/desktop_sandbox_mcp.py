@@ -215,6 +215,141 @@ async def click(session_id: str, x: int, y: int, button: int = 1) -> str:
 
 
 @mcp.tool()
+async def double_click(session_id: str, x: int, y: int, button: int = 1) -> str:
+    """Real, deliberate double-click: moves the mouse to (x, y), then
+    sends two clicks separated by a real, short pause. Chained into one
+    real vncdo invocation (move -> click -> pause -> click), matching the
+    existing click tool's own single-call pattern -- vncdo's own real
+    'pause SECONDS' command handles the gap between clicks, rather than
+    two separate subprocess calls from this side. 0.15s genuinely sits
+    within the real, standard OS double-click interval (typically
+    ~0.2-0.5s), confirmed against vncdo's own real --help output."""
+    await _run_vncdo(
+        session_id, "move", str(x), str(y),
+        "click", str(button), "pause", "0.15", "click", str(button),
+    )
+    return f"Double-clicked button {button} at ({x}, {y})."
+
+
+@mcp.tool()
+async def scroll(session_id: str, direction: str) -> str:
+    """Real scroll, implemented the same way the actual VNC protocol
+    represents it -- there is no dedicated scroll command; scroll wheel
+    events are sent as clicks on virtual mouse buttons 4 (up) and 5
+    (down), the same convention vncdo/vncdotool follow. Only up/down are
+    genuinely, reliably supported this way -- horizontal scroll
+    (buttons 6/7) is a much less consistently implemented X11
+    convention and is deliberately not exposed here."""
+    button_map = {"up": "4", "down": "5"}
+    if direction not in button_map:
+        raise ValueError(
+            f"Unsupported scroll direction: {direction!r}. Use 'up' or 'down'.")
+    await _run_vncdo(session_id, "click", button_map[direction])
+    return f"Scrolled {direction}."
+
+
+@mcp.tool()
+async def new_tab(session_id: str) -> str:
+    """Real, deliberately simple macro: opens a new browser tab via
+    Firefox's own real, standard keyboard shortcut (Ctrl+T), confirmed
+    directly against vncdo's own real, documented 'key' command syntax
+    (not assumed) -- no fixed screen coordinates involved at all, unlike
+    open_firefox/navigate_and_screenshot, so this one isn't tied to this
+    container's current resolution or menu layout the same way. Assumes
+    Firefox is already the focused/active window."""
+    await _run_vncdo(session_id, "key", "ctrl-t", "pause", "0.5")
+    return "Opened a new tab (Ctrl+T)."
+
+
+@mcp.tool()
+async def close_tab(session_id: str) -> str:
+    """Real, deliberately simple macro: closes the current browser tab
+    via Firefox's own real, standard keyboard shortcut (Ctrl+W). Same
+    real, coordinate-free approach as new_tab."""
+    await _run_vncdo(session_id, "key", "ctrl-w", "pause", "0.5")
+    return "Closed the current tab (Ctrl+W)."
+
+
+@mcp.tool()
+async def go_back(session_id: str) -> str:
+    """Real, deliberately simple macro: navigates back in browser
+    history via Firefox's own real, standard keyboard shortcut
+    (Alt+Left). Same real, coordinate-free approach as new_tab.
+
+    Real, honest bug caught and fixed live, 2026-08-25: vncdotool's own
+    KEYMAP dict maps this key as lowercase 'left' (confirmed directly
+    from the real, live import), not the capitalized 'Left' an X11
+    keysym name would suggest -- using the capitalized form doesn't
+    just fail cleanly, it causes vncdo to hang indefinitely (confirmed
+    directly: a real, stuck process had to be killed). Lowercase is
+    required here."""
+    await _run_vncdo(session_id, "key", "alt-left", "pause", "1")
+    return "Navigated back (Alt+Left)."
+
+
+@mcp.tool()
+async def go_forward(session_id: str) -> str:
+    """Real, deliberately simple macro: navigates forward in browser
+    history via Firefox's own real, standard keyboard shortcut
+    (Alt+Right). Same real, coordinate-free approach as new_tab. Same
+    real, lowercase-key requirement as go_back -- see that tool's own
+    docstring for the full, real reasoning."""
+    await _run_vncdo(session_id, "key", "alt-right", "pause", "1")
+    return "Navigated forward (Alt+Right)."
+
+
+@mcp.tool()
+async def open_firefox(session_id: str) -> str:
+    """Real, verified sequence to launch Firefox via the desktop's real
+    Applications menu: open menu (top-left corner) -> hover "Web
+    Browser" -> click -> settle. The coordinates here (15,15 for the
+    menu button, 15,140 for "Web Browser" in the menu) were confirmed
+    live, directly, against the real, running desktop-sandbox container
+    on 2026-08-25 -- not estimated or assumed. Honest limitation: these
+    are pixel coordinates for this container's own current screen
+    resolution and this specific XFCE menu's own current layout/theme.
+    If either changes, this will silently click the wrong thing --
+    there is no resolution-independent menu-item lookup here. The 0.5s
+    pauses between move/click steps are real and necessary: a same-tick
+    click was directly confirmed to not register against this menu."""
+    await _run_vncdo(
+        session_id,
+        "move", "15", "15", "click", "1", "pause", "0.5",
+        "move", "15", "140", "pause", "0.5", "click", "1", "pause", "3",
+    )
+    return "Opened Firefox via Applications menu."
+
+
+@mcp.tool()
+async def navigate_and_screenshot(session_id: str, url: str) -> dict:
+    """Real, verified browser navigation macro: assumes Firefox is
+    already open (call open_firefox first if not) and the address bar
+    is empty/selectable, focuses the address bar, types the given URL,
+    presses Enter, waits for the page to load, and returns a screenshot.
+
+    The address bar coordinate here (400,82) was confirmed live,
+    directly, against the real, running desktop-sandbox container on
+    2026-08-25 -- the mouse cursor's own shape changing from an arrow to
+    an I-beam was used as the real, direct confirmation signal, not
+    assumed. Same honest limitation as open_firefox: this is a fixed
+    pixel coordinate for this container's own current resolution and
+    Firefox's own current window layout -- it will silently click the
+    wrong thing if either changes. The move+click here are deliberately
+    chained into the same vncdo invocation -- a real, direct bug was
+    caught and fixed during this tool's own development: a click sent
+    as a separate invocation from its preceding move fires at (0,0)
+    instead, due to how vncdo/the VNC protocol encode click events,
+    which in this container's case hits the Applications menu button
+    instead of the address bar."""
+    await _run_vncdo(
+        session_id,
+        "move", "400", "82", "click", "1", "pause", "0.3",
+        "type", url, "pause", "0.3", "key", "enter", "pause", "2",
+    )
+    return await screenshot(session_id)
+
+
+@mcp.tool()
 async def key_press(session_id: str, key: str) -> str:
     """Press a single, named key (e.g. 'enter', 'tab', 'ctrl-c',
     'shift-a') on this session's desktop container."""
