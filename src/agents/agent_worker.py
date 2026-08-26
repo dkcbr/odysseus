@@ -26,6 +26,22 @@ DEFAULT_AGENT_NAME = "browser_agent"
 POLL_INTERVAL_SECONDS = 2
 SESSION_RETRY_SECONDS = 5
 
+# Real, added 2026-08-26: backoff delay for tasks that have already
+# failed at least once (retry_count > 0). Directly motivated by a real,
+# actual incident earlier tonight: a real, live Odysseus session asked
+# "What's the price of SPCX?" and the model repeatedly reached for the
+# wrong tool, retrying variations of the same failing approach across
+# several turns. Confirmed directly (not assumed) that the real,
+# existing server-side retry mechanism (routes/tasks.py's
+# fail_task_db_native) already re-queues a failed task as "pending"
+# immediately, with no delay -- combined with this worker's own 2s poll
+# interval, a failing task gets retried almost instantly, with no real
+# gap for the model to reconsider its approach. This is a small,
+# deterministic backoff, not exponential/adaptive -- proportionate to
+# the real, small number of retries (max_retries defaults to 3
+# server-side) rather than a general-purpose backoff library.
+RETRY_BACKOFF_SECONDS = {1: 2, 2: 5, 3: 10, 4: 20}
+
 
 def run_agent(agent_name: str = DEFAULT_AGENT_NAME):
     print(f"[agent_worker] Starting as '{agent_name}', polling every {POLL_INTERVAL_SECONDS}s...")
@@ -68,6 +84,19 @@ def run_agent(agent_name: str = DEFAULT_AGENT_NAME):
                 server = task["server"]
                 tool = task["tool"]
                 arguments = task["arguments"]
+
+                # Real, added 2026-08-26: back off before re-attempting a
+                # task that's already failed at least once -- see
+                # RETRY_BACKOFF_SECONDS's own comment for the real, full
+                # reasoning. A fresh task (retry_count == 0) is
+                # unaffected -- this only slows down repeats of an
+                # already-failing plan, not first attempts.
+                retry_count = task.get("retry_count", 0)
+                if retry_count > 0:
+                    delay = RETRY_BACKOFF_SECONDS.get(retry_count, max(RETRY_BACKOFF_SECONDS.values()))
+                    print(f"[agent_worker] Task {task['id']} is a retry (attempt {retry_count}); "
+                          f"backing off {delay}s before re-attempting.")
+                    time.sleep(delay)
 
                 print(f"[agent_worker] Executing task {task['id']}: {server}.{tool}({arguments})")
                 try:
