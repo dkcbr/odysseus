@@ -63,6 +63,7 @@ import asyncio
 import base64
 import hashlib
 import os
+import struct
 import time
 import uuid
 
@@ -142,16 +143,48 @@ async def _get_or_create_session(session_id: str) -> dict:
     return session
 
 
+# Real, added 2026-08-26: robustness fix, directly justified by a real,
+# live incident tonight -- go_back's original implementation used an
+# invalid vncdo key name (capitalized 'Left' instead of the correct,
+# lowercase 'left'), and confirmed directly that this doesn't fail
+# cleanly, it hangs vncdo indefinitely. Before this fix, _run_vncdo had
+# no timeout at all, meaning any future bad key name, subprocess bug,
+# or genuinely stuck VNC connection would hang this shared function --
+# used by every real tool in this file -- forever, with no recovery.
+VNCDO_TIMEOUT_SECONDS = 15
+
+
 async def _run_vncdo(session_id: str, *args: str) -> str:
     """Real, direct subprocess call to vncdo against this session's own,
     dedicated container -- see this module's own docstring for why this
-    is a subprocess, not a Python API import."""
+    is a subprocess, not a Python API import.
+
+    Real, added 2026-08-26: wrapped in a real, explicit timeout (see
+    VNCDO_TIMEOUT_SECONDS's own comment for the exact, real incident
+    that justified this). 15s comfortably covers every real vncdo
+    sequence used by this file's own tools today (the longest,
+    open_firefox, totals ~4s of real pause time) while still catching
+    a genuine hang quickly rather than tying up this session
+    indefinitely."""
     session = await _get_or_create_session(session_id)
     proc = await asyncio.create_subprocess_exec(
         "vncdo", "-s", f"{session['name']}::5901", "-p", session["vnc_password"], *args,
         stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
     )
-    stdout, stderr = await proc.communicate()
+    try:
+        stdout, stderr = await asyncio.wait_for(
+            proc.communicate(), timeout=VNCDO_TIMEOUT_SECONDS)
+    except asyncio.TimeoutError:
+        # Real, deliberate: kill the real, stuck subprocess rather than
+        # leave it running in the background after we give up on it --
+        # confirmed directly tonight that a hung vncdo process doesn't
+        # exit on its own.
+        proc.kill()
+        await proc.wait()
+        raise RuntimeError(
+            f"vncdo timed out after {VNCDO_TIMEOUT_SECONDS}s "
+            f"(args: {args!r}) -- likely an invalid key/argument causing "
+            f"a real, known hang, not a slow but working command.")
     if proc.returncode != 0:
         raise RuntimeError(
             f"vncdo failed (exit {proc.returncode}): "
@@ -193,6 +226,49 @@ async def screenshot(session_id: str) -> dict:
         data = base64.b64encode(f.read()).decode("ascii")
     os.remove(path)
     return {"image_base64": data, "mime_type": "image/png"}
+
+
+# Real, added 2026-08-26: the real, expected resolution every fixed
+# pixel coordinate in this file (open_firefox, navigate_and_screenshot)
+# was confirmed against, live, on 2026-08-25. Not a guess -- read
+# directly from a real screenshot's own PNG header during that
+# session's development.
+EXPECTED_WIDTH = 1360
+EXPECTED_HEIGHT = 768
+
+
+def _png_dimensions(path: str) -> tuple[int, int]:
+    """Real, direct read of a PNG's own width/height from its IHDR
+    chunk (bytes 16-24), rather than pulling in an imaging library for
+    a single, simple check."""
+    with open(path, "rb") as f:
+        header = f.read(24)
+    width, height = struct.unpack(">II", header[16:24])
+    return width, height
+
+
+async def _verify_expected_resolution(session_id: str) -> None:
+    """Real, added 2026-08-26: robustness check, directly motivated by
+    an honest limitation flagged in open_firefox/navigate_and_screenshot's
+    own docstrings since they were first written -- both use fixed pixel
+    coordinates that silently click the wrong thing if the container's
+    real screen resolution ever changes from what was confirmed on
+    2026-08-25. This raises a real, clear, early error instead of a
+    silent, wrong click when that assumption no longer holds."""
+    path = f"/tmp/desktop_sandbox_rescheck_{uuid.uuid4().hex}.png"
+    await _run_vncdo(session_id, "capture", path)
+    try:
+        width, height = _png_dimensions(path)
+    finally:
+        os.remove(path)
+    if (width, height) != (EXPECTED_WIDTH, EXPECTED_HEIGHT):
+        raise RuntimeError(
+            f"Real resolution mismatch: this session's desktop is "
+            f"{width}x{height}, but open_firefox/navigate_and_screenshot's "
+            f"fixed pixel coordinates were confirmed against "
+            f"{EXPECTED_WIDTH}x{EXPECTED_HEIGHT}. Proceeding would likely "
+            f"click the wrong thing -- refusing rather than doing that "
+            f"silently.")
 
 
 @mcp.tool()
@@ -311,7 +387,13 @@ async def open_firefox(session_id: str) -> str:
     If either changes, this will silently click the wrong thing --
     there is no resolution-independent menu-item lookup here. The 0.5s
     pauses between move/click steps are real and necessary: a same-tick
-    click was directly confirmed to not register against this menu."""
+    click was directly confirmed to not register against this menu.
+
+    Real, added 2026-08-26: now verifies the real, current screen
+    resolution matches what these coordinates were confirmed against,
+    before attempting the fixed-coordinate clicks -- see
+    _verify_expected_resolution's own docstring for why."""
+    await _verify_expected_resolution(session_id)
     await _run_vncdo(
         session_id,
         "move", "15", "15", "click", "1", "pause", "0.5",
@@ -340,7 +422,12 @@ async def navigate_and_screenshot(session_id: str, url: str) -> dict:
     as a separate invocation from its preceding move fires at (0,0)
     instead, due to how vncdo/the VNC protocol encode click events,
     which in this container's case hits the Applications menu button
-    instead of the address bar."""
+    instead of the address bar.
+
+    Real, added 2026-08-26: now verifies the real, current screen
+    resolution before attempting the fixed-coordinate click -- same
+    real reasoning as open_firefox's own equivalent check."""
+    await _verify_expected_resolution(session_id)
     await _run_vncdo(
         session_id,
         "move", "400", "82", "click", "1", "pause", "0.3",
