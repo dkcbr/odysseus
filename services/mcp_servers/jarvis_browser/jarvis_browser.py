@@ -9,7 +9,24 @@ conflicts when called from inside an async server context).
 import os
 import shutil
 
-from playwright.async_api import async_playwright
+from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeoutError
+
+# Real, added 2026-08-26: explicit timeout for any Playwright operation
+# that can genuinely block waiting for a page/element (click, type,
+# goto, search) -- confirmed directly, live, that Playwright's own
+# default timeout for these is 30 seconds (its own documented,
+# standard default), but the real, separate host-side supervisor
+# (agent_supervisor.py) considers a worker "stale" and force-restarts
+# it after only 10 seconds without a heartbeat (STALE_AFTER_SECONDS in
+# routes/tasks.py). Since a blocking Playwright call occupies the
+# worker's single event loop for its whole duration (no heartbeat can
+# be sent until it returns), Playwright's real 30s default reliably
+# loses that race against the supervisor's real 10s patience --
+# confirmed live, watching the supervisor restart the worker mid-call,
+# orphaning the task at status=running permanently. This isn't an
+# infinite hang; it's a real, bounded wait that's simply longer than
+# this specific system tolerates. Kept safely under 10s.
+REAL_ACTION_TIMEOUT_MS = 8000
 
 
 class JarvisBrowser:
@@ -58,22 +75,41 @@ class JarvisBrowser:
 
     async def open(self, url: str) -> str:
         await self._ensure_started()
-        await self._page.goto(url)
+        try:
+            await self._page.goto(url, timeout=REAL_ACTION_TIMEOUT_MS)
+        except PlaywrightTimeoutError:
+            raise RuntimeError(
+                f"Timed out navigating to {url} after {REAL_ACTION_TIMEOUT_MS}ms "
+                f"(a real, bounded failure, not a hang -- see REAL_ACTION_TIMEOUT_MS's own comment).")
         return f"Opened {url}"
 
     async def search(self, query: str) -> str:
         await self._ensure_started()
-        await self._page.goto(f"https://www.google.com/search?q={query}")
+        try:
+            await self._page.goto(f"https://www.google.com/search?q={query}", timeout=REAL_ACTION_TIMEOUT_MS)
+        except PlaywrightTimeoutError:
+            raise RuntimeError(
+                f"Timed out searching for '{query}' after {REAL_ACTION_TIMEOUT_MS}ms.")
         return f"Searched for {query}"
 
     async def click(self, selector: str) -> str:
         await self._ensure_started()
-        await self._page.click(selector)
+        try:
+            await self._page.click(selector, timeout=REAL_ACTION_TIMEOUT_MS)
+        except PlaywrightTimeoutError:
+            raise RuntimeError(
+                f"Timed out waiting to click '{selector}' after {REAL_ACTION_TIMEOUT_MS}ms "
+                f"-- the selector likely never appeared/became clickable.")
         return f"Clicked {selector}"
 
     async def type(self, selector: str, text: str) -> str:
         await self._ensure_started()
-        await self._page.fill(selector, text)
+        try:
+            await self._page.fill(selector, text, timeout=REAL_ACTION_TIMEOUT_MS)
+        except PlaywrightTimeoutError:
+            raise RuntimeError(
+                f"Timed out waiting to type into '{selector}' after {REAL_ACTION_TIMEOUT_MS}ms "
+                f"-- the selector likely never appeared.")
         return f"Typed '{text}' into {selector}"
 
     async def run_js(self, script: str) -> str:
