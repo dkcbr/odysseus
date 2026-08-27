@@ -69,6 +69,13 @@ class TaskCreate(BaseModel):
     priority: int = 5
     max_retries: int = 3
     schedule_at: float | None = None
+    # Real, added 2026-08-26: optional, real grouping key for a
+    # multi-step workflow (e.g. several related tasks created by the
+    # same real plan/agent run). Purely additive -- omitting it (the
+    # real, existing default) behaves exactly as before. See
+    # agent_worker.py's own real workflow-budget logic for how this
+    # gets used.
+    workflow_id: str | None = None
 
 
 class TaskResult(BaseModel):
@@ -91,18 +98,20 @@ def create_task_db_native(body: TaskCreate) -> dict:
         "result": None,
         "created_at": now,
         "updated_at": now,
+        "workflow_id": body.workflow_id,
     }
     conn = sqlite3.connect(DB_PATH)
     try:
         conn.execute(
             """INSERT INTO tasks
                (id, created_at, updated_at, agent, server, tool, arguments,
-                priority, retry_count, max_retries, schedule_at, status, result)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                priority, retry_count, max_retries, schedule_at, status, result,
+                workflow_id)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (task["id"], task["created_at"], task["updated_at"], task["agent"],
              task["server"], task["tool"], json.dumps(task["arguments"]),
              task["priority"], task["retry_count"], task["max_retries"],
-             task["schedule_at"], task["status"], None),
+             task["schedule_at"], task["status"], None, task["workflow_id"]),
         )
         conn.commit()
     finally:

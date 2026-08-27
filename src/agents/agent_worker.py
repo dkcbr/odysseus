@@ -104,6 +104,38 @@ def _tool_on_cooldown(server: str, tool: str) -> float | None:
     return remaining if remaining > 0 else None
 
 
+# Real, added 2026-08-26: per-workflow retry budget. Directly closes
+# the real, scoped-out gap from earlier tonight's cooldown work -- the
+# (server, tool) cooldown above protects against hammering ONE failing
+# tool/server, but a real, multi-step plan that keeps failing by
+# reaching for DIFFERENT tools each time (the exact, real SPCX pattern:
+# extract, then search, then research, all different tools) would slip
+# past per-tool cooldown entirely, since no single (server, tool) pair
+# repeats often enough to trigger it. This tracks total, real failures
+# across an entire workflow_id, independent of which specific tool
+# each one used.
+#
+# Real, honest design choice: unlike the tool cooldown, this does NOT
+# reset on an individual task's success -- a single successful step
+# within an otherwise-struggling, multi-step workflow doesn't mean the
+# whole plan has recovered, unlike a single tool/server which either
+# works or doesn't. Once a workflow's budget is exhausted, it stays
+# exhausted; a fresh workflow_id is the real, intended way to try again.
+WORKFLOW_FAILURE_BUDGET = 5
+_workflow_failures: dict[str, int] = {}
+
+
+def _record_workflow_failure(workflow_id: str) -> None:
+    _workflow_failures[workflow_id] = _workflow_failures.get(workflow_id, 0) + 1
+
+
+def _workflow_budget_exhausted(workflow_id: str) -> int | None:
+    """Returns the real, current failure count if this workflow has
+    exhausted its budget, or None if it still has real room left."""
+    count = _workflow_failures.get(workflow_id, 0)
+    return count if count >= WORKFLOW_FAILURE_BUDGET else None
+
+
 def run_agent(agent_name: str = DEFAULT_AGENT_NAME):
     print(f"[agent_worker] Starting as '{agent_name}', polling every {POLL_INTERVAL_SECONDS}s...")
 
@@ -145,6 +177,26 @@ def run_agent(agent_name: str = DEFAULT_AGENT_NAME):
                 server = task["server"]
                 tool = task["tool"]
                 arguments = task["arguments"]
+                workflow_id = task.get("workflow_id")
+
+                # Real, added 2026-08-26: refuse to execute any further
+                # task belonging to a workflow whose real failure budget
+                # is already exhausted -- see WORKFLOW_FAILURE_BUDGET's
+                # own comment for the full, real reasoning. Tasks with no
+                # workflow_id (the real, existing default for anything
+                # created before this feature, or simply not part of a
+                # tracked workflow) are entirely unaffected.
+                if workflow_id is not None:
+                    exhausted_count = _workflow_budget_exhausted(workflow_id)
+                    if exhausted_count is not None:
+                        dash.fail_task(task["id"], {
+                            "error": f"Workflow '{workflow_id}' has exhausted its real "
+                                     f"failure budget ({exhausted_count}/{WORKFLOW_FAILURE_BUDGET} "
+                                     f"failures) -- refusing to execute further tasks in this workflow."
+                        })
+                        print(f"[agent_worker] Task {task['id']} skipped -- workflow "
+                              f"'{workflow_id}' budget exhausted ({exhausted_count}/{WORKFLOW_FAILURE_BUDGET}).")
+                        continue
 
                 # Real, fixed 2026-08-26: /pending itself already rejects
                 # capability violations server-side (routes/tasks.py's own
@@ -161,6 +213,20 @@ def run_agent(agent_name: str = DEFAULT_AGENT_NAME):
                 # here (not calling fail_task again) avoids the redundant
                 # call_tool + guaranteed-409 fail_task entirely.
                 if task.get("status") == "failed":
+                    # Real, fixed 2026-08-26 (later same session): this
+                    # real, genuine capability rejection wasn't counting
+                    # toward its workflow's failure budget at all --
+                    # confirmed directly, live, via a debug print showing
+                    # an empty _workflow_failures dict after several real,
+                    # capability-rejected tasks in the same workflow. This
+                    # early-skip runs before the three real failure
+                    # branches below (where _record_workflow_failure
+                    # normally gets called), so a server-side rejection
+                    # never reached that code at all. A real, genuine
+                    # failure is a real, genuine failure regardless of
+                    # which of these two, real rejection paths it took.
+                    if workflow_id is not None:
+                        _record_workflow_failure(workflow_id)
                     print(f"[agent_worker] Task {task['id']} already rejected "
                           f"server-side (capability enforcement); skipping.")
                     continue
@@ -211,6 +277,8 @@ def run_agent(agent_name: str = DEFAULT_AGENT_NAME):
                         # correct regardless of whether reporting back to
                         # Odysseus itself succeeds.
                         _record_tool_failure(server, tool)
+                        if workflow_id is not None:
+                            _record_workflow_failure(workflow_id)
                         dash.fail_task(task["id"], result)
                         print(f"[agent_worker] Task {task['id']} blocked by capability enforcement.")
                     elif result.get("exit_code", 0) != 0:
@@ -221,6 +289,8 @@ def run_agent(agent_name: str = DEFAULT_AGENT_NAME):
                         # non-blocked result was marked "success" even when
                         # exit_code was 1.
                         _record_tool_failure(server, tool)
+                        if workflow_id is not None:
+                            _record_workflow_failure(workflow_id)
                         dash.fail_task(task["id"], result)
                         print(f"[agent_worker] Task {task['id']} failed (exit_code={result.get('exit_code')}).")
                     else:
@@ -229,6 +299,8 @@ def run_agent(agent_name: str = DEFAULT_AGENT_NAME):
                         print(f"[agent_worker] Task {task['id']} completed.")
                 except Exception as e:
                     _record_tool_failure(server, tool)
+                    if workflow_id is not None:
+                        _record_workflow_failure(workflow_id)
                     dash.fail_task(task["id"], {"error": str(e)})
                     print(f"[agent_worker] Task {task['id']} failed: {e}")
 
