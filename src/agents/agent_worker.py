@@ -69,8 +69,40 @@ RETRY_BACKOFF_SECONDS = {1: 2, 2: 5, 3: 10, 4: 20}
 ADAPTIVE_COOLDOWN_SCHEDULE = {1: 30, 2: 60, 3: 120, 4: 300}
 ADAPTIVE_COOLDOWN_MAX_SECONDS = 300
 
+# Real, added 2026-08-26 (later same session): time-based decay,
+# extending the adaptive scaling above. Without this, a tool that
+# failed 4 times in a row, then simply wasn't used again for hours,
+# would still be treated as "4 recent failures" -- at the harshest,
+# 300s tier -- the next time anything reaches for it, even though
+# those failures are long, real history by then. A genuine success
+# already resets the count entirely (see _record_tool_success below);
+# this handles the real, different case where a tool just goes quiet
+# for a while, with no success to trigger that reset, but also no
+# further failures to justify staying at the worst tier either.
+#
+# Real, deliberate design: computed lazily, at check/record time, from
+# real elapsed wall-clock time -- not a scheduled background task. One
+# real decay step per full DECAY_INTERVAL_SECONDS elapsed since the
+# last failure, capped at 0 (never goes negative). Matches the same
+# real order of magnitude as the cooldown windows themselves, since a
+# tool that's gone quiet for one full window's worth of time has, in a
+# real sense, already partially recovered.
+DECAY_INTERVAL_SECONDS = 300
+
 # (server, tool) -> {"last_failure": float, "failure_count": int}
 _tool_failures: dict[tuple[str, str], dict] = {}
+
+
+def _decayed_failure_count(entry: dict) -> int:
+    """Real, direct computation of the effective, decayed failure count
+    for a real _tool_failures entry -- see DECAY_INTERVAL_SECONDS's own
+    comment for the full, real reasoning. Does not mutate the stored
+    entry; the raw, real failure_count and last_failure timestamp stay
+    exactly as recorded, this just computes what should effectively
+    count right now."""
+    elapsed = time.time() - entry["last_failure"]
+    decay_steps = int(elapsed // DECAY_INTERVAL_SECONDS)
+    return max(0, entry["failure_count"] - decay_steps)
 
 
 def _record_tool_failure(server: str, tool: str) -> None:
@@ -94,11 +126,19 @@ def _tool_on_cooldown(server: str, tool: str) -> float | None:
     """Returns the real, remaining cooldown in seconds if this (server,
     tool) pair recently failed, or None if it's clear to use. Cooldown
     window scales with the real, cumulative failure count -- see
-    ADAPTIVE_COOLDOWN_SCHEDULE's own comment above."""
+    ADAPTIVE_COOLDOWN_SCHEDULE's own comment above -- after first
+    applying real, time-based decay (see DECAY_INTERVAL_SECONDS's own
+    comment)."""
     entry = _tool_failures.get((server, tool))
     if entry is None:
         return None
-    count = entry["failure_count"]
+    count = _decayed_failure_count(entry)
+    if count <= 0:
+        # Real, fully decayed back to a clean slate -- remove the
+        # stale entry entirely rather than leave a real, dead dict key
+        # around indefinitely.
+        del _tool_failures[(server, tool)]
+        return None
     window = ADAPTIVE_COOLDOWN_SCHEDULE.get(count, ADAPTIVE_COOLDOWN_MAX_SECONDS)
     remaining = window - (time.time() - entry["last_failure"])
     return remaining if remaining > 0 else None
@@ -250,7 +290,13 @@ def run_agent(agent_name: str = DEFAULT_AGENT_NAME):
                 # reasoning and honest tradeoff.
                 cooldown_remaining = _tool_on_cooldown(server, tool)
                 if cooldown_remaining is not None:
-                    fail_count = _tool_failures[(server, tool)]["failure_count"]
+                    # Real, fixed 2026-08-26: use the real, decayed count
+                    # here, not the raw stored one -- otherwise this
+                    # message would show a stale, undecayed number even
+                    # though the actual cooldown window (computed by
+                    # _tool_on_cooldown, just called above) already
+                    # correctly used the decayed value.
+                    fail_count = _decayed_failure_count(_tool_failures[(server, tool)])
                     dash.fail_task(task["id"], {
                         "error": f"Tool '{tool}' on server '{server}' is on cooldown "
                                  f"({cooldown_remaining:.0f}s remaining, {fail_count} recent failures) "
