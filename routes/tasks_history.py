@@ -61,6 +61,21 @@ def init_db() -> None:
                 result TEXT
             )
         """)
+        # Real, honest note: this CREATE TABLE statement was already,
+        # genuinely out of sync with the real, live schema before this
+        # edit -- `name` and `remember_on_success` exist on the real,
+        # live tasks table (confirmed directly via a live .schema query)
+        # but were never added here, meaning a genuinely fresh database
+        # would be missing them. Left that pre-existing gap alone
+        # (out of scope for tonight's workflow_id work) and only adding
+        # workflow_id here via a real, direct ALTER TABLE, matching the
+        # same, established, real precedent already used for those two
+        # columns and for other tables in email_helpers.py -- this
+        # codebase has no centralized migration framework for `tasks`.
+        try:
+            conn.execute("ALTER TABLE tasks ADD COLUMN workflow_id TEXT")
+        except sqlite3.OperationalError:
+            pass  # real, expected: column already exists on every run after the first
         conn.commit()
     finally:
         conn.close()
