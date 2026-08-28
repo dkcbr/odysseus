@@ -1891,6 +1891,30 @@ def _normalize_ody_qwen_text_artifacts(text: str) -> str:
     return fixed
 
 
+def _dedupe_full_text(text: str) -> str:
+    """Detect and remove an exact, immediate self-repeat (the model
+    repeating its own just-generated answer verbatim, with nothing in
+    between) from a complete, accumulated response.
+
+    Real, added 2026-08-28, designed and unit-tested before integration:
+    checks split points from the middle of the text outward (so a
+    full-answer repeat is preferred over a shorter, coincidental phrase
+    match), and -- critically -- keeps the first occurrence PLUS any real,
+    legitimate content that follows the duplicate (e.g. a real trailing
+    note), rather than discarding everything after the detected repeat.
+    Requires a minimum length before checking, to avoid false-positiving
+    on short, legitimately-repeated phrases ("the the cat...").
+    """
+    n = len(text)
+    if n < 40:
+        return text
+    for half in range(n // 2, 19, -1):
+        first, second = text[:half], text[half:half * 2]
+        if first.strip() and first == second:
+            return first + text[half * 2:]
+    return text
+
+
 def _ody_qwen_terminal_tool_summary(tool_event: dict[str, Any]) -> str:
     """Return a deterministic user-facing answer for tools we can render safely."""
     tool_name = _resolved_tool_event_name(tool_event)
@@ -3183,6 +3207,20 @@ async def stream_agent_loop(
     _needs_admin = _detect_admin_intent(messages)
     _last_user = _extract_last_user_message(messages)
     _ody_qwen_finetune_model = (model or "").lower().startswith("odysseus-qwen3")
+    # Real, added 2026-08-28: confirmed live, across multiple independent
+    # real agent trials, that this specific ticker-lookup LoRA sometimes
+    # repeats its own final answer sentence verbatim, immediately, with no
+    # separator. Confirmed this is a single-generation-round quirk (one
+    # real tool call, one real synthesis round each time), and confirmed
+    # via direct, careful reasoning before implementation that a
+    # stream-live-then-fix approach is fundamentally impossible: by the
+    # time enough content has accumulated to detect a duplicate, it has
+    # already been streamed to the user, and already-sent SSE tokens
+    # cannot be un-sent. Deliberately scoped to this model's own real,
+    # current name (not the odysseus-qwen3 prefix above, confirmed that
+    # no longer matches this model following an earlier, separate rename
+    # fix for a different bug).
+    _ody_ticker_model = "ticker" in (model or "").lower()
     if _ody_qwen_finetune_model:
         try:
             temperature = min(float(temperature if temperature is not None else 0.2), 0.2)
@@ -3933,6 +3971,11 @@ async def stream_agent_loop(
     for round_num in range(1, max_rounds + 1):
         round_response = ""
         round_reasoning = ""  # reasoning_content deltas (DeepSeek-thinking, vLLM --reasoning-parser)
+        # Real, added 2026-08-28: holds this round's content for the ticker
+        # LoRA specifically (see _ody_ticker_model's own comment above) --
+        # not yielded live, not added to round_response/full_response until
+        # the round's natural end, where it's deduplicated and flushed once.
+        _dedup_buf = ""
         # Catches untagged chain-of-thought that a model emits as plain
         # content instead of a proper thinking delta or <think> block --
         # buffers only the still-unclassified leading portion of the round
@@ -4184,10 +4227,26 @@ async def stream_agent_loop(
                                 # response.
                                 _safe_text = _reasoning_gate.feed(_delta_text)
                                 _gate_buffered = not _safe_text
-                            round_response += _safe_text
-                            full_response += _safe_text
-                            data["delta"] = _safe_text
-                        if (not _ody_qwen_finetune_model or data.get("thinking")) and not _gate_buffered:
+                            if _ody_ticker_model:
+                                # Real, added 2026-08-28: hold this model's
+                                # content back entirely rather than add to
+                                # round_response/full_response or yield it
+                                # here -- both happen once, together, at the
+                                # round's natural end (after deduplication),
+                                # so the user never sees a duplicate and
+                                # conversation history never records one
+                                # either. See _dedup_buf's own comment above.
+                                _dedup_buf += _safe_text
+                                data["delta"] = _safe_text
+                            else:
+                                round_response += _safe_text
+                                full_response += _safe_text
+                                data["delta"] = _safe_text
+                        # Real, added 2026-08-28: this model's content is
+                        # suppressed here entirely -- see the comment on
+                        # _dedup_buf above -- and flushed once, deduplicated,
+                        # at the round's natural end instead.
+                        if not _ody_ticker_model and (not _ody_qwen_finetune_model or data.get("thinking")) and not _gate_buffered:
                             yield f"data: {json.dumps(data)}\n\n"
                         # Detect text-fence doc streaming. Normal agent prompts
                         # use ```create_document; the doc LoRA streaming path
@@ -4264,10 +4323,28 @@ async def stream_agent_loop(
         # was never certain about, e.g. a long final paragraph with no
         # blank-line boundary -- see ReasoningGate.flush() docstring).
         _gate_tail = _reasoning_gate.flush()
-        if _gate_tail:
+        if _gate_tail and _ody_ticker_model:
+            # Real, added 2026-08-28: this model's content still goes
+            # through the same reasoning gate above -- whatever it was
+            # still holding also needs to join the dedup buffer, not be
+            # added to round_response/yielded directly the normal way.
+            _dedup_buf += _gate_tail
+        elif _gate_tail:
             round_response += _gate_tail
             full_response += _gate_tail
             yield f"data: {json.dumps({'delta': _gate_tail})}\n\n"
+
+        # Real, added 2026-08-28: flush this model's buffered content now,
+        # once, deduplicated -- see _dedup_buf's own comment near its
+        # initialization above for the full design and why full buffering
+        # (rather than live streaming) is the only way to guarantee a
+        # duplicate never reaches the user. Designed and unit-tested before
+        # integration against the real, actual observed failure shape.
+        if _ody_ticker_model and _dedup_buf:
+            _deduped = _dedupe_full_text(_dedup_buf)
+            round_response += _deduped
+            full_response += _deduped
+            yield f"data: {json.dumps({'delta': _deduped})}\n\n"
 
         logger.info(
             "[agent-timing] round_stream_done round=%s elapsed=%.3fs text_chars=%s tool_calls=%s first_event=%s first_token=%s",
