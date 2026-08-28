@@ -2559,6 +2559,54 @@ async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperat
         calls = [_tc_acc[i] for i in sorted(_tc_acc)]
         return f'data: {json.dumps({"type": "tool_calls", "calls": calls})}\n\n'
 
+    # Real, added 2026-08-28: confirmed directly, via a controlled, isolated
+    # comparison the same night, that some providers (confirmed: Ollama's
+    # OpenAI-compat endpoint, for at least one real fine-tuned model) emit a
+    # genuine, correctly-formed <tool_call>{"name": ..., "arguments": ...}
+    # </tool_call> block entirely inside the reasoning/thinking field, never
+    # as a real, structured tool_calls delta -- meaning it was previously
+    # always shown to the user as raw thinking text (or silently lost) and
+    # never actually executed. Only buffer/inspect reasoning when tools were
+    # genuinely offered on this request (the only real condition under which
+    # this can happen) -- for tools=None requests, reasoning still streams
+    # immediately, unchanged, exactly as before.
+    _reasoning_tool_call_re = re.compile(r"<tool_call>\s*(\{.*?\})\s*</tool_call>", re.DOTALL)
+    _reasoning_gate_active = bool(tools)
+    _reasoning_buf = ""
+
+    def _try_extract_tool_call_from_reasoning():
+        """Check the buffered reasoning text for a complete, genuine
+        <tool_call> block. If found, parse it, add it to _tc_acc using the
+        exact same {id, name, arguments} shape real structured tool_calls
+        deltas use (arguments as a JSON-encoded string, matching how the
+        accumulator elsewhere in this function is consumed downstream), and
+        remove the matched text from the buffer. Returns True if a call was
+        extracted, so the caller knows not to also yield this text as
+        visible thinking content.
+        """
+        nonlocal _reasoning_buf
+        _m = _reasoning_tool_call_re.search(_reasoning_buf)
+        if not _m:
+            return False
+        try:
+            _tc_json = json.loads(_m.group(1))
+        except (json.JSONDecodeError, TypeError):
+            return False
+        _tc_name = _tc_json.get("name") if isinstance(_tc_json, dict) else None
+        if not _tc_name:
+            return False
+        _tc_args = _tc_json.get("arguments") if isinstance(_tc_json, dict) else None
+        _tc_args_str = _tc_args if isinstance(_tc_args, str) else json.dumps(_tc_args or {})
+        idx = max(_tc_acc, default=-1) + 1
+        _tc_last_idx[0] = idx
+        _tc_acc[idx] = {
+            "id": f"call_reasoning_{idx}",
+            "name": _tc_name,
+            "arguments": _tc_args_str,
+        }
+        _reasoning_buf = _reasoning_buf[:_m.start()] + _reasoning_buf[_m.end():]
+        return True
+
     def _format_routed_content(parts: List[Tuple[str, bool]]) -> List[str]:
         nonlocal _first_content_sent
         events = []
@@ -2598,6 +2646,9 @@ async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperat
                     if data == "[DONE]":
                         for event in _format_routed_content(_harmony_router.flush()):
                             yield event
+                        if _reasoning_gate_active and _reasoning_buf:
+                            yield _stream_delta_event(_reasoning_buf, thinking=True)
+                            _reasoning_buf = ""
                         tc_event = _emit_tool_calls()
                         if tc_event:
                             yield tc_event
@@ -2675,8 +2726,24 @@ async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperat
                                             if _degenerate:
                                                 yield _degenerate
                                                 return
-                                            yield _stream_delta_event(reasoning, thinking=True)
+                                            if _reasoning_gate_active:
+                                                # Buffer instead of streaming immediately -- see
+                                                # _try_extract_tool_call_from_reasoning's own
+                                                # docstring above for why: once real tokens are
+                                                # sent to the client as visible thinking text,
+                                                # they cannot be un-sent if it later turns out
+                                                # they were actually a tool call.
+                                                _reasoning_buf += reasoning
+                                                _try_extract_tool_call_from_reasoning()
+                                            else:
+                                                yield _stream_delta_event(reasoning, thinking=True)
                                         if content:
+                                            if _reasoning_gate_active and _reasoning_buf:
+                                                # Real content has started arriving, so whatever
+                                                # is left in the buffer was never a tool call --
+                                                # flush it now as genuine thinking, all at once.
+                                                yield _stream_delta_event(_reasoning_buf, thinking=True)
+                                                _reasoning_buf = ""
                                             content = _strip_visible_chat_template_artifacts(content)
                                             if not content:
                                                 continue
@@ -2807,6 +2874,9 @@ async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperat
             # End of stream (no explicit [DONE] received)
             for event in _format_routed_content(_harmony_router.flush()):
                 yield event
+            if _reasoning_gate_active and _reasoning_buf:
+                yield _stream_delta_event(_reasoning_buf, thinking=True)
+                _reasoning_buf = ""
             tc_event = _emit_tool_calls()
             if tc_event:
                 yield tc_event
