@@ -458,6 +458,7 @@ def run_multi_round_suite(endpoint_id: str, model: str, runs: int,
     summary = {
         "timestamp": time.time(),
         "model": model,
+        "scenario_name": scenario.get("name", "?") if scenario else load_scenario(DEFAULT_SCENARIO_FILE).get("name", "?"),
         "endpoint_id": endpoint_id,
         "runs_requested": runs,
         "runs_completed": len(run_records),
@@ -705,13 +706,24 @@ def load_historical_results(results_dir: str = None) -> list:
 
 
 def generate_trend_report(historical_summaries: list, output_path: str) -> None:
-    """Real, added 2026-08-28: renders multiple saved suite results,
-    loaded via load_historical_results(), as a single, self-contained
-    HTML trend report -- clean-rate over time as a real, dependency-free
-    inline SVG line chart, flag-count trends as a simple per-run table,
-    so real regressions or improvements across sessions/nights are
-    visible at a glance rather than requiring someone to manually diff
-    old JSON files by eye.
+    """Real, added 2026-08-28, extended 2026-08-28 with multi-model
+    comparison and a flag-trend chart: renders multiple saved suite
+    results, loaded via load_historical_results(), as a single,
+    self-contained HTML trend report.
+
+    Real, added extension: the original version plotted one clean-rate
+    line regardless of which model produced each run -- if historical
+    data spans more than one model (e.g. comparing the renamed
+    ticker-lookup-lora against a future retrained version, or against
+    the original odysseus-qwen3-tickers-lora before the naming-collision
+    fix), that would silently blend genuinely different models into one
+    misleading average. Now groups by model, one colored line per model
+    with a real legend, so a real regression or improvement in one
+    specific model is visible rather than smoothed away. Also adds a
+    second chart: flag-count trends over time (one line per real flag
+    type seen across all loaded runs), so which specific failure mode is
+    trending up or down is visible directly, not just inferable from the
+    per-run table.
     """
     import html as _html
     import time as _time
@@ -732,6 +744,11 @@ def generate_trend_report(historical_summaries: list, output_path: str) -> None:
             )
         return
 
+    # Real palette, cycled if more models than colors -- kept distinct
+    # from the status colors used elsewhere (green/red/amber) so a
+    # reader never confuses "which model" with "clean vs violated".
+    palette = ["#58A6FF", "#D2A8FF", "#F0883E", "#3FB950", "#FF7B72", "#79C0FF", "#F778BA"]
+
     points = []
     for s in historical_summaries:
         total = s.get("total_turns", 0) or 1
@@ -744,10 +761,16 @@ def generate_trend_report(historical_summaries: list, output_path: str) -> None:
             "flag_counts": s.get("flag_counts", {}),
             "source_file": s.get("_source_file", "?"),
             "model": s.get("model", "?"),
+            "scenario_name": s.get("scenario_name", "?"),
         })
 
-    # Real, dependency-free inline SVG line chart for clean-rate trend.
-    chart_w, chart_h = 800, 220
+    models = sorted({p["model"] for p in points})
+    model_colors = {m: palette[i % len(palette)] for i, m in enumerate(models)}
+
+    all_flag_names = sorted({k for p in points for k in p["flag_counts"]})
+    flag_colors = {name: palette[i % len(palette)] for i, name in enumerate(all_flag_names)}
+
+    chart_w, chart_h = 800, 240
     pad_l, pad_r, pad_t, pad_b = 40, 20, 20, 30
     plot_w = chart_w - pad_l - pad_r
     plot_h = chart_h - pad_t - pad_b
@@ -758,45 +781,93 @@ def generate_trend_report(historical_summaries: list, output_path: str) -> None:
             return pad_l + plot_w / 2
         return pad_l + (plot_w * i / (n - 1))
 
-    def y_for(pct):
-        return pad_t + plot_h * (1 - pct / 100)
+    def y_for_pct(pct, max_val=100):
+        return pad_t + plot_h * (1 - pct / max_val) if max_val else pad_t + plot_h
 
-    poly_points = " ".join(f"{x_for(i):.1f},{y_for(p['clean_pct']):.1f}" for i, p in enumerate(points))
-    dots = "".join(
-        f'<circle cx="{x_for(i):.1f}" cy="{y_for(p["clean_pct"]):.1f}" r="4" fill="#58A6FF">'
-        f'<title>{esc(p["label"])}: {p["clean_pct"]}% clean</title></circle>'
-        for i, p in enumerate(points)
-    )
-    x_labels = "".join(
-        f'<text x="{x_for(i):.1f}" y="{chart_h - 8}" font-size="10" fill="#8B949E" '
-        f'text-anchor="middle" font-family="monospace">{esc(p["label"])}</text>'
-        for i, p in enumerate(points)
-        if n <= 12 or i % max(1, n // 12) == 0
-    )
-    gridlines = "".join(
-        f'<line x1="{pad_l}" y1="{y_for(gy):.1f}" x2="{chart_w - pad_r}" y2="{y_for(gy):.1f}" '
-        f'stroke="#30363D" stroke-width="1"/>'
-        f'<text x="{pad_l - 6}" y="{y_for(gy) + 3:.1f}" font-size="10" fill="#8B949E" '
-        f'text-anchor="end" font-family="monospace">{gy}%</text>'
-        for gy in (0, 25, 50, 75, 100)
-    )
+    def gridlines_pct(max_val, unit=""):
+        steps = (0, max_val * 0.25, max_val * 0.5, max_val * 0.75, max_val) if max_val else (0,)
+        out = ""
+        for gy in steps:
+            y = y_for_pct(gy, max_val or 1)
+            out += (
+                f'<line x1="{pad_l}" y1="{y:.1f}" x2="{chart_w - pad_r}" y2="{y:.1f}" '
+                f'stroke="#30363D" stroke-width="1"/>'
+                f'<text x="{pad_l - 6}" y="{y + 3:.1f}" font-size="10" fill="#8B949E" '
+                f'text-anchor="end" font-family="monospace">{gy:.0f}{unit}</text>'
+            )
+        return out
 
-    svg = (
+    def x_labels():
+        return "".join(
+            f'<text x="{x_for(i):.1f}" y="{chart_h - 8}" font-size="10" fill="#8B949E" '
+            f'text-anchor="middle" font-family="monospace">{esc(p["label"])}</text>'
+            for i, p in enumerate(points)
+            if n <= 12 or i % max(1, n // 12) == 0
+        )
+
+    # --- Chart 1: clean-rate over time, one line per model ---
+    clean_lines = ""
+    clean_legend = ""
+    for m in models:
+        model_points = [(i, p) for i, p in enumerate(points) if p["model"] == m]
+        if not model_points:
+            continue
+        color = model_colors[m]
+        poly = " ".join(f"{x_for(i):.1f},{y_for_pct(p['clean_pct']):.1f}" for i, p in model_points)
+        dots = "".join(
+            f'<circle cx="{x_for(i):.1f}" cy="{y_for_pct(p["clean_pct"]):.1f}" r="4" fill="{color}">'
+            f'<title>{esc(m)} @ {esc(p["label"])}: {p["clean_pct"]}% clean</title></circle>'
+            for i, p in model_points
+        )
+        clean_lines += f'<polyline points="{poly}" fill="none" stroke="{color}" stroke-width="2"/>{dots}'
+        clean_legend += (
+            f'<span class="legend-item"><span class="legend-dot" style="background:{color}"></span>'
+            f'<span class="mono">{esc(m)}</span></span>'
+        )
+
+    clean_svg = (
         f'<svg viewBox="0 0 {chart_w} {chart_h}" width="100%" style="max-width:800px">'
-        f'{gridlines}'
-        f'<polyline points="{poly_points}" fill="none" stroke="#3FB950" stroke-width="2"/>'
-        f'{dots}{x_labels}'
+        f'{gridlines_pct(100, "%")}{clean_lines}{x_labels()}'
         f'</svg>'
     )
 
-    # Real per-run table, most recent first.
-    all_flag_names = sorted({k for p in points for k in p["flag_counts"]})
+    # --- Chart 2: flag-count trends over time, one line per flag type ---
+    max_flag_count = max((c for p in points for c in p["flag_counts"].values()), default=0) or 1
+    flag_lines = ""
+    flag_legend = ""
+    for name in all_flag_names:
+        color = flag_colors[name]
+        poly = " ".join(
+            f"{x_for(i):.1f},{y_for_pct(p['flag_counts'].get(name, 0), max_flag_count):.1f}"
+            for i, p in enumerate(points)
+        )
+        dots = "".join(
+            f'<circle cx="{x_for(i):.1f}" cy="{y_for_pct(p["flag_counts"].get(name, 0), max_flag_count):.1f}" '
+            f'r="3" fill="{color}"><title>{esc(name)} @ {esc(p["label"])}: '
+            f'{p["flag_counts"].get(name, 0)}</title></circle>'
+            for i, p in enumerate(points)
+        )
+        flag_lines += f'<polyline points="{poly}" fill="none" stroke="{color}" stroke-width="2"/>{dots}'
+        flag_legend += (
+            f'<span class="legend-item"><span class="legend-dot" style="background:{color}"></span>'
+            f'<span class="mono">{esc(name)}</span></span>'
+        )
+
+    flag_svg = (
+        f'<svg viewBox="0 0 {chart_w} {chart_h}" width="100%" style="max-width:800px">'
+        f'{gridlines_pct(max_flag_count)}{flag_lines}{x_labels()}'
+        f'</svg>'
+    )
+
+    # --- Per-run table, most recent first ---
     header_cells = "".join(f"<th>{esc(name)}</th>" for name in all_flag_names)
     rows = []
     for p in reversed(points):
         flag_cells = "".join(f"<td>{p['flag_counts'].get(name, 0)}</td>" for name in all_flag_names)
         rows.append(
-            f'<tr><td class="mono">{esc(p["label"])}</td><td class="mono">{esc(p["model"])}</td>'
+            f'<tr><td class="mono">{esc(p["label"])}</td>'
+            f'<td class="mono" style="color:{model_colors[p["model"]]}">{esc(p["model"])}</td>'
+            f'<td class="mono dim">{esc(p["scenario_name"])}</td>'
             f'<td>{p["clean_pct"]}%</td><td>{p["total_turns"]}</td>{flag_cells}'
             f'<td class="mono dim">{esc(p["source_file"])}</td></tr>'
         )
@@ -812,6 +883,9 @@ def generate_trend_report(historical_summaries: list, output_path: str) -> None:
   h2 { font-size: 13px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--dim); margin: 0 0 12px; }
   .subtitle { color: var(--dim); font-size: 13px; }
   .chart-card, .table-card { max-width: 900px; margin: 0 auto 24px; background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 20px; }
+  .legend { display: flex; flex-wrap: wrap; gap: 14px; margin-top: 10px; }
+  .legend-item { display: flex; align-items: center; gap: 6px; font-size: 11px; color: var(--dim); }
+  .legend-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
   table { width: 100%; border-collapse: collapse; font-size: 12px; }
   th, td { text-align: left; padding: 6px 10px; border-bottom: 1px solid var(--border); }
   th { color: var(--dim); text-transform: uppercase; font-size: 10px; letter-spacing: 0.05em; }
@@ -821,10 +895,14 @@ def generate_trend_report(historical_summaries: list, output_path: str) -> None:
         '<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">'
         '<title>Stability Trends</title><style>' + style_block + '</style></head><body>'
         '<header><h1>Ticker LoRA Stability Trends</h1>'
-        '<div class="subtitle">' + str(n) + ' historical run(s) loaded</div></header>'
-        '<div class="chart-card"><h2>Clean rate over time</h2>' + svg + '</div>'
+        '<div class="subtitle">' + str(n) + ' historical run(s) loaded across '
+        + str(len(models)) + ' model(s)</div></header>'
+        '<div class="chart-card"><h2>Clean rate over time, by model</h2>' + clean_svg
+        + '<div class="legend">' + clean_legend + '</div></div>'
+        '<div class="chart-card"><h2>Flag counts over time</h2>' + flag_svg
+        + '<div class="legend">' + flag_legend + '</div></div>'
         '<div class="table-card"><h2>Runs (most recent first)</h2>'
-        '<table><thead><tr><th>When</th><th>Model</th><th>Clean %</th><th>Turns</th>'
+        '<table><thead><tr><th>When</th><th>Model</th><th>Scenario</th><th>Clean %</th><th>Turns</th>'
         + header_cells + '<th>Source</th></tr></thead><tbody>'
         + "".join(rows) + '</tbody></table></div>'
         '</body></html>'
@@ -832,6 +910,7 @@ def generate_trend_report(historical_summaries: list, output_path: str) -> None:
 
     with open(output_path, "w") as f:
         f.write(html_doc)
+
 
 
 
