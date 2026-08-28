@@ -123,15 +123,27 @@ def check_trial(events: list) -> dict:
     content_parts = []
     tool_calls = []
     tool_errors = []
+    tool_call_commands = []  # real, added 2026-08-28: the actual command
+    # payload for each tool call (e.g. {"symbol": "SOUN"}), not just the
+    # tool name -- needed to detect a genuine session-reuse failure mode
+    # (a tool called with a STALE argument echoing an earlier turn's
+    # input rather than the current turn's own prompt).
+    rounds_seen = []  # real, added 2026-08-28: every round number this
+    # turn's own agent_step events reported, in order -- needed to detect
+    # round-count drift (a real, observable sign of session-state
+    # confusion, distinct from any content-level check).
     for e in events:
         if "delta" in e and not e.get("thinking"):
             content_parts.append(e["delta"])
         elif e.get("type") == "tool_start":
             tool_calls.append(e.get("tool"))
+            tool_call_commands.append({"tool": e.get("tool"), "command": e.get("command")})
         elif e.get("type") == "tool_output":
             exit_code = e.get("exit_code")
             if exit_code is not None and exit_code != 0:
                 tool_errors.append({"tool": e.get("tool"), "exit_code": exit_code})
+        elif e.get("type") == "agent_step" and "round" in e:
+            rounds_seen.append(e["round"])
 
     full_content = "".join(content_parts)
 
@@ -151,15 +163,31 @@ def check_trial(events: list) -> dict:
 
     is_empty = not full_content.strip()
 
+    # Real, added 2026-08-28: round-count drift -- a real, observable
+    # sign of session-state confusion, distinct from any content-level
+    # check. A turn's own round sequence should never go backwards or
+    # repeat the same round number twice; either would mean the agent
+    # loop's own round bookkeeping got confused, independent of what
+    # the visible content says.
+    has_round_drift = False
+    for i in range(1, len(rounds_seen)):
+        if rounds_seen[i] <= rounds_seen[i - 1]:
+            has_round_drift = True
+            break
+
     return {
         "tool_calls": tool_calls,
+        "tool_call_commands": tool_call_commands,
         "tool_errors": tool_errors,
+        "rounds_seen": rounds_seen,
         "content_preview": full_content[:150],
+        "full_content": full_content,
         "has_leaked_tag": has_leaked_tag,
         "has_repeat": has_repeat,
         "is_empty": is_empty,
         "made_tool_call": bool(tool_calls),
         "has_tool_error": bool(tool_errors),
+        "has_round_drift": has_round_drift,
     }
 
 
@@ -271,6 +299,81 @@ _HOLDINGS_NOTE_RE = re.compile(
     re.DOTALL,
 )
 
+# Real, added 2026-08-28: captures the specific ticker a holdings-
+# correction note refers to, so it can be cross-checked against the
+# real turn it was generated for (session-reuse contamination: the
+# note bled in referring to a DIFFERENT ticker than this turn asked
+# about) and against DK's real, known holdings (data-accuracy: the
+# note claims a holding that doesn't actually exist).
+_HOLDINGS_NOTE_TICKER_RE = re.compile(
+    r"stored reference document lists\s+[\d,]+\s+shares of\s+([A-Z]{1,6})",
+)
+
+# Real, DK's actual, current stock holdings (from userPreferences,
+# confirmed 2026-08-28) that would legitimately trigger the real
+# holdings-correction path -- crypto and non-stock holdings are
+# irrelevant here since lookup_ticker only ever covers equities.
+REAL_DK_STOCK_HOLDINGS = {
+    "PL", "ADUR", "KTOS", "MP", "TMC", "XE", "SOUN", "WDAY", "MSFT",
+    "UUUU", "ENPH", "ABTC",
+}
+
+
+def _holdings_note_contamination(content: str, turn: dict) -> dict:
+    """Real, added 2026-08-28: checks a real, deterministic holdings-
+    correction note (if present) against two real, separate concerns:
+      - "wrong_ticker": the note refers to a DIFFERENT ticker than
+        this turn actually asked about -- a genuine session-reuse
+        contamination signal (the note bled in from another turn's
+        context).
+      - "not_a_real_holding": the note's ticker isn't in DK's real,
+        known holdings at all -- a genuine data-accuracy problem,
+        distinct from contamination, but real and worth surfacing the
+        same way.
+    Returns a dict with both flags (False/False if no note is present
+    at all, or if the note's ticker matches and is real).
+    """
+    match = _HOLDINGS_NOTE_TICKER_RE.search(content)
+    if not match:
+        return {"wrong_ticker": False, "not_a_real_holding": False, "note_ticker": None}
+    note_ticker = match.group(1)
+    expected_ticker = turn.get("symbol") if turn.get("type") == "ticker" else None
+    wrong_ticker = bool(expected_ticker) and note_ticker != expected_ticker
+    not_a_real_holding = note_ticker not in REAL_DK_STOCK_HOLDINGS
+    return {
+        "wrong_ticker": wrong_ticker,
+        "not_a_real_holding": not_a_real_holding,
+        "note_ticker": note_ticker,
+    }
+
+
+def _tool_argument_echo(turn: dict, result: dict) -> bool:
+    """Real, added 2026-08-28: a genuine session-reuse failure mode
+    distinct from any content-level check -- the tool WAS called
+    (satisfying expect_tool_call), with the RIGHT tool even (satisfying
+    expect_tool), but with a STALE argument echoing an earlier turn's
+    input instead of this turn's own prompt (e.g. calling lookup_ticker
+    with {"symbol": "SOUN"} when this turn's real prompt asked about
+    RGTI). Returns True only when this turn is a real ticker turn, a
+    lookup_ticker call happened, and its symbol argument doesn't match
+    this turn's own real symbol.
+    """
+    if turn.get("type") != "ticker":
+        return False
+    expected_symbol = turn.get("symbol")
+    for call in result.get("tool_call_commands", []):
+        if call.get("tool") != "lookup_ticker":
+            continue
+        command = call.get("command") or ""
+        try:
+            parsed = json.loads(command) if isinstance(command, str) else command
+        except (json.JSONDecodeError, TypeError):
+            continue
+        actual_symbol = (parsed or {}).get("symbol")
+        if actual_symbol and actual_symbol != expected_symbol:
+            return True
+    return False
+
 
 def _cross_turn_contamination(turn_contents: list) -> list:
     """Real, multi-round-specific check: does any later turn's visible
@@ -346,6 +449,14 @@ def _classify_turn(r: dict) -> tuple:
         flags.append("EMPTY")
     if r.get("has_tool_error"):
         flags.append("TOOL_ERROR")
+    if r.get("has_round_drift"):
+        flags.append("ROUND_DRIFT")
+    if r.get("holdings_note_wrong_ticker"):
+        flags.append("HOLDINGS_NOTE_WRONG_TICKER")
+    if r.get("holdings_note_not_a_real_holding"):
+        flags.append("HOLDINGS_NOTE_NOT_REAL")
+    if r.get("tool_argument_echo"):
+        flags.append("TOOL_ARGUMENT_ECHO")
     if "expectation_violated" in r:
         if r["expectation_violated"]:
             flags.append("EXPECTATION_VIOLATED")
@@ -424,6 +535,14 @@ def run_sequence(endpoint_id: str, model: str, scenario: dict = None) -> dict:
         r["prompt"] = message
         r["is_followup"] = (turn["type"] == "followup")
         r.update(validate_turn(turn, r))
+        # Real, added 2026-08-28: deeper, session-reuse-specific
+        # contamination checks that need this turn's own real context
+        # (its declared symbol/type), not just its raw output -- can't
+        # live inside check_trial(), which only ever sees events.
+        holdings_check = _holdings_note_contamination(r["full_content"], turn)
+        r["holdings_note_wrong_ticker"] = holdings_check["wrong_ticker"]
+        r["holdings_note_not_a_real_holding"] = holdings_check["not_a_real_holding"]
+        r["tool_argument_echo"] = _tool_argument_echo(turn, r)
         turn_results.append(r)
         content_parts = [e["delta"] for e in events if "delta" in e and not e.get("thinking")]
         turn_contents.append("".join(content_parts))
