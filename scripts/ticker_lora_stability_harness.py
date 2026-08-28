@@ -235,6 +235,21 @@ def _cross_turn_contamination(turn_contents: list) -> list:
     return findings
 
 
+def _classify_turn(r: dict) -> tuple:
+    """Real, shared classification logic used by both the single-question
+    and multi-round runners, so their reporting stays consistent."""
+    flags = []
+    if r["has_leaked_tag"]:
+        flags.append("LEAKED_TAG")
+    if r["has_repeat"]:
+        flags.append("REPEATED")
+    if r["is_empty"]:
+        flags.append("EMPTY")
+    if not r["made_tool_call"] and "__FOLLOWUP__" not in r.get("prompt", ""):
+        flags.append("NO_TOOL_CALL")
+    return (not flags, flags)
+
+
 def run_sequence(endpoint_id: str, model: str, sequence: list = None) -> dict:
     """Real, multi-round conversation test: one session, several real
     messages in a row (mixing real DK holdings, plain tickers, and a
@@ -268,6 +283,91 @@ def run_sequence(endpoint_id: str, model: str, sequence: list = None) -> dict:
     }
 
 
+def run_multi_round_suite(endpoint_id: str, model: str, runs: int,
+                           sequence: list = None, verbose: bool = True) -> dict:
+    """Real, dedicated multi-round runner: executes several independent
+    sequence runs, aggregates results across ALL of them into the same
+    quality of structured summary the single-question mode already has
+    (not just a single pass/fail boolean per run), and returns the full,
+    real, structured result so a caller (or --save-results below) can
+    persist it for historical comparison across sessions.
+    """
+    run_records = []
+    total_turns = 0
+    clean_turns = 0
+    flag_counts = {"LEAKED_TAG": 0, "REPEATED": 0, "EMPTY": 0, "NO_TOOL_CALL": 0}
+    total_contamination = 0
+    errors = 0
+
+    for run_i in range(runs):
+        try:
+            result = run_sequence(endpoint_id, model, sequence)
+        except Exception as e:
+            errors += 1
+            if verbose:
+                print(f"--- Sequence run {run_i + 1}: ERROR: {e} ---")
+            continue
+
+        if verbose:
+            print(f"--- Sequence run {run_i + 1} (session {result['session_id']}) ---")
+        run_clean = True
+        for i, r in enumerate(result["turn_results"]):
+            total_turns += 1
+            is_clean, flags = _classify_turn(r)
+            if is_clean:
+                clean_turns += 1
+            else:
+                run_clean = False
+                for f in flags:
+                    flag_counts[f] += 1
+            if verbose:
+                status = "CLEAN" if is_clean else " ".join(flags)
+                print(f"  turn {i+1} [{r['prompt'][:50]}]: {status}")
+        if result["cross_turn_contamination"]:
+            total_contamination += len(result["cross_turn_contamination"])
+            run_clean = False
+            if verbose:
+                print(f"  CROSS-TURN CONTAMINATION found: {result['cross_turn_contamination']}")
+        elif verbose:
+            print("  cross-turn contamination check: clean")
+        if verbose:
+            print()
+
+        run_records.append({
+            "session_id": result["session_id"],
+            "clean": run_clean,
+            "turn_results": result["turn_results"],
+            "cross_turn_contamination": result["cross_turn_contamination"],
+        })
+
+    runs_clean = sum(1 for r in run_records if r["clean"])
+
+    summary = {
+        "timestamp": time.time(),
+        "model": model,
+        "endpoint_id": endpoint_id,
+        "runs_requested": runs,
+        "runs_completed": len(run_records),
+        "runs_errored": errors,
+        "runs_completely_clean": runs_clean,
+        "total_turns": total_turns,
+        "clean_turns": clean_turns,
+        "flag_counts": flag_counts,
+        "total_cross_turn_contamination": total_contamination,
+        "run_records": run_records,
+    }
+
+    if verbose:
+        print("=== Multi-Round Suite Summary ===")
+        print(f"Runs completed: {summary['runs_completed']}/{runs} ({errors} errors)")
+        print(f"Runs completely clean: {runs_clean}/{summary['runs_completed']}")
+        print(f"Turns completely clean: {clean_turns}/{total_turns}")
+        print(f"Flag breakdown: {flag_counts}")
+        print(f"Total cross-turn contamination findings: {total_contamination}")
+
+    return summary
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--tickers", default=",".join(DEFAULT_TICKERS))
@@ -279,37 +379,20 @@ def main():
     parser.add_argument("--sequence-runs", type=int, default=1,
                          help="Number of independent sequence runs (each its "
                               "own fresh session) when --sequence is used.")
+    parser.add_argument("--save-results", metavar="PATH",
+                         help="Write the full, structured multi-round suite "
+                              "result as JSON to PATH, for historical "
+                              "comparison across sessions/nights.")
     args = parser.parse_args()
 
     if args.sequence:
         print(f"Running {args.sequence_runs} real multi-round conversation "
               f"sequence(s) against {args.model} (endpoint {args.endpoint_id})...\n")
-        all_clean = True
-        for run_i in range(args.sequence_runs):
-            result = run_sequence(args.endpoint_id, args.model)
-            print(f"--- Sequence run {run_i + 1} (session {result['session_id']}) ---")
-            for i, r in enumerate(result["turn_results"]):
-                flags = []
-                if r["has_leaked_tag"]:
-                    flags.append("LEAKED_TAG")
-                if r["has_repeat"]:
-                    flags.append("REPEATED")
-                if r["is_empty"]:
-                    flags.append("EMPTY")
-                if not r["made_tool_call"] and "__FOLLOWUP__" not in r.get("prompt", ""):
-                    flags.append("NO_TOOL_CALL")
-                status = "CLEAN" if not flags else " ".join(flags)
-                if flags:
-                    all_clean = False
-                print(f"  turn {i+1} [{r['prompt'][:50]}]: {status}")
-            if result["cross_turn_contamination"]:
-                all_clean = False
-                print(f"  CROSS-TURN CONTAMINATION found: {result['cross_turn_contamination']}")
-            else:
-                print("  cross-turn contamination check: clean")
-            print()
-        print("=== Sequence Summary ===")
-        print("All runs completely clean:" , all_clean)
+        summary = run_multi_round_suite(args.endpoint_id, args.model, args.sequence_runs)
+        if args.save_results:
+            with open(args.save_results, "w") as f:
+                json.dump(summary, f, indent=2)
+            print(f"\nFull results written to {args.save_results}")
         return
 
     tickers = [t.strip() for t in args.tickers.split(",") if t.strip()]
@@ -328,17 +411,8 @@ def main():
         if "error" in r:
             print(f"ERROR: {r['error']}")
         else:
-            flags = []
-            if r["has_leaked_tag"]:
-                flags.append("LEAKED_TAG")
-            if r["has_repeat"]:
-                flags.append("REPEATED")
-            if r["is_empty"]:
-                flags.append("EMPTY")
-            if not r["made_tool_call"]:
-                flags.append("NO_TOOL_CALL")
-            status = "CLEAN" if not flags else " ".join(flags)
-            print(status)
+            is_clean, flags = _classify_turn(r)
+            print("CLEAN" if is_clean else " ".join(flags))
 
     print("\n=== Summary ===")
     n = len(results)
