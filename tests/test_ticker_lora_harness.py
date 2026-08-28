@@ -720,3 +720,56 @@ def test_run_sequence_ticker_turn_message_override_documented_in_schema():
     ticker_turns = [t for t in scenario["turns"] if t["type"] == "ticker"]
     assert all("message" in t for t in ticker_turns)
     assert all(t["message"] != f"Whats {t['symbol']} trading at right now?" for t in ticker_turns)
+
+
+# ---------------------------------------------------------------------------
+# load_suite (added 2026-08-28 as part of scenario suites)
+# ---------------------------------------------------------------------------
+
+def test_load_suite_all_shipped_suite_files_are_valid():
+    """Real, all 4 shipped suite files must load and resolve every
+    referenced scenario cleanly -- a real regression guard against a
+    future edit breaking a suite's own scenario references."""
+    suites_dir = os.path.join(ROOT, "scripts", "suites")
+    files = [f for f in os.listdir(suites_dir) if f.endswith(".json")]
+    assert len(files) >= 4
+    for fname in files:
+        suite = _harness.load_suite(os.path.join(suites_dir, fname))
+        assert suite["_resolved_scenario_paths"]
+        for p in suite["_resolved_scenario_paths"]:
+            assert os.path.isfile(p)
+
+
+def test_load_suite_full_suite_covers_every_real_scenario_file():
+    """Real, the 'full' suite is meant to be comprehensive -- must
+    reference every real scenario file that actually exists, not a
+    stale subset from before a scenario was added."""
+    scenarios_dir = os.path.join(ROOT, "scripts", "scenarios")
+    real_scenario_files = {f for f in os.listdir(scenarios_dir) if f.endswith(".json")}
+    full_suite = _harness.load_suite(os.path.join(ROOT, "scripts", "suites", "full.json"))
+    referenced = {os.path.basename(p) for p in full_suite["_resolved_scenario_paths"]}
+    assert referenced == real_scenario_files
+
+
+def test_load_suite_rejects_missing_scenarios_list(tmp_path):
+    path = tmp_path / "bad.json"
+    path.write_text(json.dumps({"name": "bad"}))
+    with pytest.raises(ValueError, match="scenarios"):
+        _harness.load_suite(str(path))
+
+
+def test_load_suite_rejects_empty_scenarios_list(tmp_path):
+    path = tmp_path / "bad.json"
+    path.write_text(json.dumps({"name": "bad", "scenarios": []}))
+    with pytest.raises(ValueError, match="scenarios"):
+        _harness.load_suite(str(path))
+
+
+def test_load_suite_fails_loudly_on_missing_scenario_file(tmp_path):
+    """Real, deliberate design: a suite referencing a scenario that
+    doesn't exist must fail at load time, not partway through a real,
+    possibly expensive live run."""
+    path = tmp_path / "bad.json"
+    path.write_text(json.dumps({"name": "bad", "scenarios": ["scenarios/does_not_exist.json"]}))
+    with pytest.raises(ValueError, match="doesn't exist"):
+        _harness.load_suite(str(path))

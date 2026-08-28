@@ -229,6 +229,14 @@ def run_trial(ticker: str, endpoint_id: str, model: str) -> dict:
 # scenarios/mixed_holdings_default.json by design.
 SCENARIOS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "scenarios")
 DEFAULT_SCENARIO_FILE = os.path.join(SCENARIOS_DIR, "mixed_holdings_default.json")
+# Real, added 2026-08-28: named, themed groupings of scenario files, so a
+# whole coherent test battery (e.g. every holdings-correction scenario)
+# can be run with one command instead of one --scenario-file at a time.
+# See scripts/suites/*.json for real examples, grouping the 6 real
+# scenario files that exist by 2026-08-28 into 3 themed suites plus a
+# comprehensive "full" suite covering all of them.
+SUITES_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "suites")
+SCRIPTS_DIR = os.path.dirname(SCENARIOS_DIR)
 
 
 def load_scenario(path: str) -> dict:
@@ -702,6 +710,92 @@ def run_multi_round_suite(endpoint_id: str, model: str, runs: int,
         print(f"Total cross-turn contamination findings: {total_contamination}")
 
     return summary
+
+
+def load_suite(path: str) -> dict:
+    """Real, added 2026-08-28: loads a suite file -- a named, themed
+    grouping of scenario files (see scripts/suites/*.json for real
+    examples). Real, minimal schema:
+    {"name": ..., "description": ..., "suite_tags": [...], "scenarios": [
+        "scenarios/mixed_holdings_default.json", ...
+    ]}
+    Scenario paths are resolved relative to scripts/ (the parent of both
+    scenarios/ and suites/), matching how the real, shipped suite files
+    are written. Each referenced scenario is validated by actually
+    calling load_scenario() on it -- a suite referencing a missing or
+    malformed scenario file fails loudly here, at suite-load time, not
+    partway through a real run.
+    """
+    with open(path) as f:
+        suite = json.load(f)
+    if "scenarios" not in suite or not isinstance(suite["scenarios"], list) or not suite["scenarios"]:
+        raise ValueError(f"Suite file {path} is missing a real, non-empty 'scenarios' list")
+    resolved = []
+    for rel_path in suite["scenarios"]:
+        full_path = os.path.join(SCRIPTS_DIR, rel_path)
+        if not os.path.isfile(full_path):
+            raise ValueError(f"Suite file {path} references a scenario that doesn't exist: {rel_path}")
+        load_scenario(full_path)  # real validation, fails loudly here if malformed
+        resolved.append(full_path)
+    suite["_resolved_scenario_paths"] = resolved
+    return suite
+
+
+def run_suite(endpoint_id: str, model: str, suite: dict, runs_per_scenario: int = 1,
+              verbose: bool = True) -> dict:
+    """Real, added 2026-08-28: runs every real scenario in a suite,
+    reusing the already-proven run_multi_round_suite() per scenario
+    (not a separate, parallel aggregation implementation), then rolls
+    everything up into real, suite-level totals -- combined clean-turn
+    counts, combined flag counts across every scenario, combined
+    contamination and error counts -- while keeping each scenario's own
+    individual summary available too, since a suite-level average alone
+    can hide which specific scenario is actually struggling.
+    """
+    scenario_results = []
+    total_turns = 0
+    clean_turns = 0
+    flag_counts = {}
+    total_contamination = 0
+    total_runs_errored = 0
+
+    for scenario_path in suite["_resolved_scenario_paths"]:
+        scenario = load_scenario(scenario_path)
+        if verbose:
+            print(f"\n=== Scenario: {scenario['name']} ===")
+        summary = run_multi_round_suite(endpoint_id, model, runs_per_scenario, scenario=scenario, verbose=verbose)
+        scenario_results.append(summary)
+        total_turns += summary["total_turns"]
+        clean_turns += summary["clean_turns"]
+        total_contamination += summary["total_cross_turn_contamination"]
+        total_runs_errored += summary["runs_errored"]
+        for flag, count in summary["flag_counts"].items():
+            flag_counts[flag] = flag_counts.get(flag, 0) + count
+
+    suite_summary = {
+        "timestamp": time.time(),
+        "model": model,
+        "suite_name": suite.get("name", "?"),
+        "endpoint_id": endpoint_id,
+        "total_turns": total_turns,
+        "clean_turns": clean_turns,
+        "flag_counts": flag_counts,
+        "total_cross_turn_contamination": total_contamination,
+        "runs_errored": total_runs_errored,
+        "scenario_results": scenario_results,
+    }
+
+    if verbose:
+        clean_pct = round(100 * clean_turns / total_turns) if total_turns else 0
+        print(f"\n=== Suite Summary: {suite.get('name', '?')} ===")
+        print(f"Scenarios run: {len(scenario_results)}")
+        print(f"Turns completely clean: {clean_turns}/{total_turns} ({clean_pct}%)")
+        print(f"Flag breakdown: {flag_counts}")
+        print(f"Total cross-turn contamination: {total_contamination}")
+
+    return suite_summary
+
+
 
 
 def generate_html_report(summary: dict, output_path: str) -> None:
@@ -1308,6 +1402,18 @@ def main():
                               "is used (see scripts/scenarios/*.json for real "
                               "examples). Defaults to "
                               "scenarios/mixed_holdings_default.json.")
+    parser.add_argument("--suite", metavar="PATH",
+                         help="Real suite JSON file grouping several "
+                              "scenarios into one themed run (see "
+                              "scripts/suites/*.json for real examples: "
+                              "holdings_correction, generalization, "
+                              "prompt_reliability, full). Runs every "
+                              "scenario in the suite and aggregates suite-"
+                              "level totals, while keeping each scenario's "
+                              "own summary available too.")
+    parser.add_argument("--runs-per-scenario", type=int, default=1,
+                         help="Number of independent runs per scenario "
+                              "when --suite is used.")
     parser.add_argument("--html-report", metavar="PATH",
                          help="Write a real, richer, human-readable HTML "
                               "report to PATH (self-contained, opens in any "
@@ -1331,6 +1437,18 @@ def main():
                               "requirement) -- for quick checks, e.g. in a "
                               "cron job or before a deploy.")
     args = parser.parse_args()
+
+    if args.suite:
+        suite = load_suite(args.suite)
+        print(f"Running suite '{suite['name']}' ({len(suite['_resolved_scenario_paths'])} "
+              f"scenario(s), {args.runs_per_scenario} run(s) each) against {args.model} "
+              f"(endpoint {args.endpoint_id})...")
+        suite_summary = run_suite(args.endpoint_id, args.model, suite, args.runs_per_scenario)
+        if args.save_results:
+            with open(args.save_results, "w") as f:
+                json.dump(suite_summary, f, indent=2)
+            print(f"\nFull suite results written to {args.save_results}")
+        return
 
     if args.trends:
         historical = load_historical_results(args.results_dir)
