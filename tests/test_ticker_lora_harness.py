@@ -440,3 +440,109 @@ def test_detect_regressions_ignores_models_with_only_one_run():
         {"model": "m1", "timestamp": 1000, "total_turns": 5, "clean_turns": 1, "flag_counts": {}},
     ]
     assert _harness.detect_regressions(historical) == []
+
+
+# ---------------------------------------------------------------------------
+# check_trial -- real round-count drift detection (added 2026-08-28,
+# session-reuse-specific contamination checks)
+# ---------------------------------------------------------------------------
+
+def test_check_trial_no_round_drift_on_normal_sequence():
+    events = [{"type": "agent_step", "round": 2}, {"delta": "clean content"}]
+    r = _harness.check_trial(events)
+    assert r["has_round_drift"] is False
+    assert r["rounds_seen"] == [2]
+
+
+def test_check_trial_detects_round_drift_on_duplicate_round():
+    events = [{"type": "agent_step", "round": 2}, {"type": "agent_step", "round": 2}]
+    r = _harness.check_trial(events)
+    assert r["has_round_drift"] is True
+
+
+def test_check_trial_detects_round_drift_on_backwards_round():
+    events = [{"type": "agent_step", "round": 3}, {"type": "agent_step", "round": 2}]
+    r = _harness.check_trial(events)
+    assert r["has_round_drift"] is True
+
+
+def test_classify_turn_flags_round_drift():
+    r = {"has_leaked_tag": False, "has_repeat": False, "is_empty": False,
+         "made_tool_call": True, "has_round_drift": True}
+    is_clean, flags = _harness._classify_turn(r)
+    assert is_clean is False
+    assert "ROUND_DRIFT" in flags
+
+
+# ---------------------------------------------------------------------------
+# _holdings_note_contamination
+# ---------------------------------------------------------------------------
+
+def test_holdings_note_contamination_matching_real_holding_is_clean():
+    turn = {"type": "ticker", "symbol": "SOUN"}
+    content = ("SOUN is trading at $7. (Note: the stored reference document "
+               "lists 50 shares of SOUN. more text)")
+    result = _harness._holdings_note_contamination(content, turn)
+    assert result == {"wrong_ticker": False, "not_a_real_holding": False, "note_ticker": "SOUN"}
+
+
+def test_holdings_note_contamination_detects_wrong_ticker():
+    """Real, session-reuse contamination signal: the note refers to a
+    different ticker than this turn actually asked about."""
+    turn = {"type": "ticker", "symbol": "RGTI"}
+    content = ("RGTI is trading at $15. (Note: the stored reference document "
+               "lists 50 shares of SOUN. more text)")
+    result = _harness._holdings_note_contamination(content, turn)
+    assert result["wrong_ticker"] is True
+
+
+def test_holdings_note_contamination_detects_not_a_real_holding():
+    """Real, distinct data-accuracy signal: the ticker matches this turn,
+    but isn't in DK's real, known holdings at all."""
+    turn = {"type": "ticker", "symbol": "IONQ"}
+    content = ("IONQ is trading at $38. (Note: the stored reference document "
+               "lists 10 shares of IONQ. more text)")
+    result = _harness._holdings_note_contamination(content, turn)
+    assert result["not_a_real_holding"] is True
+    assert result["wrong_ticker"] is False
+
+
+def test_holdings_note_contamination_no_note_present():
+    turn = {"type": "ticker", "symbol": "RGTI"}
+    content = "RGTI is Rigetti Computing, Inc. Current price: $15.89."
+    result = _harness._holdings_note_contamination(content, turn)
+    assert result == {"wrong_ticker": False, "not_a_real_holding": False, "note_ticker": None}
+
+
+# ---------------------------------------------------------------------------
+# _tool_argument_echo
+# ---------------------------------------------------------------------------
+
+def test_tool_argument_echo_detects_stale_symbol():
+    turn = {"type": "ticker", "symbol": "RGTI"}
+    result = {"tool_call_commands": [
+        {"tool": "lookup_ticker", "command": json.dumps({"symbol": "SOUN"})}
+    ]}
+    assert _harness._tool_argument_echo(turn, result) is True
+
+
+def test_tool_argument_echo_no_echo_when_symbol_matches():
+    turn = {"type": "ticker", "symbol": "RGTI"}
+    result = {"tool_call_commands": [
+        {"tool": "lookup_ticker", "command": json.dumps({"symbol": "RGTI"})}
+    ]}
+    assert _harness._tool_argument_echo(turn, result) is False
+
+
+def test_tool_argument_echo_ignores_followup_turns():
+    turn = {"type": "followup", "message": "what about that?"}
+    result = {"tool_call_commands": [
+        {"tool": "lookup_ticker", "command": json.dumps({"symbol": "SOUN"})}
+    ]}
+    assert _harness._tool_argument_echo(turn, result) is False
+
+
+def test_tool_argument_echo_handles_no_tool_calls():
+    turn = {"type": "ticker", "symbol": "RGTI"}
+    result = {"tool_call_commands": []}
+    assert _harness._tool_argument_echo(turn, result) is False
