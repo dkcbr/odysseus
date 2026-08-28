@@ -672,6 +672,170 @@ def generate_html_report(summary: dict, output_path: str) -> None:
 
 
 
+RESULTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "results")
+
+
+def load_historical_results(results_dir: str = None) -> list:
+    """Real, added 2026-08-28: loads every saved --save-results JSON file
+    from a directory (each one a single run_multi_round_suite() output,
+    with its own real "timestamp"), sorted oldest to newest. Files that
+    fail to parse or lack a real "timestamp" are skipped rather than
+    aborting the whole load -- one bad or partial file from an
+    interrupted run shouldn't block trend analysis of everything else.
+    """
+    results_dir = results_dir or RESULTS_DIR
+    if not os.path.isdir(results_dir):
+        return []
+    summaries = []
+    for fname in sorted(os.listdir(results_dir)):
+        if not fname.endswith(".json"):
+            continue
+        path = os.path.join(results_dir, fname)
+        try:
+            with open(path) as f:
+                data = json.load(f)
+        except (json.JSONDecodeError, OSError):
+            continue
+        if "timestamp" not in data or "total_turns" not in data:
+            continue
+        data["_source_file"] = fname
+        summaries.append(data)
+    summaries.sort(key=lambda s: s["timestamp"])
+    return summaries
+
+
+def generate_trend_report(historical_summaries: list, output_path: str) -> None:
+    """Real, added 2026-08-28: renders multiple saved suite results,
+    loaded via load_historical_results(), as a single, self-contained
+    HTML trend report -- clean-rate over time as a real, dependency-free
+    inline SVG line chart, flag-count trends as a simple per-run table,
+    so real regressions or improvements across sessions/nights are
+    visible at a glance rather than requiring someone to manually diff
+    old JSON files by eye.
+    """
+    import html as _html
+    import time as _time
+
+    def esc(s):
+        return _html.escape(str(s))
+
+    if not historical_summaries:
+        with open(output_path, "w") as f:
+            f.write(
+                '<!DOCTYPE html><html><head><meta charset="utf-8">'
+                '<title>Stability Trends</title></head>'
+                '<body style="background:#0D1117;color:#E6EDF3;font-family:sans-serif;padding:32px;">'
+                '<h1>No historical results found</h1>'
+                '<p style="color:#8B949E;">Run the suite with --save-results pointing into '
+                'scripts/results/ a few times to build up real trend data.</p>'
+                '</body></html>'
+            )
+        return
+
+    points = []
+    for s in historical_summaries:
+        total = s.get("total_turns", 0) or 1
+        clean_pct = round(100 * s.get("clean_turns", 0) / total)
+        points.append({
+            "timestamp": s["timestamp"],
+            "label": _time.strftime("%m/%d %H:%M", _time.localtime(s["timestamp"])),
+            "clean_pct": clean_pct,
+            "total_turns": s.get("total_turns", 0),
+            "flag_counts": s.get("flag_counts", {}),
+            "source_file": s.get("_source_file", "?"),
+            "model": s.get("model", "?"),
+        })
+
+    # Real, dependency-free inline SVG line chart for clean-rate trend.
+    chart_w, chart_h = 800, 220
+    pad_l, pad_r, pad_t, pad_b = 40, 20, 20, 30
+    plot_w = chart_w - pad_l - pad_r
+    plot_h = chart_h - pad_t - pad_b
+    n = len(points)
+
+    def x_for(i):
+        if n == 1:
+            return pad_l + plot_w / 2
+        return pad_l + (plot_w * i / (n - 1))
+
+    def y_for(pct):
+        return pad_t + plot_h * (1 - pct / 100)
+
+    poly_points = " ".join(f"{x_for(i):.1f},{y_for(p['clean_pct']):.1f}" for i, p in enumerate(points))
+    dots = "".join(
+        f'<circle cx="{x_for(i):.1f}" cy="{y_for(p["clean_pct"]):.1f}" r="4" fill="#58A6FF">'
+        f'<title>{esc(p["label"])}: {p["clean_pct"]}% clean</title></circle>'
+        for i, p in enumerate(points)
+    )
+    x_labels = "".join(
+        f'<text x="{x_for(i):.1f}" y="{chart_h - 8}" font-size="10" fill="#8B949E" '
+        f'text-anchor="middle" font-family="monospace">{esc(p["label"])}</text>'
+        for i, p in enumerate(points)
+        if n <= 12 or i % max(1, n // 12) == 0
+    )
+    gridlines = "".join(
+        f'<line x1="{pad_l}" y1="{y_for(gy):.1f}" x2="{chart_w - pad_r}" y2="{y_for(gy):.1f}" '
+        f'stroke="#30363D" stroke-width="1"/>'
+        f'<text x="{pad_l - 6}" y="{y_for(gy) + 3:.1f}" font-size="10" fill="#8B949E" '
+        f'text-anchor="end" font-family="monospace">{gy}%</text>'
+        for gy in (0, 25, 50, 75, 100)
+    )
+
+    svg = (
+        f'<svg viewBox="0 0 {chart_w} {chart_h}" width="100%" style="max-width:800px">'
+        f'{gridlines}'
+        f'<polyline points="{poly_points}" fill="none" stroke="#3FB950" stroke-width="2"/>'
+        f'{dots}{x_labels}'
+        f'</svg>'
+    )
+
+    # Real per-run table, most recent first.
+    all_flag_names = sorted({k for p in points for k in p["flag_counts"]})
+    header_cells = "".join(f"<th>{esc(name)}</th>" for name in all_flag_names)
+    rows = []
+    for p in reversed(points):
+        flag_cells = "".join(f"<td>{p['flag_counts'].get(name, 0)}</td>" for name in all_flag_names)
+        rows.append(
+            f'<tr><td class="mono">{esc(p["label"])}</td><td class="mono">{esc(p["model"])}</td>'
+            f'<td>{p["clean_pct"]}%</td><td>{p["total_turns"]}</td>{flag_cells}'
+            f'<td class="mono dim">{esc(p["source_file"])}</td></tr>'
+        )
+
+    style_block = """
+  :root { --bg: #0D1117; --panel: #161B22; --border: #30363D; --text: #E6EDF3; --dim: #8B949E; --accent: #58A6FF; }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font-family: -apple-system, "Segoe UI", Helvetica, Arial, sans-serif; padding: 32px 24px 64px; }
+  .mono { font-family: "SF Mono", "JetBrains Mono", ui-monospace, Menlo, Consolas, monospace; }
+  .dim { color: var(--dim); }
+  header { max-width: 900px; margin: 0 auto 24px; }
+  h1 { font-size: 22px; margin: 0 0 4px; letter-spacing: -0.02em; }
+  h2 { font-size: 13px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--dim); margin: 0 0 12px; }
+  .subtitle { color: var(--dim); font-size: 13px; }
+  .chart-card, .table-card { max-width: 900px; margin: 0 auto 24px; background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 20px; }
+  table { width: 100%; border-collapse: collapse; font-size: 12px; }
+  th, td { text-align: left; padding: 6px 10px; border-bottom: 1px solid var(--border); }
+  th { color: var(--dim); text-transform: uppercase; font-size: 10px; letter-spacing: 0.05em; }
+"""
+
+    html_doc = (
+        '<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">'
+        '<title>Stability Trends</title><style>' + style_block + '</style></head><body>'
+        '<header><h1>Ticker LoRA Stability Trends</h1>'
+        '<div class="subtitle">' + str(n) + ' historical run(s) loaded</div></header>'
+        '<div class="chart-card"><h2>Clean rate over time</h2>' + svg + '</div>'
+        '<div class="table-card"><h2>Runs (most recent first)</h2>'
+        '<table><thead><tr><th>When</th><th>Model</th><th>Clean %</th><th>Turns</th>'
+        + header_cells + '<th>Source</th></tr></thead><tbody>'
+        + "".join(rows) + '</tbody></table></div>'
+        '</body></html>'
+    )
+
+    with open(output_path, "w") as f:
+        f.write(html_doc)
+
+
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--tickers", default=",".join(DEFAULT_TICKERS))
@@ -686,7 +850,12 @@ def main():
     parser.add_argument("--save-results", metavar="PATH",
                          help="Write the full, structured multi-round suite "
                               "result as JSON to PATH, for historical "
-                              "comparison across sessions/nights.")
+                              "comparison across sessions/nights. Save into "
+                              "scripts/results/ (e.g. scripts/results/"
+                              "$(date +%%Y%%m%%d_%%H%%M%%S).json) so --trends "
+                              "can find it later -- that directory is "
+                              "gitignored for its *.json contents, real "
+                              "session data is never committed.")
     parser.add_argument("--scenario-file", metavar="PATH",
                          help="Real scenario JSON file to run when --sequence "
                               "is used (see scripts/scenarios/*.json for real "
@@ -696,7 +865,30 @@ def main():
                          help="Write a real, richer, human-readable HTML "
                               "report to PATH (self-contained, opens in any "
                               "browser) -- see generate_html_report().")
+    parser.add_argument("--trends", action="store_true",
+                         help="Load every saved --save-results JSON file "
+                              "under --results-dir (default: scripts/"
+                              "results/) and render a trend report showing "
+                              "clean-rate and flag-count history over time. "
+                              "Does not run any new trials -- combine with "
+                              "--save-results pointed into that directory "
+                              "over multiple real runs to build up real "
+                              "trend data first.")
+    parser.add_argument("--results-dir", metavar="PATH", default=RESULTS_DIR,
+                         help="Directory to load historical results from "
+                              "when --trends is used. Defaults to "
+                              "scripts/results/.")
     args = parser.parse_args()
+
+    if args.trends:
+        historical = load_historical_results(args.results_dir)
+        print(f"Loaded {len(historical)} historical result file(s) from {args.results_dir}")
+        if not args.html_report:
+            print("--html-report PATH is required with --trends -- nowhere to write the report.")
+            return
+        generate_trend_report(historical, args.html_report)
+        print(f"Trend report written to {args.html_report}")
+        return
 
     if args.sequence:
         scenario = load_scenario(args.scenario_file) if args.scenario_file else load_scenario(DEFAULT_SCENARIO_FILE)
