@@ -305,3 +305,138 @@ def test_check_trial_clean_real_looking_response():
     assert r["has_repeat"] is False
     assert r["is_empty"] is False
     assert r["made_tool_call"] is True
+
+
+# ---------------------------------------------------------------------------
+# check_trial -- real tool-error detection (added 2026-08-28, alongside the
+# tool-call-reliability extensions: TOOL_ERROR classification, expect_tool
+# validation, and cross-run regression detection)
+# ---------------------------------------------------------------------------
+
+def test_check_trial_detects_tool_error_on_nonzero_exit_code():
+    events = [
+        {"type": "tool_start", "tool": "lookup_ticker"},
+        {"type": "tool_output", "tool": "lookup_ticker", "exit_code": 1},
+    ]
+    r = _harness.check_trial(events)
+    assert r["has_tool_error"] is True
+    assert r["tool_errors"] == [{"tool": "lookup_ticker", "exit_code": 1}]
+
+
+def test_check_trial_no_tool_error_on_zero_exit_code():
+    events = [
+        {"type": "tool_start", "tool": "lookup_ticker"},
+        {"type": "tool_output", "tool": "lookup_ticker", "exit_code": 0},
+        {"delta": "RGTI is Rigetti Computing, Inc. Current price: $15.89."},
+    ]
+    r = _harness.check_trial(events)
+    assert r["has_tool_error"] is False
+    assert r["tool_errors"] == []
+
+
+def test_classify_turn_flags_tool_error():
+    r = {"has_leaked_tag": False, "has_repeat": False, "is_empty": False,
+         "made_tool_call": True, "has_tool_error": True}
+    is_clean, flags = _harness._classify_turn(r)
+    assert is_clean is False
+    assert "TOOL_ERROR" in flags
+
+
+# ---------------------------------------------------------------------------
+# validate_turn -- real expect_tool (specific tool name) checking
+# ---------------------------------------------------------------------------
+
+def test_validate_turn_expect_tool_satisfied():
+    turn = {"type": "ticker", "symbol": "SOUN", "expect_tool": "lookup_ticker"}
+    result = {"tool_calls": ["lookup_ticker"], "made_tool_call": True}
+    v = _harness.validate_turn(turn, result)
+    assert v["expectation_violated"] is False
+    assert v["expected_tool_missing"] is False
+
+
+def test_validate_turn_expect_tool_violated_wrong_tool_called():
+    """Real, added 2026-08-28: catches a genuinely different failure shape
+    from expect_tool_call alone -- a tool WAS called (so expect_tool_call:
+    true would be satisfied), just not the specific, correct one."""
+    turn = {"type": "ticker", "symbol": "SOUN", "expect_tool": "lookup_ticker"}
+    result = {"tool_calls": ["ask_user"], "made_tool_call": True}
+    v = _harness.validate_turn(turn, result)
+    assert v["expectation_violated"] is True
+    assert v["expected_tool_missing"] is True
+
+
+def test_validate_turn_expect_tool_violated_no_tool_at_all():
+    turn = {"type": "ticker", "symbol": "SOUN", "expect_tool": "lookup_ticker"}
+    result = {"tool_calls": [], "made_tool_call": False}
+    v = _harness.validate_turn(turn, result)
+    assert v["expectation_violated"] is True
+    assert v["expected_tool_missing"] is True
+
+
+def test_load_scenario_rejects_non_string_expect_tool(tmp_path):
+    path = _write_scenario(tmp_path, {
+        "name": "bad",
+        "turns": [{"type": "ticker", "symbol": "SOUN", "expect_tool": 123}],
+    })
+    with pytest.raises(ValueError, match="tool name string"):
+        _harness.load_scenario(path)
+
+
+def test_load_scenario_updated_rapid_holdings_stress_has_expect_tool():
+    """Real, actual shipped scenario file this session updated -- must
+    still load cleanly with the new field."""
+    path = os.path.join(ROOT, "scripts", "scenarios", "rapid_holdings_stress.json")
+    scenario = _harness.load_scenario(path)
+    ticker_turns = [t for t in scenario["turns"] if t["type"] == "ticker"]
+    assert all(t.get("expect_tool") == "lookup_ticker" for t in ticker_turns)
+
+
+# ---------------------------------------------------------------------------
+# detect_regressions
+# ---------------------------------------------------------------------------
+
+def test_detect_regressions_flags_clean_rate_drop():
+    historical = [
+        {"model": "m1", "timestamp": 1000, "total_turns": 5, "clean_turns": 5, "flag_counts": {}},
+        {"model": "m1", "timestamp": 2000, "total_turns": 5, "clean_turns": 2, "flag_counts": {}},
+    ]
+    findings = _harness.detect_regressions(historical)
+    assert len(findings) == 1
+    assert "dropped" in findings[0]
+
+
+def test_detect_regressions_flags_new_failure_type():
+    historical = [
+        {"model": "m1", "timestamp": 1000, "total_turns": 5, "clean_turns": 5, "flag_counts": {"EMPTY": 0}},
+        {"model": "m1", "timestamp": 2000, "total_turns": 5, "clean_turns": 5, "flag_counts": {"EMPTY": 0, "TOOL_ERROR": 2}},
+    ]
+    findings = _harness.detect_regressions(historical)
+    assert len(findings) == 1
+    assert "TOOL_ERROR" in findings[0]
+
+
+def test_detect_regressions_no_findings_when_stable():
+    historical = [
+        {"model": "m1", "timestamp": 1000, "total_turns": 5, "clean_turns": 5, "flag_counts": {}},
+        {"model": "m1", "timestamp": 2000, "total_turns": 5, "clean_turns": 5, "flag_counts": {}},
+    ]
+    assert _harness.detect_regressions(historical) == []
+
+
+def test_detect_regressions_scopes_comparison_per_model():
+    """Real, deliberate design: comparing across different models would
+    produce a meaningless 'regression' -- a genuinely worse-performing new
+    model must never be reported as a regression of an unrelated,
+    better-performing one."""
+    historical = [
+        {"model": "model-a", "timestamp": 1000, "total_turns": 5, "clean_turns": 5, "flag_counts": {}},
+        {"model": "model-b", "timestamp": 2000, "total_turns": 5, "clean_turns": 0, "flag_counts": {}},
+    ]
+    assert _harness.detect_regressions(historical) == []
+
+
+def test_detect_regressions_ignores_models_with_only_one_run():
+    historical = [
+        {"model": "m1", "timestamp": 1000, "total_turns": 5, "clean_turns": 1, "flag_counts": {}},
+    ]
+    assert _harness.detect_regressions(historical) == []
