@@ -193,9 +193,38 @@ _VISIBLE_CHAT_TEMPLATE_ARTIFACT_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Real, added 2026-08-28: a separate, real bug from the reasoning-field
+# tool-call misclassification fixed the same night (see the buffering logic
+# around _reasoning_gate_active) -- confirmed live, via a real, multi-round
+# agent conversation, that a stray, orphaned tool-call tag can also leak
+# through the *content* field directly (no `thinking` flag at all), not
+# just `reasoning`. That case isn't a genuine tool call to extract (the
+# real JSON body wasn't present in content, just a bare tag fragment), so
+# the correct, minimal fix here is simply to strip it before it reaches the
+# user, matching the same class of cosmetic-artifact cleanup already done
+# for the chat-template markers above. A separate pattern (not merged into
+# the regex above) since this one needs DOTALL to span a possible full
+# block across newlines; the existing regex above has no such need and is
+# left untouched.
+_ORPHANED_TOOL_CALL_TAG_RE = re.compile(
+    r"<tool_call>.*?</tool_call>"  # a complete block, defensive: shouldn't
+                                    # normally reach content at all (real
+                                    # tool calls are extracted from
+                                    # reasoning before this point), but
+                                    # stripped whole rather than left
+                                    # partially visible if it ever does.
+    r"|</?tool_call>",              # a lone, orphaned opening or closing
+                                    # tag with no matching pair in this
+                                    # same content chunk -- the actual,
+                                    # real, observed failure shape.
+    re.IGNORECASE | re.DOTALL,
+)
+
 
 def _strip_visible_chat_template_artifacts(text: str) -> str:
-    return _VISIBLE_CHAT_TEMPLATE_ARTIFACT_RE.sub("", text or "")
+    text = _VISIBLE_CHAT_TEMPLATE_ARTIFACT_RE.sub("", text or "")
+    text = _ORPHANED_TOOL_CALL_TAG_RE.sub("", text)
+    return text
 
 
 def _harmony_suffix_hold_len(text: str) -> int:
