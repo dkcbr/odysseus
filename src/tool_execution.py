@@ -834,7 +834,12 @@ def answer_holdings_query(ticker: str) -> str:
             text = f.read()
         parsed = parse_portfolio_context(text)
     except Exception as e:
-        return f"Could not read portfolio data to answer this: {e}"
+        # Real, fixed 2026-08-28 (CodeQL, "Information exposure through an
+        # exception"): the raw exception message used to flow directly into
+        # this chat-facing string. Log the real detail server-side instead,
+        # return a generic message to the caller.
+        logger.exception(f"Failed to read/parse portfolio data for holdings query: {e}")
+        return "Could not read portfolio data to answer this request."
 
     if ticker not in parsed.confirmed_holdings:
         pending_buy = parsed.pending_qty_for(ticker, "BUY")
