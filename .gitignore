@@ -89,6 +89,7 @@ output.txt.txt
 reports/
 tasks/
 scripts/compound/*.json
+scripts/results/*.json
 research_data/
 **/search_analytics.json
 
