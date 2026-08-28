@@ -161,12 +161,156 @@ def run_trial(ticker: str, endpoint_id: str, model: str) -> dict:
     return result
 
 
+# Real, added 2026-08-28: a genuinely different test dimension from
+# run_trial() above. Every trial so far (including the ones that found
+# both real bugs fixed the same night) used a FRESH session per ticker
+# -- exactly two turns each ("Hi", then one real question). That never
+# tests what a real, longer, multi-topic conversation looks like: many
+# real manual investigations earlier the same night reused one session
+# across many different questions, and incidentally discovered that
+# doing so lets a model's own earlier bad response contaminate later
+# turns (the model sees its own prior malformed output as recent
+# conversation history and can imitate it). A real suite for this
+# model should deliberately test that condition too, not just isolated
+# single-question trials.
+DEFAULT_SEQUENCE = [
+    "SOUN",       # real DK holding -- triggers the holdings-correction path
+    "IONQ",       # not a real DK holding -- plain lookup
+    "KTOS",       # real DK holding -- triggers the holdings-correction path again
+    "__FOLLOWUP__",  # a follow-up question referencing the PRIOR answer, not a new ticker
+    "RGTI",       # a final, fresh ticker after several prior turns
+]
+
+
+# Real, added 2026-08-28 after a false-positive was found and confirmed
+# during development: the real, deterministic holdings-correction note
+# (a fixed template in src/agent_loop.py's own holdings-verification
+# block, "(Note: the stored reference document lists ... shares of
+# TICKER...)") is EXPECTED, by design, to repeat near-identical
+# boilerplate phrasing across different tickers in the same
+# conversation -- that is correct, template-generated behavior, not
+# the model echoing its own prior free-text answer. Stripped out
+# before the contamination check runs, so only genuine, organic
+# model-generated overlap can trigger a finding.
+_HOLDINGS_NOTE_RE = re.compile(
+    r"\(Note: the stored reference document lists.*?\)",
+    re.DOTALL,
+)
+
+
+def _cross_turn_contamination(turn_contents: list) -> list:
+    """Real, multi-round-specific check: does any later turn's visible
+    content contain a large, exact, verbatim chunk of an EARLIER turn's
+    own content? This is a different failure shape from within-turn
+    repetition (already checked by check_trial's has_repeat) -- it
+    would indicate the model echoing its own prior answer into a new,
+    unrelated turn, the real contamination pattern observed during
+    manual, same-session testing earlier the same night. Returns a list
+    of (later_turn_index, earlier_turn_index) pairs where this was
+    found; empty list means clean.
+    """
+    cleaned = [_HOLDINGS_NOTE_RE.sub("", t) for t in turn_contents]
+    findings = []
+    for i, later in enumerate(cleaned):
+        if len(later.strip()) < 40:
+            continue
+        for j in range(i):
+            earlier = cleaned[j]
+            if len(earlier.strip()) < 40:
+                continue
+            # A meaningful, real overlap check: does a substantial
+            # (40+ char) chunk of the earlier turn appear verbatim in
+            # this later one? Checked in fixed-size windows rather than
+            # the whole string, since an exact full-string containment
+            # check would miss a partial echo.
+            window = 40
+            for start in range(0, len(earlier) - window, window):
+                chunk = earlier[start:start + window]
+                if chunk.strip() and chunk in later:
+                    findings.append((i, j))
+                    break
+            else:
+                continue
+            break
+    return findings
+
+
+def run_sequence(endpoint_id: str, model: str, sequence: list = None) -> dict:
+    """Real, multi-round conversation test: one session, several real
+    messages in a row (mixing real DK holdings, plain tickers, and a
+    genuine follow-up question), checking each turn individually AND
+    checking for cross-turn contamination across the whole sequence.
+    """
+    sequence = sequence or DEFAULT_SEQUENCE
+    session_id = create_session(endpoint_id, model, f"stability_sequence_{int(time.time())}")
+    send_message(session_id, "Hi", model)
+
+    turn_results = []
+    turn_contents = []
+    for item in sequence:
+        if item == "__FOLLOWUP__":
+            message = "Is that price up or down from what you just told me?"
+        else:
+            message = f"Whats {item} trading at right now?"
+        events = send_message(session_id, message, model)
+        r = check_trial(events)
+        r["prompt"] = message
+        turn_results.append(r)
+        content_parts = [e["delta"] for e in events if "delta" in e and not e.get("thinking")]
+        turn_contents.append("".join(content_parts))
+
+    contamination = _cross_turn_contamination(turn_contents)
+
+    return {
+        "session_id": session_id,
+        "turn_results": turn_results,
+        "cross_turn_contamination": contamination,
+    }
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--tickers", default=",".join(DEFAULT_TICKERS))
     parser.add_argument("--endpoint-id", default="77bddaa5")
     parser.add_argument("--model", default="ticker-lookup-lora")
+    parser.add_argument("--sequence", action="store_true",
+                         help="Run the multi-round conversation sequence test "
+                              "instead of independent single-question trials.")
+    parser.add_argument("--sequence-runs", type=int, default=1,
+                         help="Number of independent sequence runs (each its "
+                              "own fresh session) when --sequence is used.")
     args = parser.parse_args()
+
+    if args.sequence:
+        print(f"Running {args.sequence_runs} real multi-round conversation "
+              f"sequence(s) against {args.model} (endpoint {args.endpoint_id})...\n")
+        all_clean = True
+        for run_i in range(args.sequence_runs):
+            result = run_sequence(args.endpoint_id, args.model)
+            print(f"--- Sequence run {run_i + 1} (session {result['session_id']}) ---")
+            for i, r in enumerate(result["turn_results"]):
+                flags = []
+                if r["has_leaked_tag"]:
+                    flags.append("LEAKED_TAG")
+                if r["has_repeat"]:
+                    flags.append("REPEATED")
+                if r["is_empty"]:
+                    flags.append("EMPTY")
+                if not r["made_tool_call"] and "__FOLLOWUP__" not in r.get("prompt", ""):
+                    flags.append("NO_TOOL_CALL")
+                status = "CLEAN" if not flags else " ".join(flags)
+                if flags:
+                    all_clean = False
+                print(f"  turn {i+1} [{r['prompt'][:50]}]: {status}")
+            if result["cross_turn_contamination"]:
+                all_clean = False
+                print(f"  CROSS-TURN CONTAMINATION found: {result['cross_turn_contamination']}")
+            else:
+                print("  cross-turn contamination check: clean")
+            print()
+        print("=== Sequence Summary ===")
+        print("All runs completely clean:" , all_clean)
+        return
 
     tickers = [t.strip() for t in args.tickers.split(",") if t.strip()]
 
