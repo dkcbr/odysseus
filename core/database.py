@@ -442,6 +442,18 @@ class ModelEndpoint(TimestampMixin, Base):
     hidden_models = Column(Text, nullable=True)    # JSON list of model IDs that failed probing
     cached_models = Column(Text, nullable=True)    # JSON list of last-known model IDs (avoids probe on list)
     pinned_models = Column(Text, nullable=True)    # JSON list of admin-pinned model IDs (manual, may not appear in /v1/models)
+    # Real, added 2026-08-28: JSON list of model IDs the probe route
+    # (routes/model_routes.py, probe_endpoint_models) should actually
+    # send a real warmup completion request to. NULL/empty means "probe
+    # everything" -- the original, unchanged behavior -- so existing
+    # endpoints are unaffected. Confirmed directly, via real measurement
+    # the same night, that this endpoint's local Ollama models range
+    # from 1.8s to 38.1s cold-load time, and the probe's own sequential
+    # full-completion warmup of every model causes cascading VRAM
+    # eviction on this 16GB card -- letting an admin scope probing to
+    # just the models that reliably warm fast avoids that without
+    # losing real functional verification for the ones that are probed.
+    probe_eligible_models = Column(Text, nullable=True)
     model_type = Column(String, nullable=True, default="llm")  # "llm" or "image"
     # auto = classify by URL; local = self-hosted server; api/proxy = external
     # OpenAI-compatible API even when reachable through a private/tailnet IP.
@@ -1113,6 +1125,21 @@ def _migrate_add_cached_models_column():
             conn.commit()
     except Exception as e:
         logging.getLogger(__name__).warning(f"cached_models migration failed: {e}")
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+    try:
+        conn = sqlite3.connect(db_path)
+        cursor = conn.execute("PRAGMA table_info(model_endpoints)")
+        columns = [row[1] for row in cursor.fetchall()]
+        if columns and "probe_eligible_models" not in columns:
+            conn.execute("ALTER TABLE model_endpoints ADD COLUMN probe_eligible_models TEXT")
+            conn.commit()
+    except Exception as e:
+        logging.getLogger(__name__).warning(f"probe_eligible_models migration failed: {e}")
     finally:
         try:
             conn.close()
