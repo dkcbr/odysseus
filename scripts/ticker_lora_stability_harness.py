@@ -796,6 +796,67 @@ def run_suite(endpoint_id: str, model: str, suite: dict, runs_per_scenario: int 
     return suite_summary
 
 
+DEFAULT_CROSS_MODEL_LIST = [
+    "ticker-lookup-lora",           # current, real, fixed model
+    "odysseus-qwen3-tickers-lora",  # original pre-rename name -- still
+                                     # subject to the real naming-collision
+                                     # tool-suppression bug fixed for the
+                                     # renamed model (see the real fix,
+                                     # 16422cca and related commits, 2026-08-28)
+    "qwen3:14b",                    # general-purpose baseline, no
+                                     # ticker-specific training or fixes at all
+]
+
+
+def run_cross_model(endpoint_id: str, models: list, scenario: dict = None,
+                     runs_per_model: int = 1, verbose: bool = True) -> dict:
+    """Real, added 2026-08-28: runs the SAME real scenario (or the real
+    default scenario if none given) against several different real
+    models, one at a time, and returns a real, direct comparison.
+
+    Genuinely different from the existing multi-model trend support:
+    that compares models across SEPARATELY run, separately saved
+    historical result files over time -- this runs them all right now,
+    in one command, against the identical real scenario, for a direct
+    side-by-side answer to "how do these models actually compare on
+    this exact test today". Reuses run_multi_round_suite() per model
+    (not a separate aggregation implementation) -- each model's real
+    summary is returned in EXACTLY the same shape run_multi_round_suite()
+    already produces, so any individual model's result from this
+    comparison can still be saved via --save-results and fed into the
+    existing --trends/detect_regressions() machinery unchanged.
+
+    Returns {"scenario_name": ..., "results": {model: summary, ...}}.
+    """
+    scenario = scenario or load_scenario(DEFAULT_SCENARIO_FILE)
+    results = {}
+    for model in models:
+        if verbose:
+            print(f"\n=== Model: {model} ===")
+        results[model] = run_multi_round_suite(endpoint_id, model, runs_per_model, scenario=scenario, verbose=verbose)
+
+    if verbose:
+        print(f"\n=== Cross-Model Comparison: {scenario['name']} ===")
+        header = f"{'Model':<32} {'Clean %':>8} {'Turns':>6}"
+        print(header)
+        print("-" * len(header))
+        for model, summary in results.items():
+            total = summary["total_turns"] or 1
+            clean_pct = round(100 * summary["clean_turns"] / total)
+            print(f"{model:<32} {clean_pct:>7}% {summary['total_turns']:>6}")
+        all_flags = sorted({f for s in results.values() for f in s["flag_counts"]})
+        if all_flags:
+            print()
+            print(f"{'Flag':<28} " + " ".join(f"{m[:14]:>14}" for m in results))
+            for flag in all_flags:
+                row = f"{flag:<28} " + " ".join(f"{results[m]['flag_counts'].get(flag, 0):>14}" for m in results)
+                print(row)
+
+    return {"scenario_name": scenario["name"], "results": results}
+
+
+
+
 
 
 def generate_html_report(summary: dict, output_path: str) -> None:
@@ -1414,6 +1475,21 @@ def main():
     parser.add_argument("--runs-per-scenario", type=int, default=1,
                          help="Number of independent runs per scenario "
                               "when --suite is used.")
+    parser.add_argument("--cross-model", action="store_true",
+                         help="Run the same real scenario (--scenario-file, "
+                              "or the default) against several real models "
+                              "in one command and print a direct, side-by-"
+                              "side comparison. See DEFAULT_CROSS_MODEL_LIST "
+                              "for the real default models compared "
+                              "(includes both the current, fixed ticker "
+                              "model and its original, pre-rename name, "
+                              "still subject to the real naming-collision "
+                              "bug -- a direct way to see that fix's real "
+                              "effect).")
+    parser.add_argument("--models", metavar="MODEL1,MODEL2,...",
+                         help="Comma-separated real model names to compare "
+                              "when --cross-model is used. Defaults to "
+                              "DEFAULT_CROSS_MODEL_LIST.")
     parser.add_argument("--html-report", metavar="PATH",
                          help="Write a real, richer, human-readable HTML "
                               "report to PATH (self-contained, opens in any "
@@ -1437,6 +1513,22 @@ def main():
                               "requirement) -- for quick checks, e.g. in a "
                               "cron job or before a deploy.")
     args = parser.parse_args()
+
+    if args.cross_model:
+        models = [m.strip() for m in args.models.split(",")] if args.models else DEFAULT_CROSS_MODEL_LIST
+        scenario = load_scenario(args.scenario_file) if args.scenario_file else load_scenario(DEFAULT_SCENARIO_FILE)
+        print(f"Running cross-model comparison [scenario: {scenario['name']}] "
+              f"across {len(models)} model(s): {', '.join(models)}...")
+        comparison = run_cross_model(args.endpoint_id, models, scenario=scenario,
+                                      runs_per_model=args.runs_per_scenario)
+        if args.save_results:
+            for model, summary in comparison["results"].items():
+                safe_model = model.replace(":", "_").replace("/", "_")
+                out_path = args.save_results.replace(".json", f"_{safe_model}.json")
+                with open(out_path, "w") as f:
+                    json.dump(summary, f, indent=2)
+                print(f"\n{model} results written to {out_path}")
+        return
 
     if args.suite:
         suite = load_suite(args.suite)

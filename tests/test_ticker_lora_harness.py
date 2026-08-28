@@ -773,3 +773,23 @@ def test_load_suite_fails_loudly_on_missing_scenario_file(tmp_path):
     path.write_text(json.dumps({"name": "bad", "scenarios": ["scenarios/does_not_exist.json"]}))
     with pytest.raises(ValueError, match="doesn't exist"):
         _harness.load_suite(str(path))
+
+
+# ---------------------------------------------------------------------------
+# DEFAULT_CROSS_MODEL_LIST (added 2026-08-28 as part of cross-model
+# scenario comparison)
+# ---------------------------------------------------------------------------
+
+def test_default_cross_model_list_is_real_and_well_formed():
+    assert isinstance(_harness.DEFAULT_CROSS_MODEL_LIST, list)
+    assert len(_harness.DEFAULT_CROSS_MODEL_LIST) >= 2
+    assert all(isinstance(m, str) and m for m in _harness.DEFAULT_CROSS_MODEL_LIST)
+
+
+def test_default_cross_model_list_includes_both_ticker_lora_names():
+    """Real, deliberate design: the default list includes both the
+    current, fixed model name and its original, pre-rename name (still
+    subject to the real naming-collision bug), specifically so a
+    cross-model run can directly demonstrate that fix's real effect."""
+    assert "ticker-lookup-lora" in _harness.DEFAULT_CROSS_MODEL_LIST
+    assert "odysseus-qwen3-tickers-lora" in _harness.DEFAULT_CROSS_MODEL_LIST
