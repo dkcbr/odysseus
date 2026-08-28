@@ -1,0 +1,11 @@
+{
+  "name": "mixed_holdings_default",
+  "description": "Real, default multi-round sequence: mixes both real DK holdings that trigger the holdings-correction path (SOUN, KTOS), a plain non-holding ticker (IONQ), a genuine follow-up question referencing the prior answer rather than naming a new ticker, and a final fresh ticker after several prior turns (RGTI). This is the exact sequence used to find and verify the fix for the double-yield bug (16422cca) and the cross-turn-contamination false positive found while building this harness.",
+  "turns": [
+    {"type": "ticker", "symbol": "SOUN", "note": "real DK holding -- triggers the holdings-correction path"},
+    {"type": "ticker", "symbol": "IONQ", "note": "not a real DK holding -- plain lookup"},
+    {"type": "ticker", "symbol": "KTOS", "note": "real DK holding -- triggers the holdings-correction path again"},
+    {"type": "followup", "message": "Is that price up or down from what you just told me?", "note": "genuine follow-up, not a new ticker"},
+    {"type": "ticker", "symbol": "RGTI", "note": "final fresh ticker after several prior turns"}
+  ]
+}

@@ -30,6 +30,7 @@ proven for legitimate internal tooling, not a real user credential.
 
 import argparse
 import json
+import os
 import re
 import time
 import urllib.request
@@ -173,13 +174,39 @@ def run_trial(ticker: str, endpoint_id: str, model: str) -> dict:
 # conversation history and can imitate it). A real suite for this
 # model should deliberately test that condition too, not just isolated
 # single-question trials.
-DEFAULT_SEQUENCE = [
-    "SOUN",       # real DK holding -- triggers the holdings-correction path
-    "IONQ",       # not a real DK holding -- plain lookup
-    "KTOS",       # real DK holding -- triggers the holdings-correction path again
-    "__FOLLOWUP__",  # a follow-up question referencing the PRIOR answer, not a new ticker
-    "RGTI",       # a final, fresh ticker after several prior turns
-]
+# Real, added 2026-08-28: scenarios now live as external JSON files under
+# scripts/scenarios/ instead of being hardcoded here -- lets new
+# conversation patterns be added or edited without touching this script,
+# and lets multiple, differently-purposed scenarios be maintained side by
+# side (see scripts/scenarios/*.json for real examples: the original
+# default mixed-holdings sequence, a rapid-fire holdings stress scenario,
+# and a held-out-ticker generalization scenario). This is the path used
+# when no --scenario-file is given, kept in sync with
+# scenarios/mixed_holdings_default.json by design.
+SCENARIOS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "scenarios")
+DEFAULT_SCENARIO_FILE = os.path.join(SCENARIOS_DIR, "mixed_holdings_default.json")
+
+
+def load_scenario(path: str) -> dict:
+    """Load a real scenario file. Real, minimal schema:
+    {"name": ..., "description": ..., "turns": [
+        {"type": "ticker", "symbol": "SOUN", "note": "..."},
+        {"type": "followup", "message": "...", "note": "..."}
+    ]}
+    "note" is optional and purely documentary -- not used at runtime.
+    """
+    with open(path) as f:
+        scenario = json.load(f)
+    if "turns" not in scenario or not isinstance(scenario["turns"], list):
+        raise ValueError(f"Scenario file {path} is missing a real 'turns' list")
+    for i, turn in enumerate(scenario["turns"]):
+        if turn.get("type") not in ("ticker", "followup"):
+            raise ValueError(f"Scenario file {path}, turn {i}: unknown type {turn.get('type')!r}")
+        if turn["type"] == "ticker" and not turn.get("symbol"):
+            raise ValueError(f"Scenario file {path}, turn {i}: 'ticker' type needs a 'symbol'")
+        if turn["type"] == "followup" and not turn.get("message"):
+            raise ValueError(f"Scenario file {path}, turn {i}: 'followup' type needs a 'message'")
+    return scenario
 
 
 # Real, added 2026-08-28 after a false-positive was found and confirmed
@@ -245,31 +272,34 @@ def _classify_turn(r: dict) -> tuple:
         flags.append("REPEATED")
     if r["is_empty"]:
         flags.append("EMPTY")
-    if not r["made_tool_call"] and "__FOLLOWUP__" not in r.get("prompt", ""):
+    if not r["made_tool_call"] and not r.get("is_followup"):
         flags.append("NO_TOOL_CALL")
     return (not flags, flags)
 
 
-def run_sequence(endpoint_id: str, model: str, sequence: list = None) -> dict:
+def run_sequence(endpoint_id: str, model: str, scenario: dict = None) -> dict:
     """Real, multi-round conversation test: one session, several real
-    messages in a row (mixing real DK holdings, plain tickers, and a
-    genuine follow-up question), checking each turn individually AND
-    checking for cross-turn contamination across the whole sequence.
+    messages in a row per the given scenario's turns (mixing, e.g., real
+    DK holdings, plain tickers, and genuine follow-up questions),
+    checking each turn individually AND checking for cross-turn
+    contamination across the whole sequence. Loads the real default
+    scenario file if none is given.
     """
-    sequence = sequence or DEFAULT_SEQUENCE
+    scenario = scenario or load_scenario(DEFAULT_SCENARIO_FILE)
     session_id = create_session(endpoint_id, model, f"stability_sequence_{int(time.time())}")
     send_message(session_id, "Hi", model)
 
     turn_results = []
     turn_contents = []
-    for item in sequence:
-        if item == "__FOLLOWUP__":
-            message = "Is that price up or down from what you just told me?"
+    for turn in scenario["turns"]:
+        if turn["type"] == "followup":
+            message = turn["message"]
         else:
-            message = f"Whats {item} trading at right now?"
+            message = f"Whats {turn['symbol']} trading at right now?"
         events = send_message(session_id, message, model)
         r = check_trial(events)
         r["prompt"] = message
+        r["is_followup"] = (turn["type"] == "followup")
         turn_results.append(r)
         content_parts = [e["delta"] for e in events if "delta" in e and not e.get("thinking")]
         turn_contents.append("".join(content_parts))
@@ -284,13 +314,15 @@ def run_sequence(endpoint_id: str, model: str, sequence: list = None) -> dict:
 
 
 def run_multi_round_suite(endpoint_id: str, model: str, runs: int,
-                           sequence: list = None, verbose: bool = True) -> dict:
+                           scenario: dict = None, verbose: bool = True) -> dict:
     """Real, dedicated multi-round runner: executes several independent
-    sequence runs, aggregates results across ALL of them into the same
-    quality of structured summary the single-question mode already has
-    (not just a single pass/fail boolean per run), and returns the full,
-    real, structured result so a caller (or --save-results below) can
-    persist it for historical comparison across sessions.
+    sequence runs against the given scenario (or the real default
+    scenario file if none given), aggregates results across ALL of them
+    into the same quality of structured summary the single-question mode
+    already has (not just a single pass/fail boolean per run), and
+    returns the full, real, structured result so a caller (or
+    --save-results below) can persist it for historical comparison
+    across sessions.
     """
     run_records = []
     total_turns = 0
@@ -301,7 +333,7 @@ def run_multi_round_suite(endpoint_id: str, model: str, runs: int,
 
     for run_i in range(runs):
         try:
-            result = run_sequence(endpoint_id, model, sequence)
+            result = run_sequence(endpoint_id, model, scenario)
         except Exception as e:
             errors += 1
             if verbose:
@@ -383,12 +415,19 @@ def main():
                          help="Write the full, structured multi-round suite "
                               "result as JSON to PATH, for historical "
                               "comparison across sessions/nights.")
+    parser.add_argument("--scenario-file", metavar="PATH",
+                         help="Real scenario JSON file to run when --sequence "
+                              "is used (see scripts/scenarios/*.json for real "
+                              "examples). Defaults to "
+                              "scenarios/mixed_holdings_default.json.")
     args = parser.parse_args()
 
     if args.sequence:
+        scenario = load_scenario(args.scenario_file) if args.scenario_file else load_scenario(DEFAULT_SCENARIO_FILE)
         print(f"Running {args.sequence_runs} real multi-round conversation "
-              f"sequence(s) against {args.model} (endpoint {args.endpoint_id})...\n")
-        summary = run_multi_round_suite(args.endpoint_id, args.model, args.sequence_runs)
+              f"sequence(s) [scenario: {scenario['name']}] against {args.model} "
+              f"(endpoint {args.endpoint_id})...\n")
+        summary = run_multi_round_suite(args.endpoint_id, args.model, args.sequence_runs, scenario=scenario)
         if args.save_results:
             with open(args.save_results, "w") as f:
                 json.dump(summary, f, indent=2)

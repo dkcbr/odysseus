@@ -1,0 +1,10 @@
+{
+  "name": "held_out_generalization",
+  "description": "Tests the ticker LoRA against tickers genuinely absent from its own training data (confirmed real training set: ADUR, ENPH, IONQ, KTOS, MP, NPLM, NVDA, QTXN, RGTI, RKLB, SOUN, TMC, UUUU, VRKO, ZBLR) -- checks whether the trained lookup_ticker behavior generalizes to unseen, well-known tickers rather than only working on names the model saw during fine-tuning.",
+  "turns": [
+    {"type": "ticker", "symbol": "AAPL", "note": "held-out -- well-known, not in training data"},
+    {"type": "ticker", "symbol": "MSFT", "note": "held-out -- well-known, not in training data"},
+    {"type": "followup", "message": "Which of those two is higher priced?", "note": "genuine follow-up requiring both prior answers"},
+    {"type": "ticker", "symbol": "TSLA", "note": "held-out -- well-known, not in training data"}
+  ]
+}
