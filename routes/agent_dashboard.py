@@ -11,6 +11,7 @@ to mcp_routes.py).
 """
 
 import json
+import logging
 import time
 from collections import deque
 from typing import Any
@@ -137,4 +138,9 @@ async def get_agent_status(request: Request):
     except FileNotFoundError:
         return {"error": "agent_state_unavailable", "detail": "supervisor_state.json not found"}
     except json.JSONDecodeError as e:
-        return {"error": "agent_state_unavailable", "detail": f"malformed JSON: {e}"}
+        # Real, fixed 2026-08-28 (CodeQL, "Information exposure through an
+        # exception"): the raw parse-error message used to flow directly
+        # into this response. Log the real detail server-side instead,
+        # return a generic message to the caller.
+        logging.getLogger(__name__).exception(f"Malformed supervisor_state.json: {e}")
+        return {"error": "agent_state_unavailable", "detail": "malformed JSON in supervisor state file"}
