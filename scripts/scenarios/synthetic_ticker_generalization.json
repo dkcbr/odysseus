@@ -1,0 +1,10 @@
+{
+  "name": "synthetic_ticker_generalization",
+  "description": "Real, genuinely more extreme dimension than held_out_generalization.json: that scenario used real, well-known, just-not-in-training tickers (AAPL, MSFT, TSLA). This scenario uses genuinely made-up, non-existent ticker symbols that correspond to no real company at all -- checking a different, harder question: does the model correctly call lookup_ticker and report a real failure/no-result from the tool (the correct behavior), or does it hallucinate a fake company and price for a symbol that was never real to begin with (a genuine, more serious failure than simply not knowing a real, held-out company)? Ticker turns deliberately omit expect_tool_call, same as held_out_generalization.json, since whether the model even attempts the tool for a fake symbol is itself part of the open question.",
+  "scenario_tags": ["generalization", "synthetic", "hallucination-risk"],
+  "turns": [
+    {"type": "ticker", "symbol": "ZZVXQ", "note": "genuinely fake, non-existent ticker -- no real company uses this symbol"},
+    {"type": "ticker", "symbol": "QRPZY", "note": "genuinely fake, non-existent ticker -- no real company uses this symbol"},
+    {"type": "ticker", "symbol": "XKVNT", "note": "genuinely fake, non-existent ticker -- no real company uses this symbol"}
+  ]
+}

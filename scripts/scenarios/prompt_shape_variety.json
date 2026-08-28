@@ -1,0 +1,11 @@
+{
+  "name": "prompt_shape_variety",
+  "description": "Real, genuinely new dimension not covered by any existing scenario: every prior scenario used the exact same prompt template ('Whats {TICKER} trading at right now?') for every ticker turn. This scenario keeps the underlying tickers real and in-training but overrides the actual, real linguistic shape of the prompt on each turn -- short, verbose, a multi-sentence prompt with irrelevant surrounding text, and a fragment/keyword-style prompt -- to check whether tool-calling reliability holds up across genuinely different, real ways a person might actually type a question, not just one fixed template. Each turn is still a real, fresh ticker question (type: ticker), just with custom phrasing via the optional message override.",
+  "scenario_tags": ["prompt-shape", "reliability"],
+  "turns": [
+    {"type": "ticker", "symbol": "SOUN", "message": "SOUN?", "expect_tool_call": true, "expect_tool": "lookup_ticker", "note": "short, terse prompt -- just the ticker and a question mark, no template phrasing at all"},
+    {"type": "ticker", "symbol": "KTOS", "message": "I've been meaning to check in on this for a while now -- could you tell me, if you don't mind, what the current trading price is for Kratos Defense, ticker symbol KTOS, is at the moment?", "expect_tool_call": true, "expect_tool": "lookup_ticker", "note": "long, verbose, overly polite real prompt shape for a real DK holding"},
+    {"type": "ticker", "symbol": "RGTI", "message": "So I was just reading an article about defense spending increases this year, and it made me think about RGTI -- anyway, what's it trading at?", "expect_tool_call": true, "expect_tool": "lookup_ticker", "note": "multi-sentence prompt with real, irrelevant surrounding context before the actual real question"},
+    {"type": "ticker", "symbol": "IONQ", "message": "price check IONQ", "expect_tool_call": true, "expect_tool": "lookup_ticker", "note": "fragment/keyword-style real prompt shape, no full sentence at all"}
+  ]
+}
