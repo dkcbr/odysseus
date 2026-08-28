@@ -275,7 +275,17 @@ def _cross_turn_contamination(turn_contents: list) -> list:
             # this later one? Checked in fixed-size windows rather than
             # the whole string, since an exact full-string containment
             # check would miss a partial echo.
-            window = 40
+            # Real, updated 2026-08-28: raised from 40 to 65 chars after a
+            # live false positive -- two different, correct answers for
+            # different tickers can legitimately share a long, common
+            # sector/exchange classification phrase (e.g. "Technology,
+            # Software - Application, NASDAQ Global Market" is 44 real
+            # characters, genuinely identical for two unrelated real
+            # companies that happen to share both classifications). 65
+            # comfortably exceeds that, while the original true-positive
+            # case this check was built for (a full, multi-sentence
+            # repeated answer) was well over 100 chars.
+            window = 65
             for start in range(0, len(earlier) - window, window):
                 chunk = earlier[start:start + window]
                 if chunk.strip() and chunk in later:
@@ -471,6 +481,197 @@ def run_multi_round_suite(endpoint_id: str, model: str, runs: int,
     return summary
 
 
+def generate_html_report(summary: dict, output_path: str) -> None:
+    """Real, richer human-readable report: renders a multi-round suite
+    summary (from run_multi_round_suite()) as a self-contained HTML file
+    -- no external dependencies, opens directly in any browser. Built
+    2026-08-28 because the plain console/JSON output, while complete,
+    took real, repeated manual squinting to scan across a whole night of
+    runs; this gives a genuinely faster, clearer read of the same real
+    data, with the actual per-turn detail (prompt, flags, expectation)
+    still fully visible, not summarized away.
+
+    Visual language deliberately borrows from the actual subject matter
+    being tested (stock ticker lookups): each turn's status renders as a
+    small market-style indicator (up/down/flat), monospace for tickers,
+    prices, and flags, dark terminal-style palette matching the kind of
+    tool a developer would actually want open next to a real terminal.
+    """
+    import html as _html
+    import time as _time
+
+    def esc(s):
+        return _html.escape(str(s))
+
+    status_styles = {
+        "clean": ("&#9650;", "#3FB950", "CLEAN"),
+        "violated": ("&#9660;", "#F85149", "VIOLATED"),
+        "observed": ("&#9644;", "#8B949E", "OBSERVED"),
+    }
+
+    def turn_status(r):
+        is_clean, flags = _classify_turn(r)
+        if is_clean:
+            return "clean"
+        if "EXPECTATION_VIOLATED" in flags or "NO_TOOL_CALL" in flags:
+            return "violated"
+        return "violated" if flags else "observed"
+
+    run_cards = []
+    for run in summary["run_records"]:
+        turn_rows = []
+        for r in run["turn_results"]:
+            status = turn_status(r)
+            arrow, color, label = status_styles[status]
+            is_clean, flags = _classify_turn(r)
+            flag_str = ", ".join(flags) if flags else "&mdash;"
+            expectation = r.get("expectation")
+            if expectation is True:
+                exp_str = "expects tool call"
+            elif expectation is False:
+                exp_str = "expects no tool call"
+            else:
+                exp_str = "unasserted"
+            tool_calls_str = ", ".join(r.get("tool_calls", [])) or "none"
+            turn_html = (
+                '<div class="turn" style="border-left-color: ' + color + '">'
+                '<div class="turn-status" style="color: ' + color + '">' + arrow + ' ' + label + '</div>'
+                '<div class="turn-body">'
+                '<div class="turn-prompt">' + esc(r.get("prompt", "")) + '</div>'
+                '<div class="turn-meta">'
+                '<span class="pill">' + esc(exp_str) + '</span>'
+                '<span class="pill">tool_calls: ' + esc(tool_calls_str) + '</span>'
+                '<span class="pill flags">' + flag_str + '</span>'
+                '</div></div></div>'
+            )
+            turn_rows.append(turn_html)
+
+        contamination = run.get("cross_turn_contamination") or []
+        contamination_html = ""
+        if contamination:
+            pairs = ", ".join("turn " + str(b) + " to turn " + str(a) for a, b in contamination)
+            contamination_html = '<div class="contamination">Cross-turn contamination: ' + esc(pairs) + '</div>'
+
+        run_clean_badge = (
+            '<span class="run-badge clean">CLEAN</span>' if run["clean"]
+            else '<span class="run-badge violated">FLAGGED</span>'
+        )
+        run_html = (
+            '<div class="run-card"><div class="run-header">'
+            '<span class="session-id">' + esc(run["session_id"]) + '</span>' + run_clean_badge + '</div>'
+            + "".join(turn_rows) + contamination_html + '</div>'
+        )
+        run_cards.append(run_html)
+
+    flag_bars = []
+    max_flag = max(summary["flag_counts"].values(), default=0) or 1
+    for flag_name, count in summary["flag_counts"].items():
+        width_pct = (count / max_flag) * 100 if count else 0
+        flag_bars.append(
+            '<div class="flag-row"><span class="flag-name">' + esc(flag_name) + '</span>'
+            '<div class="flag-bar-track"><div class="flag-bar-fill" style="width: '
+            + str(width_pct) + '%"></div></div>'
+            '<span class="flag-count">' + str(count) + '</span></div>'
+        )
+
+    clean_pct = round(100 * summary["clean_turns"] / summary["total_turns"]) if summary["total_turns"] else 0
+    generated_at = _time.strftime("%Y-%m-%d %H:%M:%S", _time.localtime(summary["timestamp"]))
+
+    style_block = """
+  :root {
+    --bg: #0D1117;
+    --panel: #161B22;
+    --border: #30363D;
+    --text: #E6EDF3;
+    --dim: #8B949E;
+    --accent: #58A6FF;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, "Segoe UI", Helvetica, Arial, sans-serif;
+    padding: 32px 24px 64px;
+  }
+  .mono { font-family: "SF Mono", "JetBrains Mono", ui-monospace, Menlo, Consolas, monospace; }
+  header { max-width: 900px; margin: 0 auto 32px; }
+  h1 { font-size: 22px; margin: 0 0 4px; letter-spacing: -0.02em; }
+  .subtitle { color: var(--dim); font-size: 13px; }
+  .subtitle .mono { color: var(--accent); }
+  .stats {
+    max-width: 900px; margin: 0 auto 32px;
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+    gap: 12px;
+  }
+  .stat-card {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
+    padding: 16px;
+  }
+  .stat-value { font-size: 28px; font-weight: 600; font-family: "SF Mono", ui-monospace, monospace; }
+  .stat-label { font-size: 11px; color: var(--dim); text-transform: uppercase; letter-spacing: 0.05em; margin-top: 4px; }
+  .flag-breakdown {
+    max-width: 900px; margin: 0 auto 32px;
+    background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 16px 20px;
+  }
+  .flag-breakdown h2, .runs-section h2 { font-size: 13px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--dim); margin: 0 0 12px; }
+  .flag-row { display: flex; align-items: center; gap: 12px; margin-bottom: 8px; font-size: 13px; }
+  .flag-name { width: 130px; font-family: "SF Mono", ui-monospace, monospace; color: var(--dim); }
+  .flag-bar-track { flex: 1; height: 8px; background: var(--bg); border-radius: 4px; overflow: hidden; }
+  .flag-bar-fill { height: 100%; background: var(--accent); }
+  .flag-count { width: 24px; text-align: right; font-family: "SF Mono", ui-monospace, monospace; }
+  .runs-section { max-width: 900px; margin: 0 auto; }
+  .run-card {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
+    padding: 16px 20px; margin-bottom: 16px;
+  }
+  .run-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; }
+  .session-id { font-size: 12px; color: var(--dim); }
+  .run-badge { font-size: 11px; font-weight: 600; padding: 2px 8px; border-radius: 4px; letter-spacing: 0.05em; }
+  .run-badge.clean { background: rgba(63,185,80,0.15); color: #3FB950; }
+  .run-badge.violated { background: rgba(248,81,73,0.15); color: #F85149; }
+  .turn {
+    display: flex; gap: 12px; padding: 10px 0 10px 12px;
+    border-left: 3px solid; border-top: 1px solid var(--border);
+  }
+  .turn:first-of-type { border-top: none; }
+  .turn-status { width: 100px; flex-shrink: 0; font-size: 11px; font-weight: 600; font-family: "SF Mono", ui-monospace, monospace; letter-spacing: 0.03em; }
+  .turn-prompt { font-size: 13px; margin-bottom: 6px; }
+  .turn-meta { display: flex; gap: 6px; flex-wrap: wrap; }
+  .pill { font-size: 10px; padding: 2px 8px; border-radius: 10px; background: var(--bg); color: var(--dim); font-family: "SF Mono", ui-monospace, monospace; }
+  .pill.flags { color: #F85149; }
+  .contamination { margin-top: 10px; font-size: 12px; color: #D29922; }
+"""
+
+    html_doc = (
+        '<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">'
+        '<title>Stability Report - ' + esc(summary["model"]) + '</title>'
+        '<style>' + style_block + '</style></head><body>'
+        '<header><h1>Ticker LoRA Stability Report</h1>'
+        '<div class="subtitle"><span class="mono">' + esc(summary["model"]) + '</span> on endpoint '
+        '<span class="mono">' + esc(summary["endpoint_id"]) + '</span> &middot; generated '
+        + esc(generated_at) + '</div></header>'
+        '<div class="stats">'
+        '<div class="stat-card"><div class="stat-value">' + str(summary["runs_completely_clean"]) + '/'
+        + str(summary["runs_completed"]) + '</div><div class="stat-label">Runs clean</div></div>'
+        '<div class="stat-card"><div class="stat-value">' + str(clean_pct) + '%</div>'
+        '<div class="stat-label">Turns clean (' + str(summary["clean_turns"]) + '/' + str(summary["total_turns"]) + ')</div></div>'
+        '<div class="stat-card"><div class="stat-value">' + str(summary["total_cross_turn_contamination"]) + '</div>'
+        '<div class="stat-label">Contamination findings</div></div>'
+        '<div class="stat-card"><div class="stat-value">' + str(summary["runs_errored"]) + '</div>'
+        '<div class="stat-label">Run errors</div></div>'
+        '</div>'
+        '<div class="flag-breakdown"><h2>Flag breakdown</h2>' + "".join(flag_bars) + '</div>'
+        '<div class="runs-section"><h2>Runs</h2>' + "".join(run_cards) + '</div>'
+        '</body></html>'
+    )
+
+    with open(output_path, "w") as f:
+        f.write(html_doc)
+
+
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--tickers", default=",".join(DEFAULT_TICKERS))
@@ -491,6 +692,10 @@ def main():
                               "is used (see scripts/scenarios/*.json for real "
                               "examples). Defaults to "
                               "scenarios/mixed_holdings_default.json.")
+    parser.add_argument("--html-report", metavar="PATH",
+                         help="Write a real, richer, human-readable HTML "
+                              "report to PATH (self-contained, opens in any "
+                              "browser) -- see generate_html_report().")
     args = parser.parse_args()
 
     if args.sequence:
@@ -503,6 +708,9 @@ def main():
             with open(args.save_results, "w") as f:
                 json.dump(summary, f, indent=2)
             print(f"\nFull results written to {args.save_results}")
+        if args.html_report:
+            generate_html_report(summary, args.html_report)
+            print(f"HTML report written to {args.html_report}")
         return
 
     tickers = [t.strip() for t in args.tickers.split(",") if t.strip()]
