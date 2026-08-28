@@ -1,0 +1,11 @@
+{
+  "name": "rapid_holdings_stress",
+  "description": "Stress-tests the holdings-correction path (src/agent_loop.py's holdings-claim verification, and its interaction with the ticker LoRA's dedup-buffer fix, 16422cca) more aggressively than the default scenario: back-to-back real DK holdings with no plain, non-holding ticker between them, to check the fix holds up under repeated, consecutive triggering rather than a single occurrence per conversation.",
+  "turns": [
+    {"type": "ticker", "symbol": "SOUN", "note": "real DK holding"},
+    {"type": "ticker", "symbol": "KTOS", "note": "real DK holding, immediately after another holdings-correction trigger"},
+    {"type": "ticker", "symbol": "SOUN", "note": "same holding asked again, later in the same conversation"},
+    {"type": "followup", "message": "And KTOS, remind me?", "note": "a real, short follow-up mixing an earlier holding by name"},
+    {"type": "ticker", "symbol": "KTOS", "note": "final repeat -- third real DK holding reference in one conversation"}
+  ]
+}
