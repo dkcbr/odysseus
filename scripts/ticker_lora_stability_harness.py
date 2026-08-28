@@ -844,25 +844,58 @@ RESULTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "results"
 
 
 def detect_regressions(historical_summaries: list, min_drop_pct: int = 10) -> list:
-    """Real, added 2026-08-28: compares each model's most recent run
-    against its own immediately preceding run (scoped per-model,
+    """Real, added 2026-08-28, redesigned 2026-08-28 after a second
+    external proposal (regression alerts as a first-class subsystem)
+    identified real gaps in the first version: compares each model's
+    most recent run against its own prior history (scoped per-model,
     deliberately -- different models have genuinely different baselines,
     comparing across models would produce a meaningless "regression").
-    Flags two real, distinct kinds of finding:
-      - a clean-rate drop of at least min_drop_pct percentage points
-        (default 10) between a model's last two runs
-      - a flag type present in the latest run that was never seen in
-        ANY of that model's prior runs (a genuinely new failure mode,
-        not just a fluctuation in an already-known one)
-    Returns a list of real, human-readable finding strings. An empty
-    list means no regression was detected in the available history --
-    note this says nothing about a model that has fewer than 2 runs at
-    all, since there's nothing to compare yet.
+
+    Returns a list of real, structured alert dicts (not plain strings,
+    since a caller like the HTML report needs the type/severity to
+    render usefully, not just parse a sentence):
+      {"type": str, "message": str, "severity": "high"|"moderate", "model": str}
+
+    Four real, distinct checks, each a genuinely different failure
+    shape:
+      - clean_rate_regression: latest run's clean rate drops at least
+        min_drop_pct points below the MEDIAN of prior runs (not just
+        the immediately preceding one -- more robust against a single
+        noisy prior run looking like a false baseline). Severity scales
+        with the drop's real size.
+      - new_flag_type: a flag type present in the latest run that was
+        never seen, at all, in any prior run for this model -- a
+        genuinely new failure mode, always "high" severity.
+      - flag_count_increase: real, added this redesign -- an ALREADY-
+        seen flag type whose count meaningfully increases (at least 2
+        above the average of prior runs) -- the real gap the first
+        version had: it only ever caught a flag's first appearance,
+        never a worsening rate of one already seen.
+      - contamination_regression: real, added this redesign --
+        cross-turn contamination appearing in the latest run when it
+        was zero in every prior run, using the real, existing
+        total_cross_turn_contamination field (previously not checked
+        by this function at all, even though it was already computed
+        elsewhere in the harness).
     """
-    findings = []
+    alerts = []
     by_model = {}
     for s in historical_summaries:
         by_model.setdefault(s.get("model", "?"), []).append(s)
+
+    def clean_pct(s):
+        total = s.get("total_turns", 0) or 1
+        return 100 * s.get("clean_turns", 0) / total
+
+    def median(values):
+        values = sorted(values)
+        n = len(values)
+        if n == 0:
+            return 0
+        mid = n // 2
+        if n % 2 == 1:
+            return values[mid]
+        return (values[mid - 1] + values[mid]) / 2
 
     for model, runs in by_model.items():
         if len(runs) < 2:
@@ -871,29 +904,63 @@ def detect_regressions(historical_summaries: list, min_drop_pct: int = 10) -> li
         prior_runs = runs_sorted[:-1]
         latest = runs_sorted[-1]
 
-        def clean_pct(s):
-            total = s.get("total_turns", 0) or 1
-            return 100 * s.get("clean_turns", 0) / total
-
-        prev_pct = clean_pct(prior_runs[-1])
+        # 1. Clean-rate regression, against the median of prior runs.
+        prior_pcts = [clean_pct(r) for r in prior_runs]
+        median_pct = median(prior_pcts)
         latest_pct = clean_pct(latest)
-        drop = prev_pct - latest_pct
+        drop = median_pct - latest_pct
         if drop >= min_drop_pct:
-            findings.append(
-                f"{model}: clean rate dropped {prev_pct:.0f}% -> {latest_pct:.0f}% "
-                f"(-{drop:.0f}pts) from the previous run"
-            )
+            severity = "high" if drop >= 25 else "moderate"
+            alerts.append({
+                "type": "clean_rate_regression",
+                "message": f"{model}: clean rate dropped {median_pct:.0f}% -> {latest_pct:.0f}% "
+                           f"(-{drop:.0f}pts vs. the median of {len(prior_runs)} prior run(s))",
+                "severity": severity,
+                "model": model,
+            })
 
-        known_flags = set()
+        # 2 & 3. New flag types, and meaningful increases in known ones.
+        prior_flag_counts = {}
         for r in prior_runs:
             for flag, count in r.get("flag_counts", {}).items():
-                if count > 0:
-                    known_flags.add(flag)
-        for flag, count in latest.get("flag_counts", {}).items():
-            if count > 0 and flag not in known_flags:
-                findings.append(f"{model}: new failure type detected -- {flag} (not seen in prior runs)")
+                prior_flag_counts.setdefault(flag, []).append(count)
 
-    return findings
+        for flag, count in latest.get("flag_counts", {}).items():
+            if count <= 0:
+                continue
+            if flag not in prior_flag_counts or not any(c > 0 for c in prior_flag_counts[flag]):
+                alerts.append({
+                    "type": "new_flag_type",
+                    "message": f"{model}: new failure type detected -- {flag} (not seen in prior runs)",
+                    "severity": "high",
+                    "model": model,
+                })
+            else:
+                prior_avg = sum(prior_flag_counts[flag]) / len(prior_flag_counts[flag])
+                if count - prior_avg >= 2:
+                    alerts.append({
+                        "type": "flag_count_increase",
+                        "message": f"{model}: {flag} count increased to {count} "
+                                   f"(avg {prior_avg:.1f} in prior runs)",
+                        "severity": "moderate",
+                        "model": model,
+                    })
+
+        # 4. Contamination regression -- a real, existing field this
+        # function never checked before this redesign.
+        prior_contamination = [r.get("total_cross_turn_contamination", 0) for r in prior_runs]
+        latest_contamination = latest.get("total_cross_turn_contamination", 0)
+        if latest_contamination > 0 and not any(c > 0 for c in prior_contamination):
+            alerts.append({
+                "type": "contamination_regression",
+                "message": f"{model}: cross-turn contamination detected "
+                           f"({latest_contamination} finding(s)) where none occurred in prior runs",
+                "severity": "high",
+                "model": model,
+            })
+
+    return alerts
+
 
 
 def load_historical_results(results_dir: str = None) -> list:
@@ -1107,6 +1174,8 @@ def generate_trend_report(historical_summaries: list, output_path: str) -> None:
   .regression-card.clean { border-color: var(--border); }
   .regression-list { margin: 0; padding-left: 18px; font-size: 13px; color: #F85149; }
   .regression-list li { margin-bottom: 4px; }
+  .regression-list li.alert-high { color: #F85149; }
+  .regression-list li.alert-moderate { color: #D29922; }
   .legend { display: flex; flex-wrap: wrap; gap: 14px; margin-top: 10px; }
   .legend-item { display: flex; align-items: center; gap: 6px; font-size: 11px; color: var(--dim); }
   .legend-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
@@ -1117,7 +1186,13 @@ def generate_trend_report(historical_summaries: list, output_path: str) -> None:
 
     regressions = detect_regressions(historical_summaries)
     if regressions:
-        regression_items = "".join(f'<li>{esc(f)}</li>' for f in regressions)
+        # Real, updated 2026-08-28: alerts are now structured dicts
+        # (type/message/severity), not plain strings -- render each
+        # with a severity-based class so high vs. moderate is visually
+        # distinct, matching real triage priority.
+        regression_items = "".join(
+            f'<li class="alert-{esc(a["severity"])}">{esc(a["message"])}</li>' for a in regressions
+        )
         regression_html = (
             '<div class="regression-card"><h2>Regression check</h2>'
             f'<ul class="regression-list">{regression_items}</ul></div>'
@@ -1195,16 +1270,27 @@ def main():
                          help="Directory to load historical results from "
                               "when --trends is used. Defaults to "
                               "scripts/results/.")
+    parser.add_argument("--alerts-only", action="store_true",
+                         help="With --trends, print only regression alerts "
+                              "(no historical-run-count line, no HTML report "
+                              "requirement) -- for quick checks, e.g. in a "
+                              "cron job or before a deploy.")
     args = parser.parse_args()
 
     if args.trends:
         historical = load_historical_results(args.results_dir)
-        print(f"Loaded {len(historical)} historical result file(s) from {args.results_dir}")
         regressions = detect_regressions(historical)
+
+        if args.alerts_only:
+            for a in regressions:
+                print(f"[{a['severity'].upper()}] {a['message']}")
+            return
+
+        print(f"Loaded {len(historical)} historical result file(s) from {args.results_dir}")
         if regressions:
             print("\nRegression check:")
-            for finding in regressions:
-                print(f"  - {finding}")
+            for a in regressions:
+                print(f"  - [{a['severity']}] {a['message']}")
         else:
             print("\nRegression check: no regressions detected in available history.")
         if not args.html_report:

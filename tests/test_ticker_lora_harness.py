@@ -396,23 +396,106 @@ def test_load_scenario_updated_rapid_holdings_stress_has_expect_tool():
 # ---------------------------------------------------------------------------
 
 def test_detect_regressions_flags_clean_rate_drop():
+    """Real, updated 2026-08-28: alerts are now structured dicts
+    (type/message/severity), not plain strings."""
     historical = [
-        {"model": "m1", "timestamp": 1000, "total_turns": 5, "clean_turns": 5, "flag_counts": {}},
-        {"model": "m1", "timestamp": 2000, "total_turns": 5, "clean_turns": 2, "flag_counts": {}},
+        {"model": "m1", "timestamp": 1000, "total_turns": 5, "clean_turns": 5, "flag_counts": {}, "total_cross_turn_contamination": 0},
+        {"model": "m1", "timestamp": 2000, "total_turns": 5, "clean_turns": 2, "flag_counts": {}, "total_cross_turn_contamination": 0},
     ]
-    findings = _harness.detect_regressions(historical)
-    assert len(findings) == 1
-    assert "dropped" in findings[0]
+    alerts = _harness.detect_regressions(historical)
+    assert len(alerts) == 1
+    assert alerts[0]["type"] == "clean_rate_regression"
+    assert "dropped" in alerts[0]["message"]
+    assert alerts[0]["severity"] in ("high", "moderate")
+
+
+def test_detect_regressions_severity_scales_with_drop_size():
+    """Real, added in the 2026-08-28 redesign: a small drop is
+    moderate, a large drop is high -- distinct real triage priority."""
+    small_drop = [
+        {"model": "m1", "timestamp": 1000, "total_turns": 10, "clean_turns": 10, "flag_counts": {}, "total_cross_turn_contamination": 0},
+        {"model": "m1", "timestamp": 2000, "total_turns": 10, "clean_turns": 8, "flag_counts": {}, "total_cross_turn_contamination": 0},
+    ]
+    large_drop = [
+        {"model": "m1", "timestamp": 1000, "total_turns": 10, "clean_turns": 10, "flag_counts": {}, "total_cross_turn_contamination": 0},
+        {"model": "m1", "timestamp": 2000, "total_turns": 10, "clean_turns": 3, "flag_counts": {}, "total_cross_turn_contamination": 0},
+    ]
+    assert _harness.detect_regressions(small_drop)[0]["severity"] == "moderate"
+    assert _harness.detect_regressions(large_drop)[0]["severity"] == "high"
+
+
+def test_detect_regressions_uses_median_of_prior_runs():
+    """Real, added in the 2026-08-28 redesign: comparison is against the
+    median of ALL prior runs, not just the immediately preceding one --
+    a single noisy prior run shouldn't set a false baseline."""
+    historical = [
+        {"model": "m1", "timestamp": 1000, "total_turns": 10, "clean_turns": 10, "flag_counts": {}, "total_cross_turn_contamination": 0},  # 100%
+        {"model": "m1", "timestamp": 2000, "total_turns": 10, "clean_turns": 3, "flag_counts": {}, "total_cross_turn_contamination": 0},   # 30%, one noisy outlier
+        {"model": "m1", "timestamp": 3000, "total_turns": 10, "clean_turns": 9, "flag_counts": {}, "total_cross_turn_contamination": 0},   # 90%, real latest
+    ]
+    # Median of [100, 30] = 65; latest (90) is not a real regression
+    # against that median, even though it's a big jump vs. the single
+    # immediately-preceding noisy run.
+    alerts = _harness.detect_regressions(historical)
+    assert not any(a["type"] == "clean_rate_regression" for a in alerts)
 
 
 def test_detect_regressions_flags_new_failure_type():
     historical = [
-        {"model": "m1", "timestamp": 1000, "total_turns": 5, "clean_turns": 5, "flag_counts": {"EMPTY": 0}},
-        {"model": "m1", "timestamp": 2000, "total_turns": 5, "clean_turns": 5, "flag_counts": {"EMPTY": 0, "TOOL_ERROR": 2}},
+        {"model": "m1", "timestamp": 1000, "total_turns": 5, "clean_turns": 5, "flag_counts": {"EMPTY": 0}, "total_cross_turn_contamination": 0},
+        {"model": "m1", "timestamp": 2000, "total_turns": 5, "clean_turns": 5, "flag_counts": {"EMPTY": 0, "TOOL_ERROR": 2}, "total_cross_turn_contamination": 0},
     ]
-    findings = _harness.detect_regressions(historical)
-    assert len(findings) == 1
-    assert "TOOL_ERROR" in findings[0]
+    alerts = _harness.detect_regressions(historical)
+    assert len(alerts) == 1
+    assert alerts[0]["type"] == "new_flag_type"
+    assert "TOOL_ERROR" in alerts[0]["message"]
+    assert alerts[0]["severity"] == "high"
+
+
+def test_detect_regressions_flags_increase_in_known_flag():
+    """Real, added in the 2026-08-28 redesign -- the real gap the first
+    version had: it only ever caught a flag's FIRST appearance, never a
+    meaningful worsening of a flag already seen in prior runs."""
+    historical = [
+        {"model": "m1", "timestamp": 1000, "total_turns": 5, "clean_turns": 4, "flag_counts": {"EMPTY": 1}, "total_cross_turn_contamination": 0},
+        {"model": "m1", "timestamp": 2000, "total_turns": 5, "clean_turns": 4, "flag_counts": {"EMPTY": 1}, "total_cross_turn_contamination": 0},
+        {"model": "m1", "timestamp": 3000, "total_turns": 5, "clean_turns": 0, "flag_counts": {"EMPTY": 5}, "total_cross_turn_contamination": 0},
+    ]
+    alerts = _harness.detect_regressions(historical)
+    increase_alerts = [a for a in alerts if a["type"] == "flag_count_increase"]
+    assert len(increase_alerts) == 1
+    assert "EMPTY" in increase_alerts[0]["message"]
+
+
+def test_detect_regressions_no_increase_alert_for_stable_known_flag():
+    historical = [
+        {"model": "m1", "timestamp": 1000, "total_turns": 5, "clean_turns": 4, "flag_counts": {"EMPTY": 1}, "total_cross_turn_contamination": 0},
+        {"model": "m1", "timestamp": 2000, "total_turns": 5, "clean_turns": 4, "flag_counts": {"EMPTY": 1}, "total_cross_turn_contamination": 0},
+    ]
+    alerts = _harness.detect_regressions(historical)
+    assert not any(a["type"] == "flag_count_increase" for a in alerts)
+
+
+def test_detect_regressions_flags_new_contamination():
+    """Real, added in the 2026-08-28 redesign: cross-turn contamination
+    is a real, existing field this function never checked before."""
+    historical = [
+        {"model": "m1", "timestamp": 1000, "total_turns": 5, "clean_turns": 5, "flag_counts": {}, "total_cross_turn_contamination": 0},
+        {"model": "m1", "timestamp": 2000, "total_turns": 5, "clean_turns": 5, "flag_counts": {}, "total_cross_turn_contamination": 2},
+    ]
+    alerts = _harness.detect_regressions(historical)
+    assert len(alerts) == 1
+    assert alerts[0]["type"] == "contamination_regression"
+    assert alerts[0]["severity"] == "high"
+
+
+def test_detect_regressions_no_contamination_alert_when_already_present():
+    historical = [
+        {"model": "m1", "timestamp": 1000, "total_turns": 5, "clean_turns": 5, "flag_counts": {}, "total_cross_turn_contamination": 1},
+        {"model": "m1", "timestamp": 2000, "total_turns": 5, "clean_turns": 5, "flag_counts": {}, "total_cross_turn_contamination": 1},
+    ]
+    alerts = _harness.detect_regressions(historical)
+    assert not any(a["type"] == "contamination_regression" for a in alerts)
 
 
 def test_detect_regressions_no_findings_when_stable():
