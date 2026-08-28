@@ -110,14 +110,28 @@ def send_message(session_id: str, message: str, model: str, mode: str = "agent")
 
 def check_trial(events: list) -> dict:
     """Real checks matching every failure mode found and fixed the
-    night this harness was built."""
+    night this harness was built.
+
+    Real, added 2026-08-28: also inspects tool_output events for a real,
+    non-zero exit_code (a genuine field the real streaming protocol
+    already carries, confirmed directly in src/agent_loop.py's own
+    real tool_output event construction) -- distinguishes "the tool was
+    called and genuinely failed" from "the tool was never called at
+    all", two different, real failure modes that made_tool_call alone
+    can't tell apart.
+    """
     content_parts = []
     tool_calls = []
+    tool_errors = []
     for e in events:
         if "delta" in e and not e.get("thinking"):
             content_parts.append(e["delta"])
         elif e.get("type") == "tool_start":
             tool_calls.append(e.get("tool"))
+        elif e.get("type") == "tool_output":
+            exit_code = e.get("exit_code")
+            if exit_code is not None and exit_code != 0:
+                tool_errors.append({"tool": e.get("tool"), "exit_code": exit_code})
 
     full_content = "".join(content_parts)
 
@@ -139,11 +153,13 @@ def check_trial(events: list) -> dict:
 
     return {
         "tool_calls": tool_calls,
+        "tool_errors": tool_errors,
         "content_preview": full_content[:150],
         "has_leaked_tag": has_leaked_tag,
         "has_repeat": has_repeat,
         "is_empty": is_empty,
         "made_tool_call": bool(tool_calls),
+        "has_tool_error": bool(tool_errors),
     }
 
 
@@ -230,6 +246,12 @@ def load_scenario(path: str) -> dict:
             raise ValueError(
                 f"Scenario file {path}, turn {i}: 'expect_tool_call' must be "
                 f"a real boolean (true/false) or omitted, got {turn['expect_tool_call']!r}"
+            )
+        if "expect_tool" in turn and not isinstance(turn["expect_tool"], str):
+            raise ValueError(
+                f"Scenario file {path}, turn {i}: 'expect_tool' must be a "
+                f"real tool name string (e.g. \"lookup_ticker\") or omitted, "
+                f"got {turn['expect_tool']!r}"
             )
     return scenario
 
@@ -322,6 +344,8 @@ def _classify_turn(r: dict) -> tuple:
         flags.append("REPEATED")
     if r["is_empty"]:
         flags.append("EMPTY")
+    if r.get("has_tool_error"):
+        flags.append("TOOL_ERROR")
     if "expectation_violated" in r:
         if r["expectation_violated"]:
             flags.append("EXPECTATION_VIOLATED")
@@ -334,22 +358,46 @@ def validate_turn(turn: dict, result: dict) -> dict:
     """Real validator: checks a turn's actual result against ITS OWN
     real, specific expectation, rather than one uniform rule applied to
     every turn. Returns a dict with:
-      - "expectation_violated": bool -- True only if this turn declared
-        a real expect_tool_call and the observed behavior contradicted
-        it. A turn with no expectation set never reports a violation
-        here, regardless of whether it made a tool call.
+      - "expectation_violated": bool -- True if this turn declared a
+        real expect_tool_call and the observed behavior contradicted
+        it, OR declared a specific expect_tool and that exact tool was
+        never called. A turn with no expectation set never reports a
+        violation here, regardless of what actually happened.
       - "expectation": the turn's own expect_tool_call value, or None
         if it didn't declare one (purely observational turn).
-    Generic issues (leaked tags, repeats, empty responses) are already
-    covered by check_trial()/​_classify_turn() and are NOT re-checked
-    here -- this function is specifically about per-turn, scenario-
-    declared expectations, a genuinely different, narrower concern.
+      - "expected_tool_missing": bool -- real, added 2026-08-28,
+        separate from the general violation flag so a report can
+        distinguish "no tool called at all" from "a tool was called,
+        just not the specific one this turn expected" (e.g. ask_user
+        instead of lookup_ticker).
+    Generic issues (leaked tags, repeats, empty responses, tool errors)
+    are already covered by check_trial()/​_classify_turn() and are NOT
+    re-checked here -- this function is specifically about per-turn,
+    scenario-declared expectations, a genuinely different, narrower
+    concern.
     """
     expectation = turn.get("expect_tool_call")
-    if expectation is None:
-        return {"expectation_violated": False, "expectation": None}
-    violated = bool(expectation) != bool(result.get("made_tool_call"))
-    return {"expectation_violated": violated, "expectation": expectation}
+    expected_tool = turn.get("expect_tool")
+
+    violated = False
+    expected_tool_missing = False
+
+    if expectation is not None:
+        violated = bool(expectation) != bool(result.get("made_tool_call"))
+
+    if expected_tool:
+        if expected_tool not in result.get("tool_calls", []):
+            expected_tool_missing = True
+            violated = True
+
+    if expectation is None and not expected_tool:
+        return {"expectation_violated": False, "expectation": None, "expected_tool_missing": False}
+
+    return {
+        "expectation_violated": violated,
+        "expectation": expectation,
+        "expected_tool_missing": expected_tool_missing,
+    }
 
 
 def run_sequence(endpoint_id: str, model: str, scenario: dict = None) -> dict:
@@ -676,6 +724,59 @@ def generate_html_report(summary: dict, output_path: str) -> None:
 RESULTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "results")
 
 
+def detect_regressions(historical_summaries: list, min_drop_pct: int = 10) -> list:
+    """Real, added 2026-08-28: compares each model's most recent run
+    against its own immediately preceding run (scoped per-model,
+    deliberately -- different models have genuinely different baselines,
+    comparing across models would produce a meaningless "regression").
+    Flags two real, distinct kinds of finding:
+      - a clean-rate drop of at least min_drop_pct percentage points
+        (default 10) between a model's last two runs
+      - a flag type present in the latest run that was never seen in
+        ANY of that model's prior runs (a genuinely new failure mode,
+        not just a fluctuation in an already-known one)
+    Returns a list of real, human-readable finding strings. An empty
+    list means no regression was detected in the available history --
+    note this says nothing about a model that has fewer than 2 runs at
+    all, since there's nothing to compare yet.
+    """
+    findings = []
+    by_model = {}
+    for s in historical_summaries:
+        by_model.setdefault(s.get("model", "?"), []).append(s)
+
+    for model, runs in by_model.items():
+        if len(runs) < 2:
+            continue
+        runs_sorted = sorted(runs, key=lambda r: r["timestamp"])
+        prior_runs = runs_sorted[:-1]
+        latest = runs_sorted[-1]
+
+        def clean_pct(s):
+            total = s.get("total_turns", 0) or 1
+            return 100 * s.get("clean_turns", 0) / total
+
+        prev_pct = clean_pct(prior_runs[-1])
+        latest_pct = clean_pct(latest)
+        drop = prev_pct - latest_pct
+        if drop >= min_drop_pct:
+            findings.append(
+                f"{model}: clean rate dropped {prev_pct:.0f}% -> {latest_pct:.0f}% "
+                f"(-{drop:.0f}pts) from the previous run"
+            )
+
+        known_flags = set()
+        for r in prior_runs:
+            for flag, count in r.get("flag_counts", {}).items():
+                if count > 0:
+                    known_flags.add(flag)
+        for flag, count in latest.get("flag_counts", {}).items():
+            if count > 0 and flag not in known_flags:
+                findings.append(f"{model}: new failure type detected -- {flag} (not seen in prior runs)")
+
+    return findings
+
+
 def load_historical_results(results_dir: str = None) -> list:
     """Real, added 2026-08-28: loads every saved --save-results JSON file
     from a directory (each one a single run_multi_round_suite() output,
@@ -882,7 +983,11 @@ def generate_trend_report(historical_summaries: list, output_path: str) -> None:
   h1 { font-size: 22px; margin: 0 0 4px; letter-spacing: -0.02em; }
   h2 { font-size: 13px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--dim); margin: 0 0 12px; }
   .subtitle { color: var(--dim); font-size: 13px; }
-  .chart-card, .table-card { max-width: 900px; margin: 0 auto 24px; background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 20px; }
+  .chart-card, .table-card, .regression-card { max-width: 900px; margin: 0 auto 24px; background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 20px; }
+  .regression-card { border-color: #F85149; }
+  .regression-card.clean { border-color: var(--border); }
+  .regression-list { margin: 0; padding-left: 18px; font-size: 13px; color: #F85149; }
+  .regression-list li { margin-bottom: 4px; }
   .legend { display: flex; flex-wrap: wrap; gap: 14px; margin-top: 10px; }
   .legend-item { display: flex; align-items: center; gap: 6px; font-size: 11px; color: var(--dim); }
   .legend-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
@@ -891,12 +996,26 @@ def generate_trend_report(historical_summaries: list, output_path: str) -> None:
   th { color: var(--dim); text-transform: uppercase; font-size: 10px; letter-spacing: 0.05em; }
 """
 
+    regressions = detect_regressions(historical_summaries)
+    if regressions:
+        regression_items = "".join(f'<li>{esc(f)}</li>' for f in regressions)
+        regression_html = (
+            '<div class="regression-card"><h2>Regression check</h2>'
+            f'<ul class="regression-list">{regression_items}</ul></div>'
+        )
+    else:
+        regression_html = (
+            '<div class="regression-card clean"><h2>Regression check</h2>'
+            '<p class="dim">No regressions detected in available history.</p></div>'
+        )
+
     html_doc = (
         '<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">'
         '<title>Stability Trends</title><style>' + style_block + '</style></head><body>'
         '<header><h1>Ticker LoRA Stability Trends</h1>'
         '<div class="subtitle">' + str(n) + ' historical run(s) loaded across '
         + str(len(models)) + ' model(s)</div></header>'
+        + regression_html +
         '<div class="chart-card"><h2>Clean rate over time, by model</h2>' + clean_svg
         + '<div class="legend">' + clean_legend + '</div></div>'
         '<div class="chart-card"><h2>Flag counts over time</h2>' + flag_svg
@@ -962,11 +1081,18 @@ def main():
     if args.trends:
         historical = load_historical_results(args.results_dir)
         print(f"Loaded {len(historical)} historical result file(s) from {args.results_dir}")
+        regressions = detect_regressions(historical)
+        if regressions:
+            print("\nRegression check:")
+            for finding in regressions:
+                print(f"  - {finding}")
+        else:
+            print("\nRegression check: no regressions detected in available history.")
         if not args.html_report:
             print("--html-report PATH is required with --trends -- nowhere to write the report.")
             return
         generate_trend_report(historical, args.html_report)
-        print(f"Trend report written to {args.html_report}")
+        print(f"\nTrend report written to {args.html_report}")
         return
 
     if args.sequence:
