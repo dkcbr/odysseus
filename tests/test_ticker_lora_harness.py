@@ -629,3 +629,94 @@ def test_tool_argument_echo_handles_no_tool_calls():
     turn = {"type": "ticker", "symbol": "RGTI"}
     result = {"tool_call_commands": []}
     assert _harness._tool_argument_echo(turn, result) is False
+
+
+# ---------------------------------------------------------------------------
+# validate_turn -- real expect_holdings_note (symmetric) checking, and
+# load_scenario -- scenario_tags / expect_holdings_note validation
+# (added 2026-08-28 as part of scenario expansion)
+# ---------------------------------------------------------------------------
+
+def test_validate_turn_expect_holdings_note_false_violated():
+    turn = {"type": "ticker", "symbol": "IONQ", "expect_holdings_note": False}
+    result = {"made_tool_call": True, "tool_calls": ["lookup_ticker"],
+              "full_content": "IONQ is at $38. (Note: the stored reference document lists 5 shares of IONQ. more)"}
+    v = _harness.validate_turn(turn, result)
+    assert v["holdings_note_unexpected"] is True
+    assert v["expectation_violated"] is True
+
+
+def test_validate_turn_expect_holdings_note_false_satisfied():
+    turn = {"type": "ticker", "symbol": "IONQ", "expect_holdings_note": False}
+    result = {"made_tool_call": True, "tool_calls": ["lookup_ticker"],
+              "full_content": "IONQ is at $38, up 2% today."}
+    v = _harness.validate_turn(turn, result)
+    assert v["holdings_note_unexpected"] is False
+    assert v["expectation_violated"] is False
+
+
+def test_validate_turn_expect_holdings_note_true_violated():
+    """Real, symmetric case added 2026-08-28: catches the note silently
+    NOT appearing for a ticker where it genuinely should."""
+    turn = {"type": "ticker", "symbol": "KTOS", "expect_holdings_note": True}
+    result = {"made_tool_call": True, "tool_calls": ["lookup_ticker"],
+              "full_content": "KTOS is at $52."}
+    v = _harness.validate_turn(turn, result)
+    assert v["holdings_note_unexpected"] is True
+
+
+def test_validate_turn_expect_holdings_note_true_satisfied():
+    turn = {"type": "ticker", "symbol": "KTOS", "expect_holdings_note": True}
+    result = {"made_tool_call": True, "tool_calls": ["lookup_ticker"],
+              "full_content": "KTOS is at $52. (Note: the stored reference document lists 16 shares of KTOS. more)"}
+    v = _harness.validate_turn(turn, result)
+    assert v["holdings_note_unexpected"] is False
+
+
+def test_load_scenario_rejects_non_list_scenario_tags(tmp_path):
+    path = _write_scenario(tmp_path, {
+        "name": "bad", "scenario_tags": "not-a-list",
+        "turns": [{"type": "ticker", "symbol": "SOUN"}],
+    })
+    with pytest.raises(ValueError, match="scenario_tags"):
+        _harness.load_scenario(path)
+
+
+def test_load_scenario_rejects_non_boolean_expect_holdings_note(tmp_path):
+    path = _write_scenario(tmp_path, {
+        "name": "bad",
+        "turns": [{"type": "ticker", "symbol": "SOUN", "expect_holdings_note": "yes"}],
+    })
+    with pytest.raises(ValueError, match="expect_holdings_note"):
+        _harness.load_scenario(path)
+
+
+def test_load_scenario_accepts_real_scenario_tags(tmp_path):
+    path = _write_scenario(tmp_path, {
+        "name": "ok", "scenario_tags": ["prompt-shape", "reliability"],
+        "turns": [{"type": "ticker", "symbol": "SOUN"}],
+    })
+    scenario = _harness.load_scenario(path)
+    assert scenario["scenario_tags"] == ["prompt-shape", "reliability"]
+
+
+def test_load_scenario_all_shipped_scenario_files_including_new_ones_are_valid():
+    """Real, updated 2026-08-28: now 6 real scenario files after scenario
+    expansion -- must all still load and validate cleanly."""
+    scenarios_dir = os.path.join(ROOT, "scripts", "scenarios")
+    files = [f for f in os.listdir(scenarios_dir) if f.endswith(".json")]
+    assert len(files) >= 6
+    for fname in files:
+        scenario = _harness.load_scenario(os.path.join(scenarios_dir, fname))
+        assert scenario["turns"]
+
+
+def test_run_sequence_ticker_turn_message_override_documented_in_schema():
+    """Real, added 2026-08-28: confirms the shipped prompt_shape_variety
+    scenario actually uses the new message-override mechanism, not just
+    that the mechanism exists in isolation."""
+    path = os.path.join(ROOT, "scripts", "scenarios", "prompt_shape_variety.json")
+    scenario = _harness.load_scenario(path)
+    ticker_turns = [t for t in scenario["turns"] if t["type"] == "ticker"]
+    assert all("message" in t for t in ticker_turns)
+    assert all(t["message"] != f"Whats {t['symbol']} trading at right now?" for t in ticker_turns)
