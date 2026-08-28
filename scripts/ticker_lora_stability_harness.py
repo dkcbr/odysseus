@@ -281,6 +281,25 @@ def load_scenario(path: str) -> dict:
                 f"real tool name string (e.g. \"lookup_ticker\") or omitted, "
                 f"got {turn['expect_tool']!r}"
             )
+        if "expect_holdings_note" in turn and not isinstance(turn["expect_holdings_note"], bool):
+            raise ValueError(
+                f"Scenario file {path}, turn {i}: 'expect_holdings_note' must "
+                f"be a real boolean or omitted, got {turn['expect_holdings_note']!r}"
+            )
+    # Real, added 2026-08-28: lightweight, real metadata -- purely
+    # documentary at runtime (like "note"), useful for a human scanning
+    # scripts/scenarios/ to understand what a scenario is actually for
+    # without opening every file. Deliberately NOT wired into filtering/
+    # trend-grouping logic yet -- with 5 real scenario files total,
+    # that would be speculative complexity ahead of an actual need.
+    if "scenario_tags" in scenario and not (
+        isinstance(scenario["scenario_tags"], list)
+        and all(isinstance(t, str) for t in scenario["scenario_tags"])
+    ):
+        raise ValueError(
+            f"Scenario file {path}: 'scenario_tags' must be a real list "
+            f"of strings or omitted, got {scenario['scenario_tags']!r}"
+        )
     return scenario
 
 
@@ -481,6 +500,17 @@ def validate_turn(turn: dict, result: dict) -> dict:
         distinguish "no tool called at all" from "a tool was called,
         just not the specific one this turn expected" (e.g. ask_user
         instead of lookup_ticker).
+      - "holdings_note_unexpected": bool -- real, added 2026-08-28,
+        checked when a turn declares expect_holdings_note (true or
+        false). false: this ticker is NOT a real DK holding, so the
+        note should never appear -- True here if it appears anyway.
+        true: this ticker IS a real DK holding, so the note should
+        appear -- True here if it's silently missing. A genuinely
+        different signal from _holdings_note_contamination()'s own
+        checks (which only fire when a note IS present and something
+        about it is wrong) -- this instead asserts whether a note
+        should have appeared for this specific ticker at all, in
+        either direction.
     Generic issues (leaked tags, repeats, empty responses, tool errors)
     are already covered by check_trial()/​_classify_turn() and are NOT
     re-checked here -- this function is specifically about per-turn,
@@ -489,9 +519,11 @@ def validate_turn(turn: dict, result: dict) -> dict:
     """
     expectation = turn.get("expect_tool_call")
     expected_tool = turn.get("expect_tool")
+    expect_holdings_note = turn.get("expect_holdings_note")
 
     violated = False
     expected_tool_missing = False
+    holdings_note_unexpected = False
 
     if expectation is not None:
         violated = bool(expectation) != bool(result.get("made_tool_call"))
@@ -501,13 +533,29 @@ def validate_turn(turn: dict, result: dict) -> dict:
             expected_tool_missing = True
             violated = True
 
-    if expectation is None and not expected_tool:
-        return {"expectation_violated": False, "expectation": None, "expected_tool_missing": False}
+    note_present = bool(_HOLDINGS_NOTE_RE.search(result.get("full_content", "")))
+    if expect_holdings_note is False and note_present:
+        holdings_note_unexpected = True
+        violated = True
+    elif expect_holdings_note is True and not note_present:
+        # Real, added 2026-08-28: the symmetric case -- a turn can also
+        # assert the note SHOULD appear (a real, known DK holding),
+        # catching the opposite real failure: the correction silently
+        # not firing when it genuinely should have.
+        holdings_note_unexpected = True
+        violated = True
+
+    if expectation is None and not expected_tool and expect_holdings_note is None:
+        return {
+            "expectation_violated": False, "expectation": None,
+            "expected_tool_missing": False, "holdings_note_unexpected": False,
+        }
 
     return {
         "expectation_violated": violated,
         "expectation": expectation,
         "expected_tool_missing": expected_tool_missing,
+        "holdings_note_unexpected": holdings_note_unexpected,
     }
 
 
@@ -527,6 +575,13 @@ def run_sequence(endpoint_id: str, model: str, scenario: dict = None) -> dict:
     turn_contents = []
     for turn in scenario["turns"]:
         if turn["type"] == "followup":
+            message = turn["message"]
+        elif turn.get("message"):
+            # Real, added 2026-08-28: a "ticker" turn can optionally
+            # override the fixed template with real, custom prompt
+            # phrasing (see scenarios/prompt_shape_variety.json) --
+            # still semantically a fresh ticker question (not a
+            # followup), just not using the standard, fixed wording.
             message = turn["message"]
         else:
             message = f"Whats {turn['symbol']} trading at right now?"
