@@ -5492,8 +5492,26 @@ async def stream_agent_loop(
             or _holdings_correction
         )
     ):
-        _final_delta = _holdings_correction if (_holdings_correction and not tool_events) else full_response.strip()
-        yield f"data: {json.dumps({'delta': _final_delta})}\n\n"
+        # Real, fixed 2026-08-28: for the ticker LoRA specifically, the main
+        # answer was already streamed once by the dedup-buffer fix earlier
+        # in this same function (see _ody_ticker_model/_dedup_buf) -- this
+        # pre-existing block previously re-yielded the ENTIRE full_response
+        # whenever tool_events were present, which for this model meant
+        # the already-shown answer appeared a second time, immediately
+        # followed by the real holdings correction note, looking exactly
+        # like the verbatim-repeat bug already fixed elsewhere. Confirmed
+        # this precisely via a temporary, reverted debug log tracing
+        # _dedup_buf's own clean, single-copy state at flush time against
+        # the corrupted final content -- the duplicate was introduced here,
+        # not in the dedup fix itself. For this model, yield only the new
+        # holdings-correction text (the genuinely new content), never the
+        # whole response again.
+        if _ody_ticker_model and tool_events:
+            _final_delta = _holdings_correction or ""
+        else:
+            _final_delta = _holdings_correction if (_holdings_correction and not tool_events) else full_response.strip()
+        if _final_delta:
+            yield f"data: {json.dumps({'delta': _final_delta})}\n\n"
 
     # --- Final metrics ---
     total_duration = time.time() - total_start
