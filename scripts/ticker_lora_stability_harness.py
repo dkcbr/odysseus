@@ -188,12 +188,32 @@ DEFAULT_SCENARIO_FILE = os.path.join(SCENARIOS_DIR, "mixed_holdings_default.json
 
 
 def load_scenario(path: str) -> dict:
-    """Load a real scenario file. Real, minimal schema:
+    """Load a real scenario file. Real schema:
     {"name": ..., "description": ..., "turns": [
-        {"type": "ticker", "symbol": "SOUN", "note": "..."},
-        {"type": "followup", "message": "...", "note": "..."}
+        {"type": "ticker", "symbol": "SOUN", "expect_tool_call": true, "note": "..."},
+        {"type": "followup", "message": "...", "expect_tool_call": false, "note": "..."}
     ]}
     "note" is optional and purely documentary -- not used at runtime.
+
+    "expect_tool_call" is real, added 2026-08-28, and optional:
+      - true: this turn is EXPECTED to call a tool (e.g. lookup_ticker for
+        a real, in-training or otherwise reliable ticker). If it doesn't,
+        that's a real, specific validation FAILURE for this turn, not
+        just a generic flag.
+      - false: this turn is EXPECTED to NOT call a tool (e.g. a genuine
+        follow-up question that should be answerable from context alone).
+        If it DOES call a tool, that's also flagged as unexpected --
+        real, if less common, information (e.g. the model re-verifying
+        something it should already know).
+      - omitted (the default): no specific expectation -- this turn is
+        being *observed*, not *asserted* against. The held-out
+        generalization scenario deliberately omits this for its ticker
+        turns, since whether the model calls the tool for a genuinely
+        unseen ticker is exactly the open question being characterized,
+        not something to assert pass/fail on.
+    Generic checks (leaked tags, exact repeats, empty responses) always
+    apply regardless of expect_tool_call, since those are never
+    acceptable for any turn.
     """
     with open(path) as f:
         scenario = json.load(f)
@@ -206,6 +226,11 @@ def load_scenario(path: str) -> dict:
             raise ValueError(f"Scenario file {path}, turn {i}: 'ticker' type needs a 'symbol'")
         if turn["type"] == "followup" and not turn.get("message"):
             raise ValueError(f"Scenario file {path}, turn {i}: 'followup' type needs a 'message'")
+        if "expect_tool_call" in turn and not isinstance(turn["expect_tool_call"], bool):
+            raise ValueError(
+                f"Scenario file {path}, turn {i}: 'expect_tool_call' must be "
+                f"a real boolean (true/false) or omitted, got {turn['expect_tool_call']!r}"
+            )
     return scenario
 
 
@@ -264,7 +289,22 @@ def _cross_turn_contamination(turn_contents: list) -> list:
 
 def _classify_turn(r: dict) -> tuple:
     """Real, shared classification logic used by both the single-question
-    and multi-round runners, so their reporting stays consistent."""
+    and multi-round runners, so their reporting stays consistent.
+
+    Real, updated 2026-08-28: when a turn carries a real,
+    validator-checked expectation ("expectation_violated" present --
+    only true for scenario-based sequence turns that went through
+    validate_turn(), never for single-question trials), that real,
+    explicit result is used instead of the old, cruder heuristic
+    ("assume every non-followup turn should call a tool"). This means
+    a turn with no declared expectation (e.g. the held-out
+    generalization scenario's ticker turns, deliberately left
+    unasserted) is correctly never flagged for tool-call behavior at
+    all -- it's being observed, not tested against a rule. The old
+    heuristic is kept ONLY as the fallback for single-question trials,
+    which never go through validate_turn() and have no concept of a
+    per-turn expectation at all.
+    """
     flags = []
     if r["has_leaked_tag"]:
         flags.append("LEAKED_TAG")
@@ -272,9 +312,34 @@ def _classify_turn(r: dict) -> tuple:
         flags.append("REPEATED")
     if r["is_empty"]:
         flags.append("EMPTY")
-    if not r["made_tool_call"] and not r.get("is_followup"):
+    if "expectation_violated" in r:
+        if r["expectation_violated"]:
+            flags.append("EXPECTATION_VIOLATED")
+    elif not r["made_tool_call"] and not r.get("is_followup"):
         flags.append("NO_TOOL_CALL")
     return (not flags, flags)
+
+
+def validate_turn(turn: dict, result: dict) -> dict:
+    """Real validator: checks a turn's actual result against ITS OWN
+    real, specific expectation, rather than one uniform rule applied to
+    every turn. Returns a dict with:
+      - "expectation_violated": bool -- True only if this turn declared
+        a real expect_tool_call and the observed behavior contradicted
+        it. A turn with no expectation set never reports a violation
+        here, regardless of whether it made a tool call.
+      - "expectation": the turn's own expect_tool_call value, or None
+        if it didn't declare one (purely observational turn).
+    Generic issues (leaked tags, repeats, empty responses) are already
+    covered by check_trial()/​_classify_turn() and are NOT re-checked
+    here -- this function is specifically about per-turn, scenario-
+    declared expectations, a genuinely different, narrower concern.
+    """
+    expectation = turn.get("expect_tool_call")
+    if expectation is None:
+        return {"expectation_violated": False, "expectation": None}
+    violated = bool(expectation) != bool(result.get("made_tool_call"))
+    return {"expectation_violated": violated, "expectation": expectation}
 
 
 def run_sequence(endpoint_id: str, model: str, scenario: dict = None) -> dict:
@@ -300,6 +365,7 @@ def run_sequence(endpoint_id: str, model: str, scenario: dict = None) -> dict:
         r = check_trial(events)
         r["prompt"] = message
         r["is_followup"] = (turn["type"] == "followup")
+        r.update(validate_turn(turn, r))
         turn_results.append(r)
         content_parts = [e["delta"] for e in events if "delta" in e and not e.get("thinking")]
         turn_contents.append("".join(content_parts))
@@ -327,6 +393,11 @@ def run_multi_round_suite(endpoint_id: str, model: str, runs: int,
     run_records = []
     total_turns = 0
     clean_turns = 0
+    # Real, updated 2026-08-28: a real dict (not a Counter) so the
+    # printed summary always shows the same, familiar key order for the
+    # original four flags, with any new flag (e.g. EXPECTATION_VIOLATED,
+    # added the same day) appended via setdefault below rather than
+    # requiring every possible flag name to be pre-listed here.
     flag_counts = {"LEAKED_TAG": 0, "REPEATED": 0, "EMPTY": 0, "NO_TOOL_CALL": 0}
     total_contamination = 0
     errors = 0
@@ -351,7 +422,7 @@ def run_multi_round_suite(endpoint_id: str, model: str, runs: int,
             else:
                 run_clean = False
                 for f in flags:
-                    flag_counts[f] += 1
+                    flag_counts[f] = flag_counts.get(f, 0) + 1
             if verbose:
                 status = "CLEAN" if is_clean else " ".join(flags)
                 print(f"  turn {i+1} [{r['prompt'][:50]}]: {status}")
