@@ -949,6 +949,72 @@ def render_replay_transcript(bundle: dict) -> str:
     return "\n".join(lines)
 
 
+def compare_check_across_models(endpoint_id: str, models: list, scenario: dict,
+                                 target_check: str = "tool_argument_echo",
+                                 attempts_per_model: int = 5, verbose: bool = True) -> dict:
+    """Real, added 2026-08-28 (Cross_model_comparison_for_argument_echo):
+    answers a genuinely different real question from
+    capture_raw_events_for_check() -- that stops at the FIRST real
+    occurrence for ONE model (useful for grabbing raw data to
+    investigate); this instead runs REAL, repeated attempts across
+    SEVERAL real models and computes a real occurrence RATE per model,
+    to determine whether a given real check is model-specific or a
+    more general, shared issue (e.g. in this harness's own detection
+    logic, or a systemic backend behavior affecting every model).
+
+    Reuses run_sequence() completely unchanged, attempts_per_model real
+    times per real model (not a separate turn-loop implementation) --
+    run_sequence() already computes every real per-turn check,
+    including target_check, as part of its normal turn_results; this
+    function only adds the real, repeated-attempt rate aggregation on
+    top.
+
+    Returns {model: {"occurrences": int, "attempts": int, "rate": pct}}.
+    Real, deliberate: does NOT save raw events here -- that's a
+    genuinely separate concern already covered by
+    capture_raw_events_for_check()/--capture-check, which a caller can
+    point at whichever specific model this comparison shows is most
+    worth investigating further.
+    """
+    results = {}
+    for model in models:
+        occurrences = 0
+        for attempt in range(1, attempts_per_model + 1):
+            if verbose:
+                print(f"{model}: attempt {attempt}/{attempts_per_model}...")
+            run_result = run_sequence(endpoint_id, model, scenario)
+            fired = any(r.get(target_check) for r in run_result["turn_results"])
+            if fired:
+                occurrences += 1
+        rate = round(100 * occurrences / attempts_per_model) if attempts_per_model else 0
+        results[model] = {"occurrences": occurrences, "attempts": attempts_per_model, "rate": rate}
+        if verbose:
+            print(f"  {model}: {occurrences}/{attempts_per_model} attempts showed '{target_check}' ({rate}%)")
+
+    if verbose:
+        print(f"\n=== Cross-Model Comparison: '{target_check}' on '{scenario['name']}' ===")
+        header = f"{'Model':<32} {'Occurrences':>12} {'Rate':>6}"
+        print(header)
+        print("-" * len(header))
+        for model, r in results.items():
+            print(f"{model:<32} {r['occurrences']:>7}/{r['attempts']:<4} {r['rate']:>5}%")
+        rates = {m: r["rate"] for m, r in results.items()}
+        if len(set(rates.values())) > 1:
+            print(f"\nRates differ across models -- real evidence this check is likely "
+                  f"model-specific, not a shared/systemic issue.")
+        elif all(r == 0 for r in rates.values()):
+            print(f"\nNo model showed this check in {attempts_per_model} real attempt(s) each -- "
+                  f"inconclusive either way; try more attempts.")
+        else:
+            print(f"\nRates are similar across every model tested -- real evidence pointing "
+                  f"AWAY from a model-specific cause, toward something shared (this harness's "
+                  f"own detection logic, or a systemic backend behavior).")
+
+    return results
+
+
+
+
 
 
 
@@ -3577,6 +3643,20 @@ def main():
                          help="With --capture-check, real number of "
                               "attempts before giving up honestly. "
                               "Default 10.")
+    parser.add_argument("--compare-check", metavar="FLAG_NAME",
+                         help="Real, live investigative tool: runs "
+                              "--scenario-file (or the default scenario) "
+                              "--attempts-per-model real times per real "
+                              "model, computes a real occurrence rate "
+                              "per model for FLAG_NAME (e.g. "
+                              "tool_argument_echo), and reports whether "
+                              "the real rates differ across models "
+                              "(model-specific) or are similar "
+                              "(likely a shared/systemic cause). "
+                              "Combine with --models.")
+    parser.add_argument("--attempts-per-model", type=int, default=5,
+                         help="With --compare-check, real number of "
+                              "attempts per real model. Default 5.")
     parser.add_argument("--summary-trend-html", metavar="PATH",
                          help="With --summary-trend, also write a real, "
                               "self-contained HTML report comparing "
@@ -3844,6 +3924,16 @@ def main():
         with open(args.replay) as f:
             bundle = json.load(f)
         print(render_replay_transcript(bundle))
+        return
+
+    if args.compare_check:
+        models = [m.strip() for m in args.models.split(",")] if args.models else DEFAULT_CROSS_MODEL_LIST
+        scenario = load_scenario(args.scenario_file) if args.scenario_file else load_scenario(DEFAULT_SCENARIO_FILE)
+        print(f"Comparing check '{args.compare_check}' across {len(models)} model(s) "
+              f"[scenario: {scenario['name']}], {args.attempts_per_model} real attempt(s) each...")
+        compare_check_across_models(args.endpoint_id, models, scenario,
+                                     target_check=args.compare_check,
+                                     attempts_per_model=args.attempts_per_model)
         return
 
     if args.capture_check:
