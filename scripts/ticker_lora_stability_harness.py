@@ -36,8 +36,14 @@ import re
 import time
 import urllib.request
 import urllib.parse
+import urllib.error  # real, added 2026-08-28: explicit, not relying on urllib.request's internal import
 import http.server  # real, added 2026-08-28: stdlib-only, used by
                      # serve_health_dashboard() -- no new dependency
+import shutil       # real, added 2026-08-28: stdlib-only, used by
+                     # send_desktop_notification() to check notify-send
+                     # is actually available at runtime rather than assume
+import subprocess   # real, added 2026-08-28: stdlib-only, used to
+                     # actually invoke notify-send when available
 
 BASE_URL = "http://localhost:7000"
 # Real, same internal-token pattern already established and fixed
@@ -2064,6 +2070,93 @@ def detect_regressions(historical_summaries: list, min_drop_pct: int = 10) -> li
     return alerts
 
 
+def send_desktop_notification(title: str, message: str) -> bool:
+    """Real, added 2026-08-28: sends a real desktop notification via
+    notify-send (the real, standard Linux desktop notification tool,
+    confirmed present on the real host, Pop!_OS 24.04). Checks
+    shutil.which("notify-send") at real runtime rather than assume
+    it's available -- confirmed directly, the same day, that it is
+    NOT present inside the Odysseus Docker container this harness is
+    most often actually run from (no D-Bus session exists there at
+    all), so this only genuinely works when the harness runs directly
+    on the host, not from inside the container. Returns False with a
+    clear, honest reason printed rather than silently do nothing or
+    raise, so a caller running inside the container isn't left
+    wondering why no notification appeared.
+    """
+    if shutil.which("notify-send") is None:
+        print("Desktop notification skipped: notify-send is not available in this "
+              "environment (e.g. running inside a container without D-Bus) -- "
+              "run this harness on the host directly, or use --notify-method webhook.")
+        return False
+    try:
+        subprocess.run(["notify-send", title, message], check=True, timeout=5)
+        return True
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError) as e:
+        print(f"Desktop notification failed: {e}")
+        return False
+
+
+def send_webhook_notification(url: str, payload: dict) -> bool:
+    """Real, added 2026-08-28: POSTs a real JSON payload to any real
+    webhook URL via urllib.request (already used throughout this
+    harness, no new dependency) -- works from inside the container or
+    on the host equally, unlike send_desktop_notification(), since it
+    only needs real network access, not a real D-Bus session. Points
+    at whatever real endpoint the caller configures (Slack incoming
+    webhook, Discord webhook, ntfy.sh, a custom endpoint) -- this
+    harness has no confirmed, hard-coded credentials for any specific
+    real service (e.g. DK's real Hermes Telegram bot), so it does not
+    guess or fabricate one; the caller supplies a real URL via
+    --webhook-url.
+    """
+    try:
+        data = json.dumps(payload).encode("utf-8")
+        req = urllib.request.Request(
+            url, data=data, headers={"Content-Type": "application/json"}, method="POST"
+        )
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            return 200 <= resp.status < 300
+    except (urllib.error.URLError, OSError) as e:
+        print(f"Webhook notification failed: {e}")
+        return False
+
+
+def notify_regressions(regressions: list, method: str = "desktop", webhook_url: str = None,
+                        suite_name: str = "?") -> bool:
+    """Real, added 2026-08-28 (Design_suite_health_notifications):
+    sends a real notification only when there's something real to
+    report -- if regressions is empty, does nothing and returns False,
+    since a "no regressions" notification firing on every single run
+    would just be noise, not a real alert. Dispatches to
+    send_desktop_notification() or send_webhook_notification()
+    depending on method; for webhook, the real payload includes the
+    suite name and every real regression alert dict exactly as
+    detect_regressions() produced it (type/message/severity/model),
+    not a lossy, pre-formatted summary string, so a real downstream
+    consumer (a Slack channel, a custom script watching the webhook)
+    can build its own real formatting or filtering on top.
+    """
+    if not regressions:
+        return False
+
+    if method == "desktop":
+        title = f"Suite regression: {suite_name}"
+        lines = [f"[{a['severity']}] {a['message']}" for a in regressions]
+        message = "\n".join(lines)
+        return send_desktop_notification(title, message)
+    elif method == "webhook":
+        if not webhook_url:
+            print("Webhook notification skipped: --webhook-url wasn't given.")
+            return False
+        payload = {"suite_name": suite_name, "regressions": regressions}
+        return send_webhook_notification(webhook_url, payload)
+    else:
+        raise ValueError(f"Unknown notification method {method!r}, real options: 'desktop', 'webhook'")
+
+
+
+
 
 def load_historical_results(results_dir: str = None) -> list:
     """Real, added 2026-08-28: loads every saved --save-results JSON file
@@ -2711,6 +2804,27 @@ def main():
     parser.add_argument("--refresh-seconds", type=int, default=5,
                          help="Auto-refresh interval in seconds for "
                               "--serve-dashboard. Default 5.")
+    parser.add_argument("--notify-on-regression", action="store_true",
+                         help="With --health-summary, send a real push "
+                              "notification if regressions are actually "
+                              "detected (no notification when there "
+                              "aren't any -- this is an alert, not a "
+                              "status ping). See --notify-method.")
+    parser.add_argument("--notify-method", default="desktop", choices=["desktop", "webhook"],
+                         help="'desktop' (default) uses notify-send -- "
+                              "only works when this harness runs "
+                              "directly on the host (confirmed NOT "
+                              "available inside the Odysseus container, "
+                              "no D-Bus session there). 'webhook' POSTs "
+                              "real JSON to --webhook-url and works from "
+                              "either environment.")
+    parser.add_argument("--webhook-url", metavar="URL",
+                         help="Real webhook URL for --notify-method "
+                              "webhook (e.g. a Slack incoming webhook, "
+                              "ntfy.sh topic, or a custom endpoint). No "
+                              "default -- this harness has no "
+                              "confirmed, hard-coded credentials for any "
+                              "specific real service.")
     parser.add_argument("--multi-model-suite", metavar="PATH",
                          help="Real suite JSON file with its own real "
                               "'models' field (see scripts/suites/"
@@ -2961,6 +3075,11 @@ def main():
             historical = load_historical_results(args.results_dir) if os.path.isdir(args.results_dir) else None
             health = generate_suite_health_summary(suite_summary, historical_summaries=historical)
             _print_health_summary(health)
+            if args.notify_on_regression and "regressions" in health:
+                sent = notify_regressions(health["regressions"], method=args.notify_method,
+                                           webhook_url=args.webhook_url, suite_name=health["overview"]["suite_name"])
+                if sent:
+                    print(f"\nRegression notification sent via {args.notify_method}.")
             if args.save_summary:
                 with open(args.save_summary, "w") as f:
                     json.dump(health, f, indent=2)
@@ -2993,6 +3112,11 @@ def main():
             historical = load_historical_results(args.results_dir) if os.path.isdir(args.results_dir) else None
             health = generate_suite_health_summary(mm_summary, historical_summaries=historical)
             _print_health_summary(health)
+            if args.notify_on_regression and "regressions" in health:
+                sent = notify_regressions(health["regressions"], method=args.notify_method,
+                                           webhook_url=args.webhook_url, suite_name=health["overview"]["suite_name"])
+                if sent:
+                    print(f"\nRegression notification sent via {args.notify_method}.")
             if args.save_summary:
                 with open(args.save_summary, "w") as f:
                     json.dump(health, f, indent=2)
@@ -3018,6 +3142,11 @@ def main():
             historical = load_historical_results(args.results_dir) if os.path.isdir(args.results_dir) else None
             health = generate_suite_health_summary(suite_summary, historical_summaries=historical)
             _print_health_summary(health)
+            if args.notify_on_regression and "regressions" in health:
+                sent = notify_regressions(health["regressions"], method=args.notify_method,
+                                           webhook_url=args.webhook_url, suite_name=health["overview"]["suite_name"])
+                if sent:
+                    print(f"\nRegression notification sent via {args.notify_method}.")
             if args.save_summary:
                 with open(args.save_summary, "w") as f:
                     json.dump(health, f, indent=2)
