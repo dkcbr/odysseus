@@ -1457,6 +1457,55 @@ def load_historical_results(results_dir: str = None) -> list:
     return summaries
 
 
+def _gather_scenario_history(historical_summaries: list, model: str = None) -> dict:
+    """Real, added 2026-08-28 (refactored out of rank_scenarios_by_
+    failure_rate, which used to contain this logic inline -- extracted
+    so compute_scenario_weight() can reuse the exact same real data-
+    gathering rather than duplicate it): walks every real historical
+    summary, handling all 3 genuinely different shapes this harness can
+    produce (a direct scenario run with "scenario_name" at the top
+    level; a suite run with "scenario_results", a list of nested,
+    per-scenario summaries; a fuzz run with "fuzz_base_scenario"
+    instead), and returns a real, per-scenario dict of
+    {"total_turns", "clean_turns", "runs_seen", "flag_counts"
+    (aggregated across every real occurrence), "total_contamination"}.
+
+    Same real, deliberate model-scoping as rank_scenarios_by_failure_
+    rate(): a real, confirmed result (via --cross-model, the same
+    night) showed the identical scenario swinging from 80% clean to 0%
+    clean depending purely on which model ran it -- mixing models here
+    would produce misleading aggregate numbers for every downstream
+    consumer of this data, not just the failure-rate ranking.
+    """
+    per_scenario = {}
+
+    def record(scenario_name, s):
+        if model is not None and s.get("model") != model:
+            return
+        bucket = per_scenario.setdefault(scenario_name, {
+            "total_turns": 0, "clean_turns": 0, "runs_seen": 0,
+            "flag_counts": {}, "total_contamination": 0,
+        })
+        bucket["total_turns"] += s.get("total_turns", 0)
+        bucket["clean_turns"] += s.get("clean_turns", 0)
+        bucket["runs_seen"] += 1
+        bucket["total_contamination"] += s.get("total_cross_turn_contamination", 0)
+        for flag, count in s.get("flag_counts", {}).items():
+            bucket["flag_counts"][flag] = bucket["flag_counts"].get(flag, 0) + count
+
+    for s in historical_summaries:
+        if "scenario_name" in s:
+            record(s["scenario_name"], s)
+        elif "scenario_results" in s:
+            for nested in s["scenario_results"]:
+                if "scenario_name" in nested:
+                    record(nested["scenario_name"], nested)
+        elif "fuzz_base_scenario" in s:
+            record(s["fuzz_base_scenario"], s)
+
+    return per_scenario
+
+
 def rank_scenarios_by_failure_rate(historical_summaries: list, model: str = None) -> list:
     """Real, added 2026-08-28: ranks real scenarios by how often they've
     actually shown a real issue historically, highest failure rate
@@ -1477,45 +1526,13 @@ def rank_scenarios_by_failure_rate(historical_summaries: list, model: str = None
     directly in this docstring rather than silently producing a
     misleading number.
 
-    Real, handles all 3 genuinely different summary shapes this harness
-    can produce and load_historical_results() can load:
-      - a direct scenario run (has "scenario_name" at the top level)
-      - a suite run (has "suite_name" and a "scenario_results" list of
-        nested, per-scenario summaries -- each one is unpacked
-        separately, attributed to its own real scenario_name)
-      - a fuzz run (has "fuzz_base_scenario" instead of "scenario_name"
-        -- attributed to that real base scenario, since fuzzed variants
-        are still real evidence about that scenario's general area of
-        difficulty)
-    Cross-model comparison files (saved individually, one per model, by
-    the real --cross-model CLI path) are already single-scenario-shaped
-    and need no special handling here.
-
     Returns a list of {"scenario_name", "failure_rate" (0-100),
     "total_turns", "clean_turns", "runs_seen"}, sorted by failure_rate
     descending (worst first). A scenario is EXCLUDED if no historical
     data exists in the given model scope, rather than shown with a
     fabricated 0% failure rate.
     """
-    per_scenario = {}
-
-    def record(scenario_name, s):
-        if model is not None and s.get("model") != model:
-            return
-        bucket = per_scenario.setdefault(scenario_name, {"total_turns": 0, "clean_turns": 0, "runs_seen": 0})
-        bucket["total_turns"] += s.get("total_turns", 0)
-        bucket["clean_turns"] += s.get("clean_turns", 0)
-        bucket["runs_seen"] += 1
-
-    for s in historical_summaries:
-        if "scenario_name" in s:
-            record(s["scenario_name"], s)
-        elif "scenario_results" in s:
-            for nested in s["scenario_results"]:
-                if "scenario_name" in nested:
-                    record(nested["scenario_name"], nested)
-        elif "fuzz_base_scenario" in s:
-            record(s["fuzz_base_scenario"], s)
+    per_scenario = _gather_scenario_history(historical_summaries, model)
 
     ranked = []
     for scenario_name, bucket in per_scenario.items():
@@ -1532,6 +1549,101 @@ def rank_scenarios_by_failure_rate(historical_summaries: list, model: str = None
 
     ranked.sort(key=lambda r: r["failure_rate"], reverse=True)
     return ranked
+
+
+# Real, deliberate design decision, made before writing any weighting
+# code, in response to the external proposal that requested this
+# feature: that proposal's own design asked for a static "weight" block
+# hand-written into every scenario JSON file (failure_rate, contamination_
+# risk, etc. as fixed numbers). Rejected that specific mechanism -- a
+# static, hand-maintained number claiming to represent "historical
+# failure rate" would silently go stale the moment new history
+# accumulates, with nothing forcing anyone to update it. The whole
+# point of weighting by real history is that it's dynamic; baking a
+# snapshot into a config file defeats that. Scenario weight is computed
+# fresh, at call time, directly from real historical data (reusing
+# _gather_scenario_history(), the same underlying data
+# rank_scenarios_by_failure_rate() already uses) plus each real
+# scenario's own real, existing scenario_tags -- never a static field
+# a human has to remember to keep in sync.
+GENERALIZATION_RISK_TAGS = {"generalization", "synthetic", "hallucination-risk"}
+
+
+def compute_scenario_weight(scenario: dict, historical_summaries: list, model: str = None) -> dict:
+    """Real, added 2026-08-28: computes a real, dynamic scenario weight
+    -- base + failure_rate + contamination_risk + tool_error_risk +
+    generalization_risk -- combining real historical evidence with the
+    scenario's own real, declared tags, so suites/fuzzing/regression
+    alerts can prioritize the scenarios most likely to actually matter,
+    rather than treat every scenario as equally important regardless of
+    its real track record.
+
+    Real components, each real and independently inspectable in the
+    returned dict, not just folded into one opaque number:
+      - base: fixed at 1.0 -- every real scenario starts equally
+        important; the other components only ever add real, evidence-
+        or design-based weight on top.
+      - failure_rate: 0.0-1.0, the scenario's own real historical
+        failure rate (reuses the exact same _gather_scenario_history()
+        data rank_scenarios_by_failure_rate() uses, same real model-
+        scoping caveat applies).
+      - contamination_risk: 0.0-1.0, real cross-turn contamination
+        findings per real historical run of this scenario, capped at
+        1.0 (a scenario contaminating on literally every run is
+        already maximally concerning; further runs shouldn't inflate
+        this component without bound).
+      - tool_error_risk: 0.0-1.0, real TOOL_ERROR flag occurrences per
+        real total turn, same capping logic.
+      - generalization_risk: a flat, real 1.0 if the scenario's own
+        real scenario_tags include "generalization", "synthetic", or
+        "hallucination-risk" (see GENERALIZATION_RISK_TAGS) -- an
+        intrinsic, design-time property of what the scenario tests,
+        not something derived from run history at all, so a scenario
+        with zero historical runs (brand new) still correctly gets
+        real weight if its own tags mark it as testing a genuinely
+        harder, higher-risk dimension.
+    Returns {"total", "base", "failure_rate", "contamination_risk",
+    "tool_error_risk", "generalization_risk", "runs_seen"} -- runs_seen
+    is 0 for a scenario with no historical data in the given model
+    scope, and every history-derived component correctly stays 0.0 in
+    that case (a brand-new scenario isn't assumed risky just because
+    there's no evidence yet -- only its own real tags can raise its
+    weight before real history exists).
+    """
+    scenario_name = scenario.get("name", "?")
+    per_scenario = _gather_scenario_history(historical_summaries, model)
+    bucket = per_scenario.get(scenario_name)
+
+    base = 1.0
+    failure_rate = 0.0
+    contamination_risk = 0.0
+    tool_error_risk = 0.0
+    runs_seen = 0
+
+    if bucket:
+        runs_seen = bucket["runs_seen"]
+        total = bucket["total_turns"]
+        if total:
+            failure_rate = 1 - bucket["clean_turns"] / total
+            tool_error_risk = min(1.0, bucket["flag_counts"].get("TOOL_ERROR", 0) / total)
+        if runs_seen:
+            contamination_risk = min(1.0, bucket["total_contamination"] / runs_seen)
+
+    tags = set(scenario.get("scenario_tags") or [])
+    generalization_risk = 1.0 if tags & GENERALIZATION_RISK_TAGS else 0.0
+
+    total_weight = base + failure_rate + contamination_risk + tool_error_risk + generalization_risk
+
+    return {
+        "total": round(total_weight, 3),
+        "base": base,
+        "failure_rate": round(failure_rate, 3),
+        "contamination_risk": round(contamination_risk, 3),
+        "tool_error_risk": round(tool_error_risk, 3),
+        "generalization_risk": generalization_risk,
+        "runs_seen": runs_seen,
+    }
+
 
 
 
@@ -1894,7 +2006,40 @@ def main():
                               "of scoping to --model. Real, honest caveat: "
                               "this can produce a misleading ranking if "
                               "different models were tested unevenly.")
+    parser.add_argument("--weight-scenarios", action="store_true",
+                         help="Compute a real, dynamic weight for every "
+                              "real scenario file under scripts/scenarios/ "
+                              "-- combining historical failure rate, "
+                              "contamination risk, and tool-error risk "
+                              "(from --results-dir) with each scenario's "
+                              "own real, declared scenario_tags (a "
+                              "generalization/synthetic/hallucination-risk "
+                              "tag adds real weight even with zero history) "
+                              "-- and print them ranked, highest weight "
+                              "first. Scoped to --model by default, same "
+                              "real reasoning as --rank-scenarios; pass "
+                              "--rank-all-models to aggregate across every "
+                              "model instead.")
     args = parser.parse_args()
+
+    if args.weight_scenarios:
+        historical = load_historical_results(args.results_dir)
+        scope_model = None if args.rank_all_models else args.model
+        scope_label = "all models (real caveat: may be misleading if models were tested unevenly)" if scope_model is None else scope_model
+        scenario_files = sorted(f for f in os.listdir(SCENARIOS_DIR) if f.endswith(".json"))
+        weighted = []
+        for fname in scenario_files:
+            scenario = load_scenario(os.path.join(SCENARIOS_DIR, fname))
+            w = compute_scenario_weight(scenario, historical, model=scope_model)
+            weighted.append((scenario["name"], w))
+        weighted.sort(key=lambda item: item[1]["total"], reverse=True)
+        print(f"Scenario weight ranking [{len(historical)} historical file(s), scope: {scope_label}]:\n")
+        print(f"{'Scenario':<32} {'Weight':>7} {'Fail':>6} {'Contam':>7} {'ToolErr':>8} {'Gen':>5} {'Runs':>5}")
+        print("-" * 74)
+        for name, w in weighted:
+            print(f"{name:<32} {w['total']:>7} {w['failure_rate']:>6} {w['contamination_risk']:>7} "
+                  f"{w['tool_error_risk']:>8} {w['generalization_risk']:>5} {w['runs_seen']:>5}")
+        return
 
     if args.rank_scenarios:
         historical = load_historical_results(args.results_dir)

@@ -986,3 +986,96 @@ def test_run_multi_model_suite_rejects_empty_models():
     'models' field is required."""
     with pytest.raises(ValueError, match="models"):
         _harness.run_multi_model_suite("77bddaa5", [], {"name": "x", "_resolved_scenario_paths": []})
+
+
+# ---------------------------------------------------------------------------
+# compute_scenario_weight and _gather_scenario_history (added 2026-08-28
+# as part of scenario weighting)
+# ---------------------------------------------------------------------------
+
+def test_compute_scenario_weight_no_history_no_risky_tags():
+    scenario = {"name": "brand_new", "scenario_tags": ["reliability"]}
+    w = _harness.compute_scenario_weight(scenario, [])
+    assert w["total"] == 1.0
+    assert w["runs_seen"] == 0
+
+
+def test_compute_scenario_weight_generalization_tag_adds_weight_with_no_history():
+    """Real, deliberate design: an intrinsic, design-time property (the
+    scenario's own real tags) can raise weight even with zero
+    historical runs -- a brand-new, harder scenario isn't underweighted
+    just because it hasn't run yet."""
+    scenario = {"name": "brand_new_gen", "scenario_tags": ["generalization"]}
+    w = _harness.compute_scenario_weight(scenario, [])
+    assert w["total"] == 2.0
+    assert w["generalization_risk"] == 1.0
+
+
+def test_compute_scenario_weight_combines_real_history_components():
+    scenario = {"name": "risky", "scenario_tags": []}
+    historical = [{
+        "model": "m1", "scenario_name": "risky",
+        "total_turns": 10, "clean_turns": 4,
+        "flag_counts": {"TOOL_ERROR": 2},
+        "total_cross_turn_contamination": 1,
+    }]
+    w = _harness.compute_scenario_weight(scenario, historical, model="m1")
+    assert w["runs_seen"] == 1
+    assert w["failure_rate"] == 0.6
+    assert w["tool_error_risk"] == 0.2
+    assert w["contamination_risk"] == 1.0
+    assert w["total"] == round(1.0 + 0.6 + 1.0 + 0.2 + 0.0, 3)
+
+
+def test_compute_scenario_weight_respects_model_scope():
+    scenario = {"name": "risky", "scenario_tags": []}
+    historical = [{
+        "model": "m1", "scenario_name": "risky", "total_turns": 10, "clean_turns": 0,
+    }]
+    w_wrong_model = _harness.compute_scenario_weight(scenario, historical, model="different_model")
+    assert w_wrong_model["runs_seen"] == 0
+    assert w_wrong_model["total"] == 1.0
+
+
+def test_compute_scenario_weight_contamination_and_tool_error_risk_are_capped():
+    """Real, deliberate design: a scenario contaminating or erroring on
+    literally every run is already maximally concerning -- further
+    identical runs shouldn't inflate the component without bound."""
+    scenario = {"name": "always_bad", "scenario_tags": []}
+    historical = [{
+        "model": "m1", "scenario_name": "always_bad",
+        "total_turns": 2, "clean_turns": 0,
+        "flag_counts": {"TOOL_ERROR": 2},
+        "total_cross_turn_contamination": 5,
+    }]
+    w = _harness.compute_scenario_weight(scenario, historical, model="m1")
+    assert w["contamination_risk"] == 1.0
+    assert w["tool_error_risk"] == 1.0
+
+
+def test_all_real_scenario_files_have_real_scenario_tags():
+    """Real, added 2026-08-28 after a genuine gap was found and fixed
+    during this same task: 3 of 6 real scenario files predated the
+    scenario_tags convention and had none at all, silently
+    underweighting them regardless of what they actually test. Guards
+    against this happening again for any future scenario."""
+    scenarios_dir = os.path.join(ROOT, "scripts", "scenarios")
+    for fname in os.listdir(scenarios_dir):
+        if not fname.endswith(".json"):
+            continue
+        scenario = _harness.load_scenario(os.path.join(scenarios_dir, fname))
+        assert scenario.get("scenario_tags"), f"{fname} is missing real scenario_tags"
+
+
+def test_rank_scenarios_by_failure_rate_unaffected_by_the_refactor():
+    """Real, regression guard: rank_scenarios_by_failure_rate() was
+    refactored to share _gather_scenario_history() with the new
+    compute_scenario_weight() -- its own, already-established real
+    behavior must be completely unchanged."""
+    historical = [
+        {"model": "m1", "scenario_name": "clean_one", "total_turns": 10, "clean_turns": 10},
+        {"model": "m1", "scenario_name": "bad_one", "total_turns": 10, "clean_turns": 2},
+    ]
+    ranked = _harness.rank_scenarios_by_failure_rate(historical, model="m1")
+    assert [r["scenario_name"] for r in ranked] == ["bad_one", "clean_one"]
+    assert ranked[0]["failure_rate"] == 80

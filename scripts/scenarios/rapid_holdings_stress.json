@@ -1,11 +1,44 @@
 {
   "name": "rapid_holdings_stress",
   "description": "Stress-tests the holdings-correction path (src/agent_loop.py's holdings-claim verification, and its interaction with the ticker LoRA's dedup-buffer fix, 16422cca) more aggressively than the default scenario: back-to-back real DK holdings with no plain, non-holding ticker between them, to check the fix holds up under repeated, consecutive triggering rather than a single occurrence per conversation. All turns use real, in-training tickers DK actually holds, so expect_tool_call: true is asserted throughout except the genuine follow-up. Ticker turns also assert expect_tool: lookup_ticker specifically (real, added 2026-08-28) -- not just that some tool was called, but that it was the correct one, since ask_user or another tool being called instead would otherwise pass the looser expect_tool_call check.",
+  "scenario_tags": [
+    "holdings-correction",
+    "stress-test"
+  ],
   "turns": [
-    {"type": "ticker", "symbol": "SOUN", "expect_tool_call": true, "expect_tool": "lookup_ticker", "note": "real DK holding"},
-    {"type": "ticker", "symbol": "KTOS", "expect_tool_call": true, "expect_tool": "lookup_ticker", "note": "real DK holding, immediately after another holdings-correction trigger"},
-    {"type": "ticker", "symbol": "SOUN", "expect_tool_call": true, "expect_tool": "lookup_ticker", "note": "same holding asked again, later in the same conversation"},
-    {"type": "followup", "message": "And KTOS, remind me?", "expect_tool_call": false, "note": "a real, short follow-up mixing an earlier holding by name -- should be answerable from context"},
-    {"type": "ticker", "symbol": "KTOS", "expect_tool_call": true, "expect_tool": "lookup_ticker", "note": "final repeat -- third real DK holding reference in one conversation"}
+    {
+      "type": "ticker",
+      "symbol": "SOUN",
+      "expect_tool_call": true,
+      "expect_tool": "lookup_ticker",
+      "note": "real DK holding"
+    },
+    {
+      "type": "ticker",
+      "symbol": "KTOS",
+      "expect_tool_call": true,
+      "expect_tool": "lookup_ticker",
+      "note": "real DK holding, immediately after another holdings-correction trigger"
+    },
+    {
+      "type": "ticker",
+      "symbol": "SOUN",
+      "expect_tool_call": true,
+      "expect_tool": "lookup_ticker",
+      "note": "same holding asked again, later in the same conversation"
+    },
+    {
+      "type": "followup",
+      "message": "And KTOS, remind me?",
+      "expect_tool_call": false,
+      "note": "a real, short follow-up mixing an earlier holding by name -- should be answerable from context"
+    },
+    {
+      "type": "ticker",
+      "symbol": "KTOS",
+      "expect_tool_call": true,
+      "expect_tool": "lookup_ticker",
+      "note": "final repeat -- third real DK holding reference in one conversation"
+    }
   ]
 }
