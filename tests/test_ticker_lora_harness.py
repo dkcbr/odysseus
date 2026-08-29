@@ -27,6 +27,7 @@ import importlib.util
 import json
 import os
 import tempfile
+import time
 
 import pytest
 
@@ -1079,3 +1080,96 @@ def test_rank_scenarios_by_failure_rate_unaffected_by_the_refactor():
     ranked = _harness.rank_scenarios_by_failure_rate(historical, model="m1")
     assert [r["scenario_name"] for r in ranked] == ["bad_one", "clean_one"]
     assert ranked[0]["failure_rate"] == 80
+
+
+# ---------------------------------------------------------------------------
+# scenario_weighting_extensions: recency-windowed weighting (added
+# 2026-08-28)
+# ---------------------------------------------------------------------------
+
+def _real_history_with_old_bad_recent_good(scenario_name, model="m1"):
+    now = time.time()
+    return [
+        {"model": model, "scenario_name": scenario_name, "timestamp": now - 30 * 86400, "total_turns": 10, "clean_turns": 0},
+        {"model": model, "scenario_name": scenario_name, "timestamp": now - 29 * 86400, "total_turns": 10, "clean_turns": 1},
+        {"model": model, "scenario_name": scenario_name, "timestamp": now - 28 * 86400, "total_turns": 10, "clean_turns": 0},
+        {"model": model, "scenario_name": scenario_name, "timestamp": now - 2 * 86400, "total_turns": 10, "clean_turns": 10},
+        {"model": model, "scenario_name": scenario_name, "timestamp": now - 1 * 86400, "total_turns": 10, "clean_turns": 10},
+        {"model": model, "scenario_name": scenario_name, "timestamp": now, "total_turns": 10, "clean_turns": 10},
+    ]
+
+
+def test_gather_scenario_history_default_unchanged_by_recent_n_refactor():
+    """Real, critical regression guard: _gather_scenario_history() was
+    substantially restructured (entry-collect-then-window-then-
+    aggregate instead of immediate accumulation) to support recency
+    windowing -- the default (recent_n=None) behavior must be
+    byte-identical to before the restructuring."""
+    historical = [
+        {"model": "m1", "scenario_name": "a", "total_turns": 10, "clean_turns": 8},
+        {"model": "m1", "scenario_name": "a", "total_turns": 5, "clean_turns": 5},
+    ]
+    result = _harness._gather_scenario_history(historical, model="m1")
+    assert result["a"]["total_turns"] == 15
+    assert result["a"]["clean_turns"] == 13
+    assert result["a"]["runs_seen"] == 2
+
+
+def test_gather_scenario_history_recent_n_keeps_newest_first():
+    now = time.time()
+    historical = [
+        {"model": "m1", "scenario_name": "a", "timestamp": now - 100, "total_turns": 10, "clean_turns": 0},
+        {"model": "m1", "scenario_name": "a", "timestamp": now - 50, "total_turns": 10, "clean_turns": 5},
+        {"model": "m1", "scenario_name": "a", "timestamp": now, "total_turns": 10, "clean_turns": 10},
+    ]
+    result = _harness._gather_scenario_history(historical, model="m1", recent_n=2)
+    # Should keep only the 2 newest: timestamp now-50 (5 clean) and now (10 clean)
+    assert result["a"]["total_turns"] == 20
+    assert result["a"]["clean_turns"] == 15
+    assert result["a"]["runs_seen"] == 2
+
+
+def test_compute_scenario_weight_recent_n_shows_lower_weight_for_improving_scenario():
+    scenario = {"name": "improving", "scenario_tags": []}
+    historical = _real_history_with_old_bad_recent_good("improving")
+    w_all_time = _harness.compute_scenario_weight(scenario, historical, model="m1")
+    w_recent_3 = _harness.compute_scenario_weight(scenario, historical, model="m1", recent_n=3)
+    assert w_recent_3["failure_rate"] == 0.0
+    assert w_recent_3["total"] < w_all_time["total"]
+
+
+def test_compute_scenario_weight_recent_n_shows_higher_weight_for_regressing_scenario():
+    now = time.time()
+    scenario = {"name": "regressing", "scenario_tags": []}
+    historical = [
+        {"model": "m1", "scenario_name": "regressing", "timestamp": now - 30 * 86400, "total_turns": 10, "clean_turns": 10},
+        {"model": "m1", "scenario_name": "regressing", "timestamp": now - 29 * 86400, "total_turns": 10, "clean_turns": 10},
+        {"model": "m1", "scenario_name": "regressing", "timestamp": now - 28 * 86400, "total_turns": 10, "clean_turns": 10},
+        {"model": "m1", "scenario_name": "regressing", "timestamp": now - 2 * 86400, "total_turns": 10, "clean_turns": 0},
+        {"model": "m1", "scenario_name": "regressing", "timestamp": now - 1 * 86400, "total_turns": 10, "clean_turns": 0},
+        {"model": "m1", "scenario_name": "regressing", "timestamp": now, "total_turns": 10, "clean_turns": 0},
+    ]
+    w_all_time = _harness.compute_scenario_weight(scenario, historical, model="m1")
+    w_recent_3 = _harness.compute_scenario_weight(scenario, historical, model="m1", recent_n=3)
+    assert w_recent_3["failure_rate"] == 1.0
+    assert w_recent_3["total"] > w_all_time["total"]
+
+
+def test_compute_scenario_weight_recent_n_larger_than_history_uses_all_of_it():
+    scenario = {"name": "a", "scenario_tags": []}
+    historical = _real_history_with_old_bad_recent_good("a")
+    w_recent_100 = _harness.compute_scenario_weight(scenario, historical, model="m1", recent_n=100)
+    w_all_time = _harness.compute_scenario_weight(scenario, historical, model="m1")
+    assert w_recent_100 == w_all_time
+
+
+def test_rank_scenarios_by_failure_rate_still_uses_full_history_not_recent_n():
+    """Real, deliberate design: rank_scenarios_by_failure_rate()'s own
+    purpose is genuinely all-time failure rate -- it must never be
+    silently affected by the recent_n mechanism added for the newer
+    weight calculator."""
+    historical = _real_history_with_old_bad_recent_good("a")
+    ranked = _harness.rank_scenarios_by_failure_rate(historical, model="m1")
+    # All 6 runs (1+1+1+10+10+10 clean out of 60) should be reflected,
+    # not just the most recent ones.
+    assert ranked[0]["runs_seen"] == 6
