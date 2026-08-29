@@ -1303,3 +1303,77 @@ def test_compute_multi_model_scenario_weights_respects_recent_n():
 def test_compute_multi_model_scenario_weights_rejects_empty_models():
     with pytest.raises(ValueError, match="models list"):
         _harness.compute_multi_model_scenario_weights({"name": "x"}, [], models=[])
+
+
+# ---------------------------------------------------------------------------
+# generate_suite_health_summary (added 2026-08-28)
+# ---------------------------------------------------------------------------
+
+def test_health_summary_single_model_shape():
+    result = {
+        "timestamp": 1000, "model": "m1", "suite_name": "x",
+        "total_turns": 20, "clean_turns": 15,
+        "flag_counts": {"EMPTY": 2, "TOOL_ERROR": 3},
+        "scenario_results": [{"scenario_name": "a"}, {"scenario_name": "b"}, {"scenario_name": "c"}],
+    }
+    summary = _harness.generate_suite_health_summary(result)
+    assert summary["overview"] == {
+        "suite_name": "x", "scenario_count": 3, "model_count": 1, "total_turns": 20,
+    }
+    assert summary["outcomes"]["failure_rate"] == 25
+    assert "model_comparison" not in summary
+    assert "regressions" not in summary
+
+
+def test_health_summary_multi_model_shape():
+    result = {
+        "suite_name": "x",
+        "results": {
+            "good": {"total_turns": 10, "clean_turns": 8, "flag_counts": {"EMPTY": 2},
+                      "scenario_results": [{"scenario_name": "a"}, {"scenario_name": "b"}]},
+            "bad": {"total_turns": 10, "clean_turns": 0, "flag_counts": {"REPEATED": 10},
+                    "scenario_results": [{"scenario_name": "a"}, {"scenario_name": "b"}]},
+        },
+    }
+    summary = _harness.generate_suite_health_summary(result)
+    assert summary["overview"]["model_count"] == 2
+    assert summary["overview"]["scenario_count"] == 2
+    assert summary["outcomes"]["total_turns"] == 20
+    assert summary["outcomes"]["clean_turns"] == 8
+    assert summary["model_comparison"]["good"]["clean_rate"] == 80
+    assert summary["model_comparison"]["bad"]["clean_rate"] == 0
+
+
+def test_health_summary_includes_regressions_when_history_given():
+    historical = [
+        {"model": "m1", "timestamp": 100, "total_turns": 10, "clean_turns": 10, "flag_counts": {}},
+        {"model": "m1", "timestamp": 200, "total_turns": 10, "clean_turns": 2, "flag_counts": {}},
+    ]
+    result = {"model": "m1", "suite_name": "x", "total_turns": 10, "clean_turns": 2,
+              "flag_counts": {}, "scenario_results": []}
+    summary = _harness.generate_suite_health_summary(result, historical_summaries=historical)
+    assert len(summary["regressions"]) == 1
+    assert summary["regressions"][0]["type"] == "clean_rate_regression"
+
+
+def test_health_summary_omits_regressions_when_no_history_given():
+    result = {"model": "m1", "suite_name": "x", "total_turns": 10, "clean_turns": 10,
+              "flag_counts": {}, "scenario_results": []}
+    summary = _harness.generate_suite_health_summary(result)
+    assert "regressions" not in summary
+
+
+def test_health_summary_regressions_scoped_to_the_right_model():
+    """Real, deliberate design: a single-model suite result's regression
+    check must only reflect that model's own history, not blend in
+    regressions from a different model in the same historical data."""
+    historical = [
+        {"model": "m1", "timestamp": 100, "total_turns": 10, "clean_turns": 10, "flag_counts": {}},
+        {"model": "m1", "timestamp": 200, "total_turns": 10, "clean_turns": 2, "flag_counts": {}},
+        {"model": "m2", "timestamp": 100, "total_turns": 10, "clean_turns": 5, "flag_counts": {}},
+        {"model": "m2", "timestamp": 200, "total_turns": 10, "clean_turns": 5, "flag_counts": {}},
+    ]
+    result = {"model": "m1", "suite_name": "x", "total_turns": 10, "clean_turns": 2,
+              "flag_counts": {}, "scenario_results": []}
+    summary = _harness.generate_suite_health_summary(result, historical_summaries=historical)
+    assert all(a["model"] == "m1" for a in summary["regressions"])
