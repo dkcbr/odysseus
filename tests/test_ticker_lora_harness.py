@@ -1727,3 +1727,68 @@ def test_notify_regressions_webhook_payload_includes_full_alert_dicts():
         assert received["body"] == {"suite_name": "real_suite", "regressions": regressions}
     finally:
         server.server_close()
+
+
+# ---------------------------------------------------------------------------
+# Design_suite_health_trend_report: compare_suite_trends,
+# generate_multi_suite_trend_html_report (added 2026-08-28)
+# ---------------------------------------------------------------------------
+
+def _real_multi_suite_summaries():
+    now = time.time()
+    return [
+        {"timestamp": now - 7200, "overview": {"suite_name": "holdings_correction"},
+         "outcomes": {"failure_rate": 10, "clean_turns": 9, "total_turns": 10}, "regressions": []},
+        {"timestamp": now - 3600, "overview": {"suite_name": "holdings_correction"},
+         "outcomes": {"failure_rate": 20, "clean_turns": 8, "total_turns": 10}, "regressions": [{"type": "x"}]},
+        {"timestamp": now - 5400, "overview": {"suite_name": "generalization"},
+         "outcomes": {"failure_rate": 50, "clean_turns": 5, "total_turns": 10}, "regressions": []},
+        {"timestamp": now, "overview": {"suite_name": "generalization"},
+         "outcomes": {"failure_rate": 30, "clean_turns": 7, "total_turns": 10}, "regressions": []},
+    ]
+
+
+def test_compare_suite_trends_groups_correctly():
+    grouped = _harness.compare_suite_trends(_real_multi_suite_summaries())
+    assert set(grouped.keys()) == {"holdings_correction", "generalization"}
+    assert len(grouped["holdings_correction"]) == 2
+    assert len(grouped["generalization"]) == 2
+    assert grouped["holdings_correction"][0]["failure_rate"] == 10
+    assert grouped["holdings_correction"][1]["failure_rate"] == 20
+
+
+def test_compare_suite_trends_empty_input():
+    assert _harness.compare_suite_trends([]) == {}
+
+
+def test_multi_suite_trend_html_report_renders_one_line_per_suite():
+    grouped = _harness.compare_suite_trends(_real_multi_suite_summaries())
+    html_str = _harness.generate_multi_suite_trend_html_report(grouped)
+    assert html_str.startswith("<!DOCTYPE html>")
+    assert html_str.count("<polyline") == 2
+    assert "holdings_correction" in html_str
+    assert "generalization" in html_str
+
+
+def test_multi_suite_trend_html_report_empty_shows_honest_message():
+    html_str = _harness.generate_multi_suite_trend_html_report({})
+    assert "No saved health summaries found" in html_str
+
+
+def test_multi_suite_trend_html_report_writes_file_when_path_given(tmp_path):
+    grouped = _harness.compare_suite_trends(_real_multi_suite_summaries())
+    out_path = str(tmp_path / "report.html")
+    returned = _harness.generate_multi_suite_trend_html_report(grouped, output_path=out_path)
+    assert os.path.isfile(out_path)
+    with open(out_path) as f:
+        written = f.read()
+    assert written == returned
+
+
+def test_multi_suite_trend_html_report_table_matches_latest_entry_per_suite():
+    grouped = _harness.compare_suite_trends(_real_multi_suite_summaries())
+    html_str = _harness.generate_multi_suite_trend_html_report(grouped)
+    # holdings_correction's latest (most recent) entry has failure_rate 20
+    # and 1 regression; generalization's latest has failure_rate 30, 0 regressions.
+    assert "<td>20%</td><td>1</td>" in html_str
+    assert "<td>30%</td><td>0</td>" in html_str
