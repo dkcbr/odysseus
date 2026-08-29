@@ -1792,3 +1792,65 @@ def test_multi_suite_trend_html_report_table_matches_latest_entry_per_suite():
     # and 1 regression; generalization's latest has failure_rate 30, 0 regressions.
     assert "<td>20%</td><td>1</td>" in html_str
     assert "<td>30%</td><td>0</td>" in html_str
+
+
+# ---------------------------------------------------------------------------
+# evaluate_health_gate (added 2026-08-28, Design_suite_health_gatekeeping)
+# ---------------------------------------------------------------------------
+
+def test_gate_no_criteria_passes_by_default():
+    summary = {"outcomes": {"failure_rate": 40}, "regressions": []}
+    result = _harness.evaluate_health_gate(summary)
+    assert result["passed"] is True
+    assert "No real gate criteria" in result["reasons"][0]
+
+
+def test_gate_max_failure_rate_passes_within_bound():
+    summary = {"outcomes": {"failure_rate": 40}, "regressions": []}
+    result = _harness.evaluate_health_gate(summary, max_failure_rate=50)
+    assert result["passed"] is True
+
+
+def test_gate_max_failure_rate_fails_when_exceeded():
+    summary = {"outcomes": {"failure_rate": 40}, "regressions": []}
+    result = _harness.evaluate_health_gate(summary, max_failure_rate=30)
+    assert result["passed"] is False
+    assert "exceeds max_failure_rate" in result["reasons"][0]
+
+
+def test_gate_block_on_any_regression():
+    summary = {"outcomes": {"failure_rate": 10},
+               "regressions": [{"type": "x", "message": "y", "severity": "moderate", "model": "m1"}]}
+    assert _harness.evaluate_health_gate(summary, block_on_any_regression=True)["passed"] is False
+    clean_summary = {"outcomes": {"failure_rate": 10}, "regressions": []}
+    assert _harness.evaluate_health_gate(clean_summary, block_on_any_regression=True)["passed"] is True
+
+
+def test_gate_max_regression_severity_high_ignores_moderate():
+    """Real, deliberate design: a 'high' severity threshold should not
+    block on a merely moderate regression."""
+    summary = {"outcomes": {"failure_rate": 10},
+               "regressions": [{"type": "x", "message": "y", "severity": "moderate", "model": "m1"}]}
+    result = _harness.evaluate_health_gate(summary, max_regression_severity="high")
+    assert result["passed"] is True
+
+
+def test_gate_max_regression_severity_moderate_blocks_moderate():
+    summary = {"outcomes": {"failure_rate": 10},
+               "regressions": [{"type": "x", "message": "y", "severity": "moderate", "model": "m1"}]}
+    result = _harness.evaluate_health_gate(summary, max_regression_severity="moderate")
+    assert result["passed"] is False
+
+
+def test_gate_combines_multiple_criteria_with_all_reasons():
+    summary = {"outcomes": {"failure_rate": 10},
+               "regressions": [{"type": "x", "message": "y", "severity": "moderate", "model": "m1"}]}
+    result = _harness.evaluate_health_gate(summary, max_failure_rate=5, max_regression_severity="moderate")
+    assert result["passed"] is False
+    assert len(result["reasons"]) == 2
+
+
+def test_gate_rejects_invalid_severity_string():
+    summary = {"outcomes": {"failure_rate": 10}, "regressions": []}
+    with pytest.raises(ValueError, match="max_regression_severity must be"):
+        _harness.evaluate_health_gate(summary, max_regression_severity="bogus")
