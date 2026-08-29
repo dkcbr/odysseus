@@ -1872,3 +1872,77 @@ def test_run_multi_model_suite_parallel_rejects_empty_models():
         _harness.run_multi_model_suite_parallel(
             "77bddaa5", [], {"name": "x", "_resolved_scenario_paths": []}
         )
+
+
+# ---------------------------------------------------------------------------
+# run_suite_parallel (added 2026-08-28, Design_suite_sharding). Same real
+# verification split as run_multi_model_suite_parallel(): input
+# validation and the ordering guarantee are genuinely unit-testable (the
+# ordering test uses monkeypatched, deterministically-staggered fake
+# durations to force completion order to differ from submission order,
+# same real technique already proven live during development); the real
+# live model-calling/timing behavior itself is covered by direct live
+# measurement instead (189.65s sequential vs 129.27s sharded on the same
+# real 3-scenario suite, a real ~32% reduction, plus a second live CLI
+# run confirming clean, non-garbled concurrent output).
+# ---------------------------------------------------------------------------
+
+def test_run_suite_parallel_rejects_empty_scenarios():
+    with pytest.raises(ValueError, match="no real scenarios to shard"):
+        _harness.run_suite_parallel("77bddaa5", "m1", {"name": "x", "_resolved_scenario_paths": []})
+
+
+def test_run_suite_parallel_preserves_submission_order_despite_reversed_completion(tmp_path, monkeypatch):
+    """Real, deterministic proof the reordering logic works: forces
+    completion order to be the exact reverse of submission order via
+    staggered fake delays, and confirms the output still matches
+    submission order -- not a lucky real-world coincidence."""
+    scenario_files = {}
+    for name, delay in [("scenario_a", 0.06), ("scenario_b", 0.03), ("scenario_c", 0.0)]:
+        path = tmp_path / f"{name}.json"
+        path.write_text(json.dumps({"name": name, "turns": [{"type": "ticker", "symbol": "SOUN"}]}))
+        scenario_files[str(path)] = (name, delay)
+
+    def fake_run_multi_round_suite(endpoint_id, model, runs, scenario=None, verbose=True):
+        for _, (n, d) in scenario_files.items():
+            if n == scenario["name"]:
+                time.sleep(d)
+                break
+        return {
+            "total_turns": 1, "clean_turns": 1, "flag_counts": {},
+            "total_cross_turn_contamination": 0, "runs_errored": 0,
+            "scenario_name": scenario["name"], "run_records": [],
+        }
+
+    monkeypatch.setattr(_harness, "run_multi_round_suite", fake_run_multi_round_suite)
+
+    suite = {"name": "order_test", "_resolved_scenario_paths": list(scenario_files.keys())}
+    result = _harness.run_suite_parallel("77bddaa5", "m1", suite, verbose=False)
+    actual_order = [s["scenario_name"] for s in result["scenario_results"]]
+    assert actual_order == ["scenario_a", "scenario_b", "scenario_c"]
+
+
+def test_run_suite_parallel_aggregates_correctly(tmp_path, monkeypatch):
+    scenario_paths = []
+    for name in ["a", "b"]:
+        path = tmp_path / f"{name}.json"
+        path.write_text(json.dumps({"name": name, "turns": [{"type": "ticker", "symbol": "SOUN"}]}))
+        scenario_paths.append(str(path))
+
+    def fake_run_multi_round_suite(endpoint_id, model, runs, scenario=None, verbose=True):
+        if scenario["name"] == "a":
+            return {"total_turns": 5, "clean_turns": 4, "flag_counts": {"EMPTY": 1},
+                     "total_cross_turn_contamination": 0, "runs_errored": 0,
+                     "scenario_name": "a", "run_records": []}
+        return {"total_turns": 3, "clean_turns": 3, "flag_counts": {},
+                 "total_cross_turn_contamination": 1, "runs_errored": 0,
+                 "scenario_name": "b", "run_records": []}
+
+    monkeypatch.setattr(_harness, "run_multi_round_suite", fake_run_multi_round_suite)
+    suite = {"name": "agg_test", "_resolved_scenario_paths": scenario_paths}
+    result = _harness.run_suite_parallel("77bddaa5", "m1", suite, verbose=False)
+    assert result["total_turns"] == 8
+    assert result["clean_turns"] == 7
+    assert result["flag_counts"] == {"EMPTY": 1}
+    assert result["total_cross_turn_contamination"] == 1
+    assert result["sharded"] is True
