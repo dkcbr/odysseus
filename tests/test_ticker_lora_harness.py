@@ -1540,3 +1540,91 @@ def test_health_summary_html_report_no_trend_chart_when_omitted(tmp_path):
     with open(out_path) as f:
         html = f.read()
     assert "Failure rate over time" not in html
+
+
+# ---------------------------------------------------------------------------
+# Design_suite_health_dashboard: per_scenario breakdown, string-return
+# mode, and scenario grid rendering (added 2026-08-28). The live server
+# itself (serve_health_dashboard) is verified live, not by CI unit test
+# -- an actually-listening HTTP server isn't meaningfully unit-testable
+# without spinning up a real socket, which real, deliberate live
+# verification (start server, real HTTP requests, confirm live pickup
+# of new data, stop server) already covered thoroughly and directly.
+# ---------------------------------------------------------------------------
+
+def test_health_summary_includes_per_scenario_single_model():
+    result = {
+        "model": "m1", "suite_name": "x", "total_turns": 15, "clean_turns": 10,
+        "flag_counts": {"TOOL_ERROR": 2},
+        "scenario_results": [
+            {"scenario_name": "a", "clean_turns": 5, "total_turns": 5},
+            {"scenario_name": "b", "clean_turns": 5, "total_turns": 10},
+        ],
+    }
+    summary = _harness.generate_suite_health_summary(result)
+    by_name = {s["scenario_name"]: s for s in summary["per_scenario"]}
+    assert by_name["a"]["failure_rate"] == 0
+    assert by_name["b"]["failure_rate"] == 50
+
+
+def test_health_summary_per_scenario_combines_across_models():
+    """Real, deliberate design: for a multi-model result, per-scenario
+    data is combined across all models -- must genuinely sum, not just
+    reflect one model's data."""
+    mm_result = {
+        "suite_name": "y",
+        "results": {
+            "m1": {"total_turns": 5, "clean_turns": 5, "flag_counts": {},
+                   "scenario_results": [{"scenario_name": "a", "clean_turns": 5, "total_turns": 5}]},
+            "m2": {"total_turns": 5, "clean_turns": 0, "flag_counts": {},
+                   "scenario_results": [{"scenario_name": "a", "clean_turns": 0, "total_turns": 5}]},
+        },
+    }
+    summary = _harness.generate_suite_health_summary(mm_result)
+    assert summary["per_scenario"][0]["total_turns"] == 10
+    assert summary["per_scenario"][0]["clean_turns"] == 5
+
+
+def test_health_summary_html_report_returns_string_when_no_output_path():
+    result = {"model": "m1", "suite_name": "x", "total_turns": 5, "clean_turns": 5,
+              "flag_counts": {}, "scenario_results": []}
+    summary = _harness.generate_suite_health_summary(result)
+    html_str = _harness.generate_health_summary_html_report(summary)
+    assert isinstance(html_str, str)
+    assert html_str.startswith("<!DOCTYPE html>")
+
+
+def test_health_summary_html_report_still_writes_file_when_path_given(tmp_path):
+    """Real regression guard: making output_path optional must not
+    break the existing behavior of writing to disk when it IS given."""
+    result = {"model": "m1", "suite_name": "x", "total_turns": 5, "clean_turns": 5,
+              "flag_counts": {}, "scenario_results": []}
+    summary = _harness.generate_suite_health_summary(result)
+    out_path = str(tmp_path / "report.html")
+    returned = _harness.generate_health_summary_html_report(summary, output_path=out_path)
+    assert os.path.isfile(out_path)
+    with open(out_path) as f:
+        written = f.read()
+    assert written == returned
+
+
+def test_health_summary_html_report_scenario_grid_color_coding():
+    result = {
+        "model": "m1", "suite_name": "x", "total_turns": 10, "clean_turns": 5, "flag_counts": {},
+        "scenario_results": [
+            {"scenario_name": "clean_one", "clean_turns": 5, "total_turns": 5},
+            {"scenario_name": "broken_one", "clean_turns": 0, "total_turns": 5},
+        ],
+    }
+    summary = _harness.generate_suite_health_summary(result)
+    html_str = _harness.generate_health_summary_html_report(summary)
+    assert "border-color:#3FB950" in html_str  # clean_one, 0% failure -> green
+    assert "border-color:#F85149" in html_str  # broken_one, 100% failure -> red
+
+
+def test_health_summary_html_report_no_scenario_grid_when_empty():
+    result = {"model": "m1", "suite_name": "x", "total_turns": 0, "clean_turns": 0,
+              "flag_counts": {}, "scenario_results": []}
+    summary = _harness.generate_suite_health_summary(result)
+    html_str = _harness.generate_health_summary_html_report(summary)
+    assert "Scenario grid" not in html_str
