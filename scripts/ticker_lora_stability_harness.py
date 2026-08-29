@@ -1022,12 +1022,13 @@ def compare_check_across_models(endpoint_id: str, models: list, scenario: dict,
 
 
 def extract_echo_features(bundle: dict) -> dict:
-    """Real, added 2026-08-28 (Design_cluster_root_cause_analysis):
-    extracts real, observable features from a single real captured
-    bundle relevant to understanding what real input pattern might
-    trigger tool_argument_echo -- checked an external framing of this
-    task against the real system first, same discipline as every
-    prior evaluation the same night: this harness has exactly ONE real
+    """Real, added 2026-08-28 (Design_cluster_root_cause_analysis),
+    deepened 2026-08-28 (Analyze_captured_echoes): extracts real,
+    observable features from a single real captured bundle relevant to
+    understanding what real input pattern might trigger
+    tool_argument_echo -- checked an external framing of this task
+    against the real system first, same discipline as every prior
+    evaluation the same night: this harness has exactly ONE real
     captured occurrence right now, and genuine statistical clustering
     (the literal, fabricated "cluster" framing) is meaningless at
     n=1 -- what's real and buildable instead is honest feature
@@ -1042,21 +1043,42 @@ def extract_echo_features(bundle: dict) -> dict:
     extraction from the real tool_call_commands/prompt text for older
     real captures that predate that field, rather than fail outright.
 
-    Returns a real, structured feature dict:
-      - "affected_turn_prompt": the real prompt text
-      - "has_custom_message": whether the affected turn used a real,
-        custom message override rather than the fixed template
-      - "stale_argument_symbol": the real, actual symbol the tool was
-        called with
-      - "preceding_turn_prompt": the real, immediately preceding
-        turn's prompt (None if the affected turn is the first)
-      - "preceding_turn_symbol": the preceding turn's own real,
-        declared symbol (best-effort if scenario_turn is unavailable)
-      - "stale_argument_matches_preceding_turn": real, direct
-        comparison -- the specific, concrete hypothesis this whole
-        investigation has been circling since the first real capture
-      - "turns_before_affected": real count of turns preceding the
-        affected one
+    Real, added this deepening pass, directly motivated by re-examining
+    the one real existing capture more closely: its real memories_used
+    event didn't cleanly point only at the correct symbol -- one real,
+    injected memory mentioned BOTH the stale and correct symbol in the
+    same sentence ("User closely follows defense-related stocks like
+    KTOS and RGTI"), a real, concrete, previously-unextracted signal
+    worth tracking systematically rather than only noticed by manual
+    re-reading. Also reuses reconstruct_rounds() (built for the replay
+    engine, not previously wired into feature extraction at all) for a
+    real round-count/round-structure signal, and promotes the final
+    round's real emptiness to an explicit, top-level feature, since it
+    was present in the one real occurrence and is easy to miss buried
+    inside the raw classification dict.
+
+    Returns a real, structured feature dict (original fields
+    unchanged; new fields added, none renamed or removed, so existing
+    callers/tests keep working):
+      - "affected_turn_prompt", "has_custom_message",
+        "stale_argument_symbol", "preceding_turn_prompt",
+        "preceding_turn_symbol", "stale_argument_matches_preceding_turn",
+        "turns_before_affected": unchanged from the original version.
+      - "round_count": real number of real rounds the affected turn
+        took, via reconstruct_rounds().
+      - "final_round_empty": whether the affected turn's real, final
+        round produced no visible content at all.
+      - "memories_used_count": real count of real memories injected
+        for this specific turn (0 if none).
+      - "memories_mention_correct_symbol": whether ANY real injected
+        memory text mentions the turn's own real, correct symbol.
+      - "memories_mention_stale_symbol": whether ANY real injected
+        memory text ALSO mentions the real, stale symbol actually
+        used -- the specific, new signal this deepening pass exists
+        to surface systematically.
+      - "preceding_turn_content_preview": a short, real preview of
+        what the preceding turn's own visible content actually said,
+        for quick human scanning without re-opening the raw events.
     """
     affected_idx = bundle["affected_turn_index"]
     affected_turn = bundle["turns_captured"][affected_idx]
@@ -1072,6 +1094,7 @@ def extract_echo_features(bundle: dict) -> dict:
 
     if "scenario_turn" in affected_turn:
         has_custom_message = bool(affected_turn["scenario_turn"].get("message"))
+        correct_symbol = affected_turn["scenario_turn"].get("symbol")
     else:
         # Real, honest fallback for captures predating scenario_turn:
         # the fixed template is always exactly "Whats {SYMBOL} trading
@@ -1081,9 +1104,21 @@ def extract_echo_features(bundle: dict) -> dict:
         # was wrongly defaulting to False before this fix).
         has_custom_message = not affected_turn["prompt"].startswith("Whats ") or \
             not affected_turn["prompt"].endswith(" trading at right now?")
+        # Real, honest best-effort fallback: no scenario_turn means no
+        # real ground truth for what the correct symbol was supposed to
+        # be -- scan the affected turn's own real prompt text for any
+        # known, real, in-training ticker (confirmed directly against
+        # the one existing real capture, whose prompt literally names
+        # "RGTI"). Genuinely best-effort, not authoritative like
+        # scenario_turn -- deliberately does not claim a symbol was
+        # "correct" if none of the known, real tickers appear at all.
+        correct_symbol = next(
+            (t for t in IN_TRAINING_TICKERS if t in affected_turn["prompt"].upper()), None
+        )
 
     preceding_turn_prompt = None
     preceding_turn_symbol = None
+    preceding_turn_content_preview = None
     if affected_idx > 0:
         preceding = bundle["turns_captured"][affected_idx - 1]
         preceding_turn_prompt = preceding["prompt"]
@@ -1100,6 +1135,25 @@ def extract_echo_features(bundle: dict) -> dict:
                     except json.JSONDecodeError:
                         pass
                     break
+        preceding_rounds = reconstruct_rounds(preceding["raw_events"])
+        preceding_content = "".join(r["content"] for r in preceding_rounds)
+        preceding_turn_content_preview = preceding_content[:150]
+
+    # Real round-structure signal, reusing the replay engine's own
+    # already-proven reconstruction rather than a second implementation.
+    affected_rounds = reconstruct_rounds(affected_turn["raw_events"])
+    round_count = len(affected_rounds)
+    final_round_empty = bool(affected_rounds) and not affected_rounds[-1]["content"].strip() \
+        and not affected_rounds[-1]["tool_calls"]
+
+    # Real memory-content signal.
+    memories = []
+    for event in affected_turn["raw_events"]:
+        if event.get("type") == "memories_used":
+            memories.extend(m.get("text", "") for m in event.get("data", []))
+    memories_text = " ".join(memories).lower()
+    memories_mention_correct_symbol = bool(correct_symbol) and correct_symbol.lower() in memories_text
+    memories_mention_stale_symbol = bool(stale_symbol) and stale_symbol.lower() in memories_text
 
     return {
         "affected_turn_prompt": affected_turn["prompt"],
@@ -1111,7 +1165,15 @@ def extract_echo_features(bundle: dict) -> dict:
             stale_symbol is not None and stale_symbol == preceding_turn_symbol
         ),
         "turns_before_affected": affected_idx,
+        "round_count": round_count,
+        "final_round_empty": final_round_empty,
+        "memories_used_count": len(memories),
+        "memories_mention_correct_symbol": memories_mention_correct_symbol,
+        "memories_mention_stale_symbol": memories_mention_stale_symbol,
+        "preceding_turn_content_preview": preceding_turn_content_preview,
     }
+
+
 
 
 def analyze_captured_echoes(captures_dir: str = None, target_check: str = "tool_argument_echo") -> dict:
@@ -1143,11 +1205,23 @@ def analyze_captured_echoes(captures_dir: str = None, target_check: str = "tool_
         note = f"No real captures found for '{target_check}' -- run --capture-check {target_check} first."
     elif n < 5:
         matching = sum(1 for f in features if f["stale_argument_matches_preceding_turn"])
+        # Real, added in this deepening pass: a second, real, distinct
+        # signal -- how often the real, injected memories mentioned
+        # BOTH the correct and stale symbol together, a genuinely
+        # different, additional real observation from the first
+        # capture, not folded into the same count as it measures a
+        # different real thing (context ambiguity vs. tool-argument
+        # staleness).
+        both_mentioned = sum(
+            1 for f in features
+            if f["memories_mention_correct_symbol"] and f["memories_mention_stale_symbol"]
+        )
         note = (
             f"Real sample size is {n} -- too few for real statistical confidence. "
             f"Observed pattern so far: {matching}/{n} real occurrence(s) had a stale argument "
-            f"matching the immediately preceding turn's own real symbol. Worth watching as more "
-            f"real captures accumulate, not yet a confirmed pattern."
+            f"matching the immediately preceding turn's own real symbol; {both_mentioned}/{n} "
+            f"had real, injected memories mentioning BOTH the correct and stale symbol together. "
+            f"Worth watching as more real captures accumulate, not yet a confirmed pattern."
         )
     else:
         matching = sum(1 for f in features if f["stale_argument_matches_preceding_turn"])
