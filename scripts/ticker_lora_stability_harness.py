@@ -44,6 +44,9 @@ import shutil       # real, added 2026-08-28: stdlib-only, used by
                      # is actually available at runtime rather than assume
 import subprocess   # real, added 2026-08-28: stdlib-only, used to
                      # actually invoke notify-send when available
+import sys           # real, added 2026-08-28: stdlib-only, used by
+                     # evaluate_health_gate()'s CLI integration to
+                     # exit with a real, non-zero status code
 
 BASE_URL = "http://localhost:7000"
 # Real, same internal-token pattern already established and fixed
@@ -2321,6 +2324,75 @@ def notify_regressions(regressions: list, method: str = "desktop", webhook_url: 
         raise ValueError(f"Unknown notification method {method!r}, real options: 'desktop', 'webhook'")
 
 
+def evaluate_health_gate(summary: dict, max_failure_rate: int = None,
+                          max_regression_severity: str = None,
+                          block_on_any_regression: bool = False) -> dict:
+    """Real, added 2026-08-28 (Design_suite_health_gatekeeping): a real,
+    honest, minimal "gate" -- checked an external proposal for this
+    feature against the real system first, same as every prior
+    evaluation the same night, and confirmed there is no real CI/CD
+    pipeline, promotion system, or deployment automation anywhere in
+    this actual codebase for a fabricated "gatekeeping/autopruning/
+    autopromotion" system to plug into (this was already explicitly
+    rejected when the underlying health summary was first built).
+    Building a fake promotion system to gate would be exactly the kind
+    of fabrication rejected all night.
+
+    The real, honest, buildable version of "gatekeeping" is a standard
+    Unix primitive: evaluate a real, already-computed health summary
+    against real, caller-supplied thresholds, and report pass/fail
+    with real, specific reasons -- see the real, matching --gate CLI
+    flag, which exits with a real, non-zero status code on failure.
+    Any real external process (a shell script, a cron job, a git hook,
+    a CI system DK might set up later) can compose that real exit code
+    into whatever actual promotion/deployment decision it makes --
+    this harness does not invent or claim to run that process itself.
+
+    Real, deliberate: all three threshold parameters are optional and
+    independently checkable -- a caller uses whichever real criteria
+    matter to them, not a fixed, one-size-fits-all rule. Returns
+    {"passed": bool, "reasons": [str, ...]} -- reasons is always
+    populated with the real, specific check(s) that failed, or a
+    single real confirmation message when nothing was checked or
+    everything passed, so a caller never has to guess why a gate
+    result came out the way it did.
+    """
+    reasons = []
+
+    failure_rate = summary["outcomes"]["failure_rate"]
+    if max_failure_rate is not None and failure_rate > max_failure_rate:
+        reasons.append(
+            f"Failure rate {failure_rate}% exceeds max_failure_rate {max_failure_rate}%"
+        )
+
+    regressions = summary.get("regressions", [])
+    if block_on_any_regression and regressions:
+        reasons.append(f"{len(regressions)} real regression(s) detected (block_on_any_regression is set)")
+
+    if max_regression_severity is not None:
+        if max_regression_severity not in ("moderate", "high"):
+            raise ValueError(
+                f"max_regression_severity must be 'moderate' or 'high', got {max_regression_severity!r}"
+            )
+        blocking_severities = {"moderate", "high"} if max_regression_severity == "moderate" else {"high"}
+        blocking = [a for a in regressions if a["severity"] in blocking_severities]
+        if blocking:
+            reasons.append(
+                f"{len(blocking)} regression(s) at or above '{max_regression_severity}' severity: "
+                + "; ".join(a["message"] for a in blocking)
+            )
+
+    passed = not reasons
+    if passed and not (max_failure_rate is not None or block_on_any_regression or max_regression_severity is not None):
+        reasons = ["No real gate criteria were given -- passes by default."]
+    elif passed:
+        reasons = ["All real gate criteria passed."]
+
+    return {"passed": passed, "reasons": reasons}
+
+
+
+
 
 
 
@@ -3004,6 +3076,28 @@ def main():
                               "default -- this harness has no "
                               "confirmed, hard-coded credentials for any "
                               "specific real service.")
+    parser.add_argument("--gate", action="store_true",
+                         help="With --health-summary, evaluate the real "
+                              "computed summary against real, explicit "
+                              "thresholds (see --max-failure-rate, "
+                              "--max-regression-severity, "
+                              "--block-on-any-regression) and exit with "
+                              "a real, non-zero status code if it fails "
+                              "-- a standard, composable Unix gate any "
+                              "real external process (a script, a git "
+                              "hook, a CI system) can build a real "
+                              "promotion/deployment decision on top of. "
+                              "This harness does not run or claim to run "
+                              "that process itself.")
+    parser.add_argument("--max-failure-rate", type=int, metavar="PCT",
+                         help="With --gate, fail if the real failure "
+                              "rate exceeds this percentage.")
+    parser.add_argument("--max-regression-severity", choices=["moderate", "high"],
+                         help="With --gate, fail if any real regression "
+                              "at or above this severity was detected.")
+    parser.add_argument("--block-on-any-regression", action="store_true",
+                         help="With --gate, fail if ANY real regression "
+                              "was detected, regardless of severity.")
     parser.add_argument("--multi-model-suite", metavar="PATH",
                          help="Real suite JSON file with its own real "
                               "'models' field (see scripts/suites/"
@@ -3272,6 +3366,17 @@ def main():
                 trend = summarize_suite_trend(past_summaries, suite_name=health["overview"]["suite_name"])
                 generate_health_summary_html_report(health, trend=trend, output_path=args.health_summary_html)
                 print(f"Health summary HTML report written to {args.health_summary_html}")
+            if args.gate:
+                gate_result = evaluate_health_gate(
+                    health, max_failure_rate=args.max_failure_rate,
+                    max_regression_severity=args.max_regression_severity,
+                    block_on_any_regression=args.block_on_any_regression,
+                )
+                print(f"\nGate: {'PASSED' if gate_result['passed'] else 'FAILED'}")
+                for reason in gate_result["reasons"]:
+                    print(f"  - {reason}")
+                if not gate_result["passed"]:
+                    sys.exit(1)
         return
 
     if args.multi_model_suite:
@@ -3309,6 +3414,17 @@ def main():
                 trend = summarize_suite_trend(past_summaries, suite_name=health["overview"]["suite_name"])
                 generate_health_summary_html_report(health, trend=trend, output_path=args.health_summary_html)
                 print(f"Health summary HTML report written to {args.health_summary_html}")
+            if args.gate:
+                gate_result = evaluate_health_gate(
+                    health, max_failure_rate=args.max_failure_rate,
+                    max_regression_severity=args.max_regression_severity,
+                    block_on_any_regression=args.block_on_any_regression,
+                )
+                print(f"\nGate: {'PASSED' if gate_result['passed'] else 'FAILED'}")
+                for reason in gate_result["reasons"]:
+                    print(f"  - {reason}")
+                if not gate_result["passed"]:
+                    sys.exit(1)
         return
 
     if args.suite:
@@ -3339,6 +3455,17 @@ def main():
                 trend = summarize_suite_trend(past_summaries, suite_name=health["overview"]["suite_name"])
                 generate_health_summary_html_report(health, trend=trend, output_path=args.health_summary_html)
                 print(f"Health summary HTML report written to {args.health_summary_html}")
+            if args.gate:
+                gate_result = evaluate_health_gate(
+                    health, max_failure_rate=args.max_failure_rate,
+                    max_regression_severity=args.max_regression_severity,
+                    block_on_any_regression=args.block_on_any_regression,
+                )
+                print(f"\nGate: {'PASSED' if gate_result['passed'] else 'FAILED'}")
+                for reason in gate_result["reasons"]:
+                    print(f"  - {reason}")
+                if not gate_result["passed"]:
+                    sys.exit(1)
         return
 
     if args.trends:
