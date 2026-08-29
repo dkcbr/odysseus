@@ -1032,6 +1032,151 @@ def run_multi_model_suite(endpoint_id: str, models: list, suite: dict,
     return {"suite_name": suite.get("name", "?"), "results": results}
 
 
+def generate_suite_health_summary(suite_result: dict, historical_summaries: list = None) -> dict:
+    """Real, added 2026-08-28: synthesizes a run_suite() or
+    run_multi_model_suite() result -- both real, already-shipped
+    functions -- into one structured "single pane of glass" report,
+    rather than requiring separate --suite/--trends/--rank-scenarios
+    runs to be manually cross-referenced by a person.
+
+    Real, deliberate scope decision made after checking an external
+    proposal for this feature against the real system: that proposal
+    assumed an entire, elaborate multi-file architecture (scenario_
+    history_store.py, cluster_trends.py, regression_detector.py,
+    dashboard_alerts.py, multi_model_drift_detector.py, live_suite_
+    runner.py, and more) and several concepts with NO basis anywhere
+    in this real, single-file harness -- "clusters"/cluster-level
+    regressions (no clustering concept exists anywhere in this system),
+    a "dashboard alerts" taxonomy of termination signals, density
+    spikes, long rounds, budget exhaustion, and loop-breaker triggers
+    (none of these are real, tracked concepts here), and downstream
+    consumers -- gatekeeping, autopruning, autopromotion -- that don't
+    exist. None of that was built. What follows is a summary built
+    ONLY from real, already-shipped, already-tested capability:
+
+      - "overview": suite name, scenario count, model count, total
+        turns -- read directly from the real suite_result.
+      - "outcomes": real clean/total turns, real failure rate, and the
+        real flag_counts breakdown (the honest, real equivalent of the
+        proposal's fabricated "alert summary" -- this harness's real
+        alert-like signals ARE its flags: TOOL_ERROR, REPEATED,
+        HOLDINGS_NOTE_WRONG_TICKER, etc., not a separate system).
+      - "regressions": real output of detect_regressions() (built
+        earlier the same night) -- included only if historical_summaries
+        is given, since regression detection genuinely needs real prior
+        history to compare against, not fabricated as a required
+        section.
+      - "model_comparison": included only if suite_result is actually
+        multi-model-shaped (has a real "results" dict keyed by model,
+        matching run_multi_model_suite()'s own real output) -- per-model
+        clean rate, failure rate, and flag_counts, read directly from
+        each model's own real, nested run_suite()-shaped summary.
+
+    Real, deliberate design: works directly on run_suite()/run_multi_
+    model_suite()'s own real output shapes, no new persistence format,
+    no new runner -- a caller already has a suite_result from calling
+    either function; this just synthesizes it, optionally combined
+    with real prior history for regression context.
+    """
+    # Real, distinguishing check: only run_multi_model_suite()'s real
+    # output has a "results" key at all -- run_suite()'s own output has
+    # "suite_name" too (so checking for that alone would misclassify a
+    # real single-model suite result as multi-model).
+    is_multi_model = "results" in suite_result
+
+    if is_multi_model:
+        model_summaries = suite_result["results"]
+        suite_name = suite_result.get("suite_name", "?")
+        model_count = len(model_summaries)
+        combined_total_turns = sum(s["total_turns"] for s in model_summaries.values())
+        combined_clean_turns = sum(s["clean_turns"] for s in model_summaries.values())
+        combined_flags = {}
+        for s in model_summaries.values():
+            for flag, count in s.get("flag_counts", {}).items():
+                combined_flags[flag] = combined_flags.get(flag, 0) + count
+        scenario_count = len(next(iter(model_summaries.values()))["scenario_results"]) if model_summaries else 0
+    else:
+        suite_name = suite_result.get("suite_name", "?")
+        model_count = 1
+        combined_total_turns = suite_result["total_turns"]
+        combined_clean_turns = suite_result["clean_turns"]
+        combined_flags = suite_result.get("flag_counts", {})
+        scenario_count = len(suite_result.get("scenario_results", []))
+
+    failure_rate = round(100 * (1 - combined_clean_turns / combined_total_turns)) if combined_total_turns else 0
+
+    summary = {
+        "overview": {
+            "suite_name": suite_name,
+            "scenario_count": scenario_count,
+            "model_count": model_count,
+            "total_turns": combined_total_turns,
+        },
+        "outcomes": {
+            "clean_turns": combined_clean_turns,
+            "total_turns": combined_total_turns,
+            "failure_rate": failure_rate,
+            "flag_counts": combined_flags,
+        },
+    }
+
+    if historical_summaries is not None:
+        regression_model = None if is_multi_model else suite_result.get("model")
+        summary["regressions"] = detect_regressions(historical_summaries, min_drop_pct=10) \
+            if regression_model is None else \
+            [a for a in detect_regressions(historical_summaries, min_drop_pct=10) if a["model"] == regression_model]
+
+    if is_multi_model:
+        summary["model_comparison"] = {}
+        for model, s in model_summaries.items():
+            total = s["total_turns"] or 1
+            summary["model_comparison"][model] = {
+                "clean_turns": s["clean_turns"],
+                "total_turns": s["total_turns"],
+                "clean_rate": round(100 * s["clean_turns"] / total),
+                "failure_rate": round(100 * (1 - s["clean_turns"] / total)),
+                "flag_counts": s.get("flag_counts", {}),
+            }
+
+    return summary
+
+
+def _print_health_summary(summary: dict) -> None:
+    """Real, added 2026-08-28: real, terminal-friendly rendering of
+    generate_suite_health_summary()'s real output, matching the plain,
+    aligned-table style already used throughout this harness's other
+    console output."""
+    ov = summary["overview"]
+    oc = summary["outcomes"]
+    print(f"\n{'=' * 60}\nSuite Health Summary: {ov['suite_name']}\n{'=' * 60}")
+    print(f"Scenarios: {ov['scenario_count']}  |  Models: {ov['model_count']}  |  "
+          f"Total turns: {ov['total_turns']}")
+    print(f"\nOutcomes: {oc['clean_turns']}/{oc['total_turns']} clean "
+          f"({100 - oc['failure_rate']}% clean, {oc['failure_rate']}% failure rate)")
+    if oc["flag_counts"]:
+        print(f"Flag breakdown: {oc['flag_counts']}")
+
+    if "regressions" in summary:
+        print(f"\nRegressions ({len(summary['regressions'])}):")
+        if summary["regressions"]:
+            for a in summary["regressions"]:
+                print(f"  - [{a['severity']}] {a['message']}")
+        else:
+            print("  none detected")
+
+    if "model_comparison" in summary:
+        print(f"\nPer-model comparison:")
+        header = f"  {'Model':<32} {'Clean %':>8} {'Turns':>6}"
+        print(header)
+        print("  " + "-" * (len(header) - 2))
+        for model, mc in summary["model_comparison"].items():
+            print(f"  {model:<32} {mc['clean_rate']:>7}% {mc['total_turns']:>6}")
+
+
+
+
+
+
 
 
 DEFAULT_CROSS_MODEL_LIST = [
@@ -2073,6 +2218,17 @@ def main():
                               "can be inspected, tweaked, or reused later "
                               "via the normal --suite/--multi-model-suite "
                               "flags.")
+    parser.add_argument("--health-summary", action="store_true",
+                         help="With --suite or --multi-model-suite, also "
+                              "print a real, single, synthesized health "
+                              "summary at the end -- overview, real "
+                              "outcomes/flag breakdown, real regressions "
+                              "(if --results-dir has history for this "
+                              "model/suite), and real per-model "
+                              "comparison for multi-model runs. Combines "
+                              "several existing, separate real reports "
+                              "into one, rather than requiring them to be "
+                              "run and cross-referenced by hand.")
     parser.add_argument("--multi-model-suite", metavar="PATH",
                          help="Real suite JSON file with its own real "
                               "'models' field (see scripts/suites/"
@@ -2299,6 +2455,10 @@ def main():
             with open(args.save_results, "w") as f:
                 json.dump(suite_summary, f, indent=2)
             print(f"\nFull suite results written to {args.save_results}")
+        if args.health_summary:
+            historical = load_historical_results(args.results_dir) if os.path.isdir(args.results_dir) else None
+            health = generate_suite_health_summary(suite_summary, historical_summaries=historical)
+            _print_health_summary(health)
         return
 
     if args.multi_model_suite:
@@ -2318,6 +2478,10 @@ def main():
                 with open(out_path, "w") as f:
                     json.dump(summary, f, indent=2)
                 print(f"\n{model} results written to {out_path}")
+        if args.health_summary:
+            historical = load_historical_results(args.results_dir) if os.path.isdir(args.results_dir) else None
+            health = generate_suite_health_summary(mm_summary, historical_summaries=historical)
+            _print_health_summary(health)
         return
 
     if args.suite:
@@ -2330,6 +2494,10 @@ def main():
             with open(args.save_results, "w") as f:
                 json.dump(suite_summary, f, indent=2)
             print(f"\nFull suite results written to {args.save_results}")
+        if args.health_summary:
+            historical = load_historical_results(args.results_dir) if os.path.isdir(args.results_dir) else None
+            health = generate_suite_health_summary(suite_summary, historical_summaries=historical)
+            _print_health_summary(health)
         return
 
     if args.trends:
