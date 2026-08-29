@@ -833,6 +833,124 @@ def capture_raw_events_for_check(endpoint_id: str, model: str, scenario: dict, o
     return None
 
 
+def reconstruct_rounds(raw_events: list) -> list:
+    """Real, added 2026-08-28 (Replay_exact_run_with_replay_engine):
+    walks a real turn's raw event list in order and groups events by
+    real round number, reconstructing round boundaries that aren't
+    explicitly present on every real event -- confirmed directly, by
+    inspecting a real captured run, that "delta" (content) events
+    carry no round field at all, only "tool_start" and "agent_step"
+    do. Real, correct logic: round starts at 1 implicitly (a turn
+    that never calls a tool never emits any real round marker at
+    all), and advances to whatever round a "tool_start"/"agent_step"
+    event declares, from that point in the real event sequence
+    onward -- every event is assigned to whichever round was most
+    recently declared as of its own real position in the stream, not
+    inferred from event type alone.
+
+    Returns a real list of {"round": int, "tool_calls": [...],
+    "content": str} -- tool_calls is a list of
+    {"tool", "command", "output", "exit_code"} built by matching each
+    real "tool_start" to its corresponding real "tool_output" by tool
+    name and command (the same real pairing this harness's own
+    check_trial() doesn't need, since it only tracks tool_start, but a
+    real transcript reconstruction needs the real output too, to show
+    what actually happened, not just what was attempted).
+    """
+    rounds = {}
+
+    def get_round(n):
+        return rounds.setdefault(n, {"round": n, "tool_calls": [], "content": ""})
+
+    current_round = 1
+    pending_tool_call = None
+
+    for event in raw_events:
+        etype = event.get("type")
+        if etype == "tool_start":
+            current_round = event.get("round", current_round)
+            pending_tool_call = {
+                "tool": event.get("tool"), "command": event.get("command"),
+                "output": None, "exit_code": None,
+            }
+            get_round(current_round)["tool_calls"].append(pending_tool_call)
+        elif etype == "tool_output":
+            # Real, matches the most recent real pending call for this
+            # exact tool -- correct even if a round somehow issues more
+            # than one real tool call, matched in the real order they occurred.
+            for r in reversed(list(rounds.values())):
+                for tc in reversed(r["tool_calls"]):
+                    if tc["tool"] == event.get("tool") and tc["output"] is None:
+                        tc["output"] = event.get("output")
+                        tc["exit_code"] = event.get("exit_code")
+                        break
+                else:
+                    continue
+                break
+        elif etype == "agent_step":
+            current_round = event.get("round", current_round)
+            get_round(current_round)
+        elif "delta" in event and not event.get("thinking"):
+            get_round(current_round)["content"] += event["delta"]
+
+    return [rounds[n] for n in sorted(rounds.keys())]
+
+
+def render_replay_transcript(bundle: dict) -> str:
+    """Real, added 2026-08-28 (Replay_exact_run_with_replay_engine):
+    renders a real captured bundle (from capture_raw_events_for_check())
+    as a clear, human-readable, round-by-round transcript -- the real
+    point of this whole tool: the raw, saved JSON is genuinely hard to
+    read directly (a dense mix of memories_used/model_info/tool_start/
+    tool_output/agent_step/metrics/message_saved events and content
+    deltas, confirmed directly while investigating the real
+    TOOL_ARGUMENT_ECHO capture the immediately preceding task
+    produced) -- this reconstructs it into something a person can
+    actually follow without manually parsing raw event JSON.
+
+    Uses reconstruct_rounds() per real turn, so round boundaries (not
+    explicit on every real event type) are handled once, correctly, in
+    one place, not re-derived ad hoc by whatever's rendering the
+    output.
+    """
+    lines = []
+    lines.append(f"Replay: {bundle['scenario_name']} / {bundle['model']} "
+                 f"(attempt {bundle['attempt']}, session {bundle['session_id']})")
+    lines.append(f"Captured: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(bundle['timestamp']))}")
+    lines.append(f"Target check that fired: {bundle['target_check']} "
+                 f"(turn {bundle['affected_turn_index']})")
+    lines.append("=" * 70)
+
+    for turn in bundle["turns_captured"]:
+        marker = " <-- AFFECTED TURN" if turn["turn_index"] == bundle["affected_turn_index"] else ""
+        lines.append(f"\nTurn {turn['turn_index']}: \"{turn['prompt']}\"{marker}")
+        lines.append("-" * 70)
+        rounds = reconstruct_rounds(turn["raw_events"])
+        if not rounds:
+            lines.append("  (no rounds reconstructed -- no content or tool calls in this turn)")
+        for r in rounds:
+            lines.append(f"  --- Round {r['round']} ---")
+            for tc in r["tool_calls"]:
+                lines.append(f"    TOOL CALL: {tc['tool']}({tc['command']})")
+                if tc["output"] is not None:
+                    output_preview = tc["output"][:200] + ("..." if len(tc["output"]) > 200 else "")
+                    lines.append(f"    TOOL OUTPUT (exit {tc['exit_code']}): {output_preview}")
+                else:
+                    lines.append("    TOOL OUTPUT: (none captured)")
+            if r["content"].strip():
+                lines.append(f"    CONTENT: {r['content']}")
+            elif not r["tool_calls"]:
+                lines.append("    (empty round)")
+        real_flags = [k for k, v in turn["classification"].items()
+                      if v is True and k not in ("made_tool_call", "expectation")]
+        if real_flags:
+            lines.append(f"  Real flags/checks that fired this turn: {', '.join(real_flags)}")
+
+    return "\n".join(lines)
+
+
+
+
 
 
 def run_multi_round_suite(endpoint_id: str, model: str, runs: int,
@@ -2522,6 +2640,10 @@ RESULTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "results"
 # make load_historical_results() misinterpret summary files as raw
 # results (or vice versa).
 SUMMARIES_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "summaries")
+# Real, added 2026-08-28: where real, captured raw-event debug bundles
+# (from capture_raw_events_for_check()/--capture-check) live -- see
+# scripts/captures/.
+CAPTURES_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "captures")
 
 
 def detect_regressions(historical_summaries: list, min_drop_pct: int = 10) -> list:
@@ -3431,6 +3553,30 @@ def main():
     parser.add_argument("--suite-name-filter", metavar="NAME",
                          help="With --summary-trend, only show entries "
                               "for this real suite name.")
+    parser.add_argument("--replay", metavar="PATH",
+                         help="Real, saved capture bundle (from "
+                              "--capture-check, e.g. under "
+                              "scripts/captures/) -- reconstructs and "
+                              "prints a clear, round-by-round transcript "
+                              "from the real, raw saved event data.")
+    parser.add_argument("--capture-check", metavar="FLAG_NAME",
+                         help="Real, live debugging tool: repeatedly "
+                              "runs --scenario-file (or the default "
+                              "scenario) against --model until a real "
+                              "turn's own FLAG_NAME check fires True "
+                              "(e.g. tool_argument_echo, has_repeat, "
+                              "has_leaked_tag -- any real boolean "
+                              "check_trial()/run_sequence() computes), "
+                              "then saves the complete raw SSE event "
+                              "stream to scripts/captures/ for later "
+                              "--replay. Real live generation is "
+                              "non-deterministic -- may take several "
+                              "real attempts, or may not reproduce at "
+                              "all within --max-capture-attempts.")
+    parser.add_argument("--max-capture-attempts", type=int, default=10,
+                         help="With --capture-check, real number of "
+                              "attempts before giving up honestly. "
+                              "Default 10.")
     parser.add_argument("--summary-trend-html", metavar="PATH",
                          help="With --summary-trend, also write a real, "
                               "self-contained HTML report comparing "
@@ -3692,6 +3838,25 @@ def main():
     if args.serve_dashboard:
         serve_health_dashboard(port=args.dashboard_port, summaries_dir=args.summaries_dir,
                                 refresh_seconds=args.refresh_seconds)
+        return
+
+    if args.replay:
+        with open(args.replay) as f:
+            bundle = json.load(f)
+        print(render_replay_transcript(bundle))
+        return
+
+    if args.capture_check:
+        scenario = load_scenario(args.scenario_file) if args.scenario_file else load_scenario(DEFAULT_SCENARIO_FILE)
+        print(f"Capturing raw events for check '{args.capture_check}' "
+              f"[scenario: {scenario['name']}] against {args.model} "
+              f"(up to {args.max_capture_attempts} real attempt(s))...")
+        result_path = capture_raw_events_for_check(
+            args.endpoint_id, args.model, scenario, CAPTURES_DIR,
+            target_check=args.capture_check, max_attempts=args.max_capture_attempts,
+        )
+        if result_path:
+            print(f"\nReplay it with: --replay {result_path}")
         return
 
     if args.summary_trend:
