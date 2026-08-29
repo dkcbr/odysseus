@@ -2363,3 +2363,120 @@ def test_analyze_captured_echoes_small_sample_note_is_honest_about_confidence(tm
     result = _harness.analyze_captured_echoes(str(tmp_path))
     assert result["sample_size"] == 1
     assert "too few for real statistical confidence" in result["note"]
+
+
+# ---------------------------------------------------------------------------
+# extract_echo_features deepening (added 2026-08-28, Analyze_captured_
+# echoes). Verified live against the REAL, actual captured bundle --
+# caught and fixed a real bug during this same verification (the
+# memories_mention_correct_symbol fallback was defaulting to False for
+# the one existing real capture, which genuinely predates scenario_turn,
+# rather than genuinely reflecting that the memory text didn't mention
+# RGTI -- it does). The fixed extraction now correctly surfaces a real,
+# previously only-manually-noticed finding: the real, injected memory
+# text mentioned BOTH the correct (RGTI) and stale (KTOS) symbol
+# together in the same real capture.
+# ---------------------------------------------------------------------------
+
+def _real_bundle_for_deepened_features():
+    return {
+        "affected_turn_index": 1,
+        "turns_captured": [
+            {"turn_index": 0, "prompt": "Whats KTOS trading at right now?",
+             "raw_events": [
+                 {"type": "tool_start", "tool": "lookup_ticker", "command": '{"symbol": "KTOS"}'},
+                 {"type": "tool_output", "tool": "lookup_ticker", "output": "price: 52", "exit_code": 0},
+                 {"delta": "KTOS is at $52."},
+             ],
+             "classification": {}, "scenario_turn": {"type": "ticker", "symbol": "KTOS"}},
+            {"turn_index": 1, "prompt": "What about RGTI though?",
+             "raw_events": [
+                 {"type": "memories_used", "data": [
+                     {"text": "User follows KTOS and RGTI closely.", "category": "preference", "type": "recalled"},
+                 ]},
+                 {"type": "tool_start", "tool": "lookup_ticker", "command": '{"symbol": "KTOS"}'},
+                 {"type": "tool_output", "tool": "lookup_ticker", "output": "price: 52", "exit_code": 0},
+                 {"type": "agent_step", "round": 2},
+             ],
+             "classification": {}, "scenario_turn": {"type": "ticker", "symbol": "RGTI", "message": "What about RGTI though?"}},
+        ],
+    }
+
+
+def test_extract_echo_features_round_count_and_final_round_empty():
+    bundle = _real_bundle_for_deepened_features()
+    features = _harness.extract_echo_features(bundle)
+    assert features["round_count"] == 2
+    assert features["final_round_empty"] is True  # round 2 has no content, no tool calls
+
+
+def test_extract_echo_features_memory_signals_with_scenario_turn():
+    bundle = _real_bundle_for_deepened_features()
+    features = _harness.extract_echo_features(bundle)
+    assert features["memories_used_count"] == 1
+    assert features["memories_mention_correct_symbol"] is True  # mentions RGTI
+    assert features["memories_mention_stale_symbol"] is True    # also mentions KTOS
+
+
+def test_extract_echo_features_memory_signals_false_when_absent():
+    bundle = _real_bundle_for_deepened_features()
+    bundle["turns_captured"][1]["raw_events"] = [
+        e for e in bundle["turns_captured"][1]["raw_events"] if e.get("type") != "memories_used"
+    ]
+    features = _harness.extract_echo_features(bundle)
+    assert features["memories_used_count"] == 0
+    assert features["memories_mention_correct_symbol"] is False
+    assert features["memories_mention_stale_symbol"] is False
+
+
+def test_extract_echo_features_preceding_turn_content_preview():
+    bundle = _real_bundle_for_deepened_features()
+    features = _harness.extract_echo_features(bundle)
+    assert "KTOS is at $52" in features["preceding_turn_content_preview"]
+
+
+def test_extract_echo_features_correct_symbol_fallback_from_prompt_text():
+    """Real, deliberate fallback for captures predating scenario_turn:
+    best-effort extraction of the real, correct symbol from the
+    affected turn's own real prompt text, using the real, known
+    IN_TRAINING_TICKERS pool."""
+    bundle = {
+        "affected_turn_index": 0,
+        "turns_captured": [{
+            "turn_index": 0,
+            "prompt": "So I was just reading an article and it made me think about RGTI -- anyway, what's it trading at?",
+            "raw_events": [
+                {"type": "memories_used", "data": [{"text": "User follows RGTI.", "category": "fact", "type": "recalled"}]},
+                {"type": "tool_start", "tool": "lookup_ticker", "command": '{"symbol": "KTOS"}'},
+            ],
+            "classification": {},
+        }],
+    }
+    features = _harness.extract_echo_features(bundle)
+    assert features["memories_mention_correct_symbol"] is True
+
+
+def test_extract_echo_features_real_capture_reproduces_manual_finding():
+    """Real, direct verification against the actual, real captured
+    bundle -- the deepened extraction must correctly reproduce what
+    was manually observed by re-reading the raw JSON: the real memory
+    text mentions BOTH the correct and stale symbol together."""
+    real_capture_path = os.path.join(ROOT, "scripts", "captures",
+                                      "tool_argument_echo_prompt_shape_variety_1788042034.json")
+    if not os.path.isfile(real_capture_path):
+        pytest.skip("real capture file not present in this checkout")
+    with open(real_capture_path) as f:
+        bundle = json.load(f)
+    features = _harness.extract_echo_features(bundle)
+    assert features["memories_mention_correct_symbol"] is True
+    assert features["memories_mention_stale_symbol"] is True
+    assert features["round_count"] == 2
+    assert features["final_round_empty"] is True
+
+
+def test_analyze_captured_echoes_note_includes_memory_overlap_signal(tmp_path):
+    bundle = _real_bundle_for_deepened_features()
+    path = tmp_path / "tool_argument_echo_test_1.json"
+    path.write_text(json.dumps(bundle))
+    result = _harness.analyze_captured_echoes(str(tmp_path))
+    assert "1/1 had real, injected memories mentioning BOTH" in result["note"]
