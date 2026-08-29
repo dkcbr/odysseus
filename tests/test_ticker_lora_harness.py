@@ -2097,3 +2097,98 @@ def test_capture_raw_events_stops_at_first_reproduction_not_later_attempts(tmp_p
     # for the first turn itself = 2 total, not 3 (which a second turn
     # or a second attempt would add).
     assert call_count["n"] == 2
+
+
+# ---------------------------------------------------------------------------
+# reconstruct_rounds, render_replay_transcript (added 2026-08-28,
+# Replay_exact_run_with_replay_engine). Verified live against the
+# real, actual captured bundle from the immediately preceding task
+# (tool_argument_echo_prompt_shape_variety_1788042034.json,
+# scripts/captures/) -- confirmed the reconstructed transcript
+# correctly showed round 1's stale KTOS tool call and round 2's empty
+# content for the real affected turn, and additionally surfaced a
+# second, distinct real finding along the way: a raw </think> tag
+# leaking into turn 1's visible content, another instance of the
+# reasoning-leak pattern noted earlier in the same session. These
+# tests cover the reconstruction logic deterministically with real,
+# controlled event sequences matching the exact real shapes confirmed
+# by inspecting that real capture directly.
+# ---------------------------------------------------------------------------
+
+def test_reconstruct_rounds_groups_by_explicit_round_markers():
+    events = [
+        {"type": "tool_start", "tool": "lookup_ticker", "command": '{"symbol": "KTOS"}', "round": 1},
+        {"type": "tool_output", "tool": "lookup_ticker", "output": "price: 52", "exit_code": 0},
+        {"type": "agent_step", "round": 2},
+        {"delta": "KTOS is at $52."},
+    ]
+    rounds = _harness.reconstruct_rounds(events)
+    assert len(rounds) == 2
+    assert rounds[0]["round"] == 1
+    assert rounds[0]["tool_calls"][0]["tool"] == "lookup_ticker"
+    assert rounds[0]["tool_calls"][0]["output"] == "price: 52"
+    assert rounds[1]["round"] == 2
+    assert rounds[1]["content"] == "KTOS is at $52."
+
+
+def test_reconstruct_rounds_content_before_any_marker_is_implicit_round_1():
+    """Real, confirmed directly from a real capture: a turn that never
+    calls a tool never emits any real round marker at all -- its
+    content must still be correctly attributed to round 1."""
+    events = [{"delta": "Just a direct answer, no tool call."}]
+    rounds = _harness.reconstruct_rounds(events)
+    assert len(rounds) == 1
+    assert rounds[0]["round"] == 1
+    assert rounds[0]["content"] == "Just a direct answer, no tool call."
+
+
+def test_reconstruct_rounds_empty_events_returns_empty_list():
+    assert _harness.reconstruct_rounds([]) == []
+
+
+def test_reconstruct_rounds_ignores_thinking_deltas():
+    events = [
+        {"delta": "internal reasoning", "thinking": True},
+        {"delta": "the real visible answer"},
+    ]
+    rounds = _harness.reconstruct_rounds(events)
+    assert rounds[0]["content"] == "the real visible answer"
+
+
+def test_render_replay_transcript_includes_key_real_details():
+    bundle = {
+        "scenario_name": "test_scenario", "model": "m1", "attempt": 1,
+        "session_id": "sess1", "timestamp": time.time(),
+        "target_check": "tool_argument_echo", "affected_turn_index": 0,
+        "turns_captured": [{
+            "turn_index": 0, "prompt": "Whats RGTI trading at?",
+            "raw_events": [
+                {"type": "tool_start", "tool": "lookup_ticker", "command": '{"symbol": "KTOS"}', "round": 1},
+                {"type": "tool_output", "tool": "lookup_ticker", "output": "wrong data", "exit_code": 0},
+            ],
+            "classification": {"tool_argument_echo": True, "is_empty": True, "made_tool_call": True},
+        }],
+    }
+    transcript = _harness.render_replay_transcript(bundle)
+    assert "test_scenario" in transcript
+    assert "Whats RGTI trading at?" in transcript
+    assert '{"symbol": "KTOS"}' in transcript
+    assert "AFFECTED TURN" in transcript
+    assert "tool_argument_echo" in transcript
+
+
+def test_render_replay_transcript_real_captured_bundle_reconstructs_correctly():
+    """Real, direct verification against the actual, real captured
+    bundle saved during the immediately preceding task -- not
+    synthetic data."""
+    real_capture_path = os.path.join(ROOT, "scripts", "captures",
+                                      "tool_argument_echo_prompt_shape_variety_1788042034.json")
+    if not os.path.isfile(real_capture_path):
+        pytest.skip("real capture file not present in this checkout")
+    with open(real_capture_path) as f:
+        bundle = json.load(f)
+    transcript = _harness.render_replay_transcript(bundle)
+    assert "RGTI" in transcript
+    assert '{"symbol": "KTOS"}' in transcript
+    assert "tool_argument_echo" in transcript
+    assert "AFFECTED TURN" in transcript
