@@ -1253,3 +1253,53 @@ def test_generate_suite_from_tags_produces_a_real_loadable_suite():
         assert reloaded["_resolved_scenario_paths"] == auto["_resolved_scenario_paths"]
     finally:
         os.remove(path)
+
+
+# ---------------------------------------------------------------------------
+# compute_multi_model_scenario_weights (added 2026-08-28 as part of
+# model-specific weighting)
+# ---------------------------------------------------------------------------
+
+def test_compute_multi_model_scenario_weights_shows_real_per_model_differences():
+    scenario = {"name": "x", "scenario_tags": []}
+    historical = [
+        {"model": "good_model", "scenario_name": "x", "total_turns": 10, "clean_turns": 10},
+        {"model": "bad_model", "scenario_name": "x", "total_turns": 10, "clean_turns": 0},
+    ]
+    weights = _harness.compute_multi_model_scenario_weights(
+        scenario, historical, models=["good_model", "bad_model"]
+    )
+    assert weights["good_model"]["total"] == 1.0
+    assert weights["bad_model"]["total"] == 2.0
+    assert weights["good_model"]["total"] != weights["bad_model"]["total"]
+
+
+def test_compute_multi_model_scenario_weights_matches_single_model_calls():
+    """Real, direct correctness check: the multi-model function must
+    reuse compute_scenario_weight() exactly, not a separate
+    implementation that could silently drift from it."""
+    scenario = {"name": "x", "scenario_tags": ["generalization"]}
+    historical = [
+        {"model": "m1", "scenario_name": "x", "total_turns": 10, "clean_turns": 5,
+         "flag_counts": {"TOOL_ERROR": 1}, "total_cross_turn_contamination": 1},
+    ]
+    multi = _harness.compute_multi_model_scenario_weights(scenario, historical, models=["m1", "m2"])
+    single_m1 = _harness.compute_scenario_weight(scenario, historical, model="m1")
+    single_m2 = _harness.compute_scenario_weight(scenario, historical, model="m2")
+    assert multi["m1"] == single_m1
+    assert multi["m2"] == single_m2
+
+
+def test_compute_multi_model_scenario_weights_respects_recent_n():
+    scenario = {"name": "x", "scenario_tags": []}
+    historical = _real_history_with_old_bad_recent_good("x", model="m1")
+    multi_all_time = _harness.compute_multi_model_scenario_weights(scenario, historical, models=["m1"])
+    multi_recent = _harness.compute_multi_model_scenario_weights(
+        scenario, historical, models=["m1"], recent_n=3
+    )
+    assert multi_recent["m1"]["total"] < multi_all_time["m1"]["total"]
+
+
+def test_compute_multi_model_scenario_weights_rejects_empty_models():
+    with pytest.raises(ValueError, match="models list"):
+        _harness.compute_multi_model_scenario_weights({"name": "x"}, [], models=[])

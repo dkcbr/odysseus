@@ -1748,6 +1748,37 @@ def compute_scenario_weight(scenario: dict, historical_summaries: list, model: s
     }
 
 
+def compute_multi_model_scenario_weights(scenario: dict, historical_summaries: list,
+                                          models: list, recent_n: int = None) -> dict:
+    """Real, added 2026-08-28: computes compute_scenario_weight() for the
+    SAME real scenario across SEVERAL real models, returning
+    {model: weight_dict}, so a real weight difference between models
+    for the identical scenario is directly visible side by side -- the
+    genuine gap compute_scenario_weight() alone doesn't fill: it
+    already correctly scopes to one real model at a time (confirmed
+    directly, the same night, that the identical scenario can swing
+    from 80% clean to 0% clean depending purely on which model ran it),
+    but nothing before this compared several models' weights for the
+    same scenario in one call.
+
+    Reuses compute_scenario_weight() per model (not a separate, fourth
+    implementation of the same underlying math) -- each model's real
+    weight dict comes back in exactly the shape compute_scenario_weight()
+    already produces.
+    """
+    if not models:
+        raise ValueError(
+            "compute_multi_model_scenario_weights() needs a real, "
+            "non-empty models list"
+        )
+    return {
+        model: compute_scenario_weight(scenario, historical_summaries, model=model, recent_n=recent_n)
+        for model in models
+    }
+
+
+
+
 
 
 
@@ -2066,9 +2097,16 @@ def main():
                               "bug -- a direct way to see that fix's real "
                               "effect).")
     parser.add_argument("--models", metavar="MODEL1,MODEL2,...",
-                         help="Comma-separated real model names to compare "
-                              "when --cross-model is used. Defaults to "
-                              "DEFAULT_CROSS_MODEL_LIST.")
+                         help="Comma-separated real model names to compare. "
+                              "Used by --cross-model (defaults to "
+                              "DEFAULT_CROSS_MODEL_LIST if omitted), "
+                              "--multi-model-suite (overrides the suite "
+                              "file's own 'models' field), and, real, "
+                              "added 2026-08-28: --weight-scenarios (no "
+                              "default -- required to trigger the real, "
+                              "per-model weight comparison mode; without "
+                              "it, --weight-scenarios uses its original "
+                              "single-model/--rank-all-models ranking).")
     parser.add_argument("--fuzz", action="store_true",
                          help="Generate real, grounded scenario variants "
                               "from --scenario-file (ticker substitution "
@@ -2155,6 +2193,27 @@ def main():
                               "average. Omit for the original, all-time "
                               "behavior.")
     args = parser.parse_args()
+
+    if args.weight_scenarios and args.models:
+        # Real, added 2026-08-28 (model_specific_weighting): a genuinely
+        # different mode from the block below -- compares each real
+        # scenario's weight ACROSS several real models side by side,
+        # rather than a single model's ranking across scenarios.
+        historical = load_historical_results(args.results_dir)
+        models = [m.strip() for m in args.models.split(",")]
+        recency_label = f"last {args.recent_n} run(s)" if args.recent_n else "all-time history"
+        scenario_files = sorted(f for f in os.listdir(SCENARIOS_DIR) if f.endswith(".json"))
+        print(f"Per-model scenario weight comparison [{len(historical)} historical file(s), "
+              f"recency: {recency_label}]:\n")
+        header = f"{'Scenario':<32} " + " ".join(f"{m[:16]:>16}" for m in models)
+        print(header)
+        print("-" * len(header))
+        for fname in scenario_files:
+            scenario = load_scenario(os.path.join(SCENARIOS_DIR, fname))
+            weights = compute_multi_model_scenario_weights(scenario, historical, models, recent_n=args.recent_n)
+            row = f"{scenario['name']:<32} " + " ".join(f"{weights[m]['total']:>16}" for m in models)
+            print(row)
+        return
 
     if args.weight_scenarios:
         historical = load_historical_results(args.results_dir)
