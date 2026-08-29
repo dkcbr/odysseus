@@ -1106,6 +1106,15 @@ def generate_suite_health_summary(suite_result: dict, historical_summaries: list
     failure_rate = round(100 * (1 - combined_clean_turns / combined_total_turns)) if combined_total_turns else 0
 
     summary = {
+        # Real, added 2026-08-28 (Persist_summary_in_history): a health
+        # summary is a real, meaningful snapshot in time -- its own real
+        # regressions section (below) reflects whatever real historical
+        # data existed AT THE MOMENT it was generated, which is
+        # genuinely different from regenerating it later against a
+        # since-grown history. A real timestamp makes the summary a
+        # self-contained, persistable artifact rather than something
+        # only meaningful if immediately printed and discarded.
+        "timestamp": time.time(),
         "overview": {
             "suite_name": suite_name,
             "scenario_count": scenario_count,
@@ -1171,6 +1180,84 @@ def _print_health_summary(summary: dict) -> None:
         print("  " + "-" * (len(header) - 2))
         for model, mc in summary["model_comparison"].items():
             print(f"  {model:<32} {mc['clean_rate']:>7}% {mc['total_turns']:>6}")
+
+
+def load_historical_summaries(summaries_dir: str = None) -> list:
+    """Real, added 2026-08-28: loads every saved health-summary JSON
+    file from a directory (default SUMMARIES_DIR), the summary-shaped
+    equivalent of load_historical_results() for raw results -- skips
+    any file that fails to parse or lacks a real "overview"/"timestamp"
+    (the two fields every real generate_suite_health_summary() output
+    has) rather than aborting the whole load, sorted oldest to newest.
+    Deliberately a separate loader from load_historical_results(), not
+    a shared one with a type flag -- the two real shapes (raw suite
+    result vs. derived health summary) are different enough that
+    conflating their loading logic would need a maze of shape-specific
+    branches inside one function, for zero real benefit over two
+    simple, separate ones.
+    """
+    summaries_dir = summaries_dir or SUMMARIES_DIR
+    if not os.path.isdir(summaries_dir):
+        return []
+    summaries = []
+    for fname in sorted(os.listdir(summaries_dir)):
+        if not fname.endswith(".json"):
+            continue
+        path = os.path.join(summaries_dir, fname)
+        try:
+            with open(path) as f:
+                data = json.load(f)
+        except (json.JSONDecodeError, OSError):
+            continue
+        if "overview" not in data or "timestamp" not in data:
+            continue
+        data["_source_file"] = fname
+        summaries.append(data)
+    summaries.sort(key=lambda s: s["timestamp"])
+    return summaries
+
+
+def summarize_suite_trend(summaries: list, suite_name: str = None) -> list:
+    """Real, added 2026-08-28: shows how a suite's REAL, SUITE-LEVEL
+    outcome (not per-scenario, which --trends already covers) has
+    changed across its own real, saved health-summary snapshots over
+    time. Genuinely different real view from --trends -- that operates
+    on raw per-scenario/per-run data; this operates on the suite-level
+    aggregate a health summary itself already computed and persisted,
+    including whatever real regression context existed at generation
+    time (which --trends regenerating fresh against current history
+    would NOT reproduce, since more history may have accumulated
+    since).
+
+    Real, deliberate: no model-scoping parameter here, unlike
+    detect_regressions()/rank_scenarios_by_failure_rate() -- a health
+    summary is already suite+model-scoped (or suite+multi-model-scoped)
+    at the point it was generated and saved; this function only ever
+    filters by suite_name, real evidence of which suite a given
+    snapshot belongs to, not re-derives model scoping after the fact.
+
+    Returns a list of {"timestamp", "label", "suite_name",
+    "failure_rate", "clean_turns", "total_turns",
+    "regression_count", "source_file"}, oldest first, optionally
+    filtered to one real suite_name.
+    """
+    trend = []
+    for s in summaries:
+        if suite_name is not None and s["overview"].get("suite_name") != suite_name:
+            continue
+        trend.append({
+            "timestamp": s["timestamp"],
+            "label": time.strftime("%m/%d %H:%M", time.localtime(s["timestamp"])),
+            "suite_name": s["overview"].get("suite_name", "?"),
+            "failure_rate": s["outcomes"].get("failure_rate", 0),
+            "clean_turns": s["outcomes"].get("clean_turns", 0),
+            "total_turns": s["outcomes"].get("total_turns", 0),
+            "regression_count": len(s.get("regressions", [])),
+            "source_file": s.get("_source_file", "?"),
+        })
+    return trend
+
+
 
 
 
@@ -1516,6 +1603,14 @@ def generate_html_report(summary: dict, output_path: str) -> None:
 
 
 RESULTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "results")
+# Real, added 2026-08-28: where persisted health summaries live -- a
+# real, deliberately separate directory from RESULTS_DIR, since a
+# health summary (overview/outcomes/regressions/model_comparison) is
+# derived, suite-level data, genuinely different in shape from the raw
+# per-scenario/per-run results RESULTS_DIR holds; mixing the two would
+# make load_historical_results() misinterpret summary files as raw
+# results (or vice versa).
+SUMMARIES_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "summaries")
 
 
 def detect_regressions(historical_summaries: list, min_drop_pct: int = 10) -> list:
@@ -2229,6 +2324,37 @@ def main():
                               "several existing, separate real reports "
                               "into one, rather than requiring them to be "
                               "run and cross-referenced by hand.")
+    parser.add_argument("--save-summary", metavar="PATH",
+                         help="With --health-summary, also persist the "
+                              "real, computed health summary itself (not "
+                              "just the raw --save-results output) to "
+                              "PATH as real JSON -- a genuine, timestamped "
+                              "snapshot including whatever real regression "
+                              "context existed at generation time, which "
+                              "regenerating the summary later against a "
+                              "since-grown history would NOT reproduce. "
+                              "Save into scripts/summaries/ (e.g. "
+                              "scripts/summaries/$(date +%%Y%%m%%d_%%H%%M%%S)"
+                              ".json) so --summary-trend can find it -- "
+                              "that directory is gitignored for its *.json "
+                              "contents, matching scripts/results/.")
+    parser.add_argument("--summary-trend", action="store_true",
+                         help="Load every saved health summary under "
+                              "--summaries-dir (default scripts/"
+                              "summaries/) and print how a suite's real, "
+                              "suite-level outcome has changed over time "
+                              "-- genuinely different from --trends, which "
+                              "operates on raw per-scenario data; this "
+                              "operates on the suite-level aggregate a "
+                              "health summary already computed and "
+                              "persisted. Combine with --suite-name-filter "
+                              "to scope to one real suite.")
+    parser.add_argument("--summaries-dir", metavar="PATH", default=SUMMARIES_DIR,
+                         help="Directory to load/save health summaries "
+                              "from/to. Defaults to scripts/summaries/.")
+    parser.add_argument("--suite-name-filter", metavar="NAME",
+                         help="With --summary-trend, only show entries "
+                              "for this real suite name.")
     parser.add_argument("--multi-model-suite", metavar="PATH",
                          help="Real suite JSON file with its own real "
                               "'models' field (see scripts/suites/"
@@ -2392,6 +2518,21 @@ def main():
                   f"{w['tool_error_risk']:>8} {w['generalization_risk']:>5} {w['runs_seen']:>5}")
         return
 
+    if args.summary_trend:
+        summaries = load_historical_summaries(args.summaries_dir)
+        trend = summarize_suite_trend(summaries, suite_name=args.suite_name_filter)
+        scope_label = args.suite_name_filter or "all suites"
+        print(f"Suite health trend [{len(summaries)} saved summary file(s), scope: {scope_label}]:\n")
+        if not trend:
+            print("No saved summaries found for this scope.")
+        else:
+            print(f"{'When':<18} {'Suite':<28} {'Failure %':>10} {'Turns':>7} {'Regressions':>12}")
+            print("-" * 78)
+            for entry in trend:
+                print(f"{entry['label']:<18} {entry['suite_name']:<28} {entry['failure_rate']:>9}% "
+                      f"{entry['total_turns']:>7} {entry['regression_count']:>12}")
+        return
+
     if args.rank_scenarios:
         historical = load_historical_results(args.results_dir)
         scope_model = None if args.rank_all_models else args.model
@@ -2459,6 +2600,10 @@ def main():
             historical = load_historical_results(args.results_dir) if os.path.isdir(args.results_dir) else None
             health = generate_suite_health_summary(suite_summary, historical_summaries=historical)
             _print_health_summary(health)
+            if args.save_summary:
+                with open(args.save_summary, "w") as f:
+                    json.dump(health, f, indent=2)
+                print(f"\nHealth summary written to {args.save_summary}")
         return
 
     if args.multi_model_suite:
@@ -2482,6 +2627,10 @@ def main():
             historical = load_historical_results(args.results_dir) if os.path.isdir(args.results_dir) else None
             health = generate_suite_health_summary(mm_summary, historical_summaries=historical)
             _print_health_summary(health)
+            if args.save_summary:
+                with open(args.save_summary, "w") as f:
+                    json.dump(health, f, indent=2)
+                print(f"\nHealth summary written to {args.save_summary}")
         return
 
     if args.suite:
@@ -2498,6 +2647,10 @@ def main():
             historical = load_historical_results(args.results_dir) if os.path.isdir(args.results_dir) else None
             health = generate_suite_health_summary(suite_summary, historical_summaries=historical)
             _print_health_summary(health)
+            if args.save_summary:
+                with open(args.save_summary, "w") as f:
+                    json.dump(health, f, indent=2)
+                print(f"\nHealth summary written to {args.save_summary}")
         return
 
     if args.trends:

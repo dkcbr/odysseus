@@ -1377,3 +1377,74 @@ def test_health_summary_regressions_scoped_to_the_right_model():
               "flag_counts": {}, "scenario_results": []}
     summary = _harness.generate_suite_health_summary(result, historical_summaries=historical)
     assert all(a["model"] == "m1" for a in summary["regressions"])
+
+
+# ---------------------------------------------------------------------------
+# load_historical_summaries and summarize_suite_trend (added 2026-08-28
+# as part of Persist_summary_in_history)
+# ---------------------------------------------------------------------------
+
+def test_generate_suite_health_summary_includes_timestamp():
+    """Real, added 2026-08-28: a health summary must carry its own real
+    timestamp to be a self-contained, persistable snapshot."""
+    result = {"model": "m1", "suite_name": "x", "total_turns": 5, "clean_turns": 5,
+              "flag_counts": {}, "scenario_results": []}
+    summary = _harness.generate_suite_health_summary(result)
+    assert "timestamp" in summary
+    assert isinstance(summary["timestamp"], float)
+
+
+def test_load_historical_summaries_loads_and_sorts(tmp_path):
+    now = time.time()
+    s1 = {"timestamp": now - 3600, "overview": {"suite_name": "x"}, "outcomes": {"failure_rate": 10}}
+    s2 = {"timestamp": now, "overview": {"suite_name": "x"}, "outcomes": {"failure_rate": 60}}
+    (tmp_path / "b.json").write_text(json.dumps(s2))
+    (tmp_path / "a.json").write_text(json.dumps(s1))
+    loaded = _harness.load_historical_summaries(str(tmp_path))
+    assert len(loaded) == 2
+    assert loaded[0]["timestamp"] < loaded[1]["timestamp"]
+    assert loaded[0]["outcomes"]["failure_rate"] == 10
+
+
+def test_load_historical_summaries_skips_malformed_and_incomplete(tmp_path):
+    (tmp_path / "bad.json").write_text("not json")
+    (tmp_path / "incomplete.json").write_text(json.dumps({"overview": {}}))  # missing timestamp
+    (tmp_path / "good.json").write_text(json.dumps({
+        "timestamp": time.time(), "overview": {"suite_name": "x"}, "outcomes": {"failure_rate": 0},
+    }))
+    loaded = _harness.load_historical_summaries(str(tmp_path))
+    assert len(loaded) == 1
+
+
+def test_load_historical_summaries_missing_dir_returns_empty():
+    assert _harness.load_historical_summaries("/tmp/does-not-exist-at-all-real-check") == []
+
+
+def test_summarize_suite_trend_shows_regression_count():
+    now = time.time()
+    summaries = [
+        {"timestamp": now - 3600, "overview": {"suite_name": "x"},
+         "outcomes": {"failure_rate": 10, "clean_turns": 9, "total_turns": 10}, "regressions": []},
+        {"timestamp": now, "overview": {"suite_name": "x"},
+         "outcomes": {"failure_rate": 60, "clean_turns": 4, "total_turns": 10},
+         "regressions": [{"type": "clean_rate_regression"}]},
+    ]
+    trend = _harness.summarize_suite_trend(summaries)
+    assert trend[0]["failure_rate"] == 10
+    assert trend[1]["failure_rate"] == 60
+    assert trend[1]["regression_count"] == 1
+
+
+def test_summarize_suite_trend_filters_by_suite_name():
+    now = time.time()
+    summaries = [
+        {"timestamp": now, "overview": {"suite_name": "x"}, "outcomes": {"failure_rate": 10}, "regressions": []},
+        {"timestamp": now, "overview": {"suite_name": "y"}, "outcomes": {"failure_rate": 90}, "regressions": []},
+    ]
+    trend = _harness.summarize_suite_trend(summaries, suite_name="x")
+    assert len(trend) == 1
+    assert trend[0]["suite_name"] == "x"
+
+
+def test_summarize_suite_trend_empty_input_returns_empty_list():
+    assert _harness.summarize_suite_trend([]) == []
