@@ -31,6 +31,7 @@ proven for legitimate internal tooling, not a real user credential.
 import argparse
 import json
 import os
+import random
 import re
 import time
 import urllib.request
@@ -344,6 +345,104 @@ REAL_DK_STOCK_HOLDINGS = {
     "PL", "ADUR", "KTOS", "MP", "TMC", "XE", "SOUN", "WDAY", "MSFT",
     "UUUU", "ENPH", "ABTC",
 }
+
+
+# Real, added 2026-08-28: grounded ticker pools for scenario mutation --
+# every symbol here is real and already verified/used somewhere in this
+# harness tonight, not randomly generated. Fuzzing with ungrounded,
+# possibly-real-but-unverified symbols risks accidentally testing a real
+# company's real data by coincidence, which would be a misleading,
+# uncontrolled variable in a supposedly controlled fuzz run.
+IN_TRAINING_TICKERS = [
+    "ADUR", "ENPH", "IONQ", "KTOS", "MP", "NPLM", "NVDA", "QTXN",
+    "RGTI", "RKLB", "SOUN", "TMC", "UUUU", "VRKO", "ZBLR",
+]
+HELD_OUT_REAL_TICKERS = ["AAPL", "MSFT", "TSLA"]
+SYNTHETIC_FAKE_TICKERS = ["ZZVXQ", "QRPZY", "XKVNT"]
+
+MUTATION_TICKER_POOLS = {
+    "in_training": IN_TRAINING_TICKERS,
+    "holdings": sorted(REAL_DK_STOCK_HOLDINGS),
+    "held_out": HELD_OUT_REAL_TICKERS,
+    "synthetic": SYNTHETIC_FAKE_TICKERS,
+}
+
+
+def mutate_ticker_substitution(base_scenario: dict, pool_name: str = "in_training",
+                                count: int = 5, seed: int = None) -> list:
+    """Real, added 2026-08-28: generates real, valid scenario variants by
+    substituting different real tickers (from a real, grounded pool, not
+    randomly generated symbols) into the same structural pattern as a
+    base scenario -- keeps every non-ticker aspect (turn count, turn
+    types, expectations, custom message templates) identical, varying
+    only which real ticker each "ticker"-type turn actually asks about.
+
+    Real, deliberate design for reproducibility: seed makes the exact
+    same set of variants regenerate on demand -- a fuzzing tool whose
+    failures can't be reproduced is far less useful for actually
+    investigating what it finds. Each turn's symbol substitution is
+    logged into the variant's own "note" field, so a human reading a
+    generated variant scenario can see exactly what was substituted and
+    why, without needing to diff it against the base file by hand.
+
+    Real turns with a custom "message" override (see
+    prompt_shape_variety.json) have their ticker symbol swapped inside
+    the message text too, via simple substring replacement of the
+    original symbol, so the mutated prompt still reads coherently
+    rather than mentioning a different ticker than it asks about.
+
+    Returns a list of real, valid scenario dicts (same shape
+    load_scenario() would produce), NOT written to disk -- a caller
+    decides whether to run them directly (e.g. via run_sequence) or
+    persist them.
+    """
+    if pool_name not in MUTATION_TICKER_POOLS:
+        raise ValueError(
+            f"Unknown mutation ticker pool {pool_name!r}, real options: "
+            f"{sorted(MUTATION_TICKER_POOLS)}"
+        )
+    pool = MUTATION_TICKER_POOLS[pool_name]
+    rng = random.Random(seed)
+
+    ticker_turn_indices = [i for i, t in enumerate(base_scenario["turns"]) if t["type"] == "ticker"]
+    if not ticker_turn_indices:
+        raise ValueError(
+            f"Scenario {base_scenario.get('name', '?')!r} has no real 'ticker' "
+            f"type turns to mutate"
+        )
+
+    variants = []
+    for variant_i in range(count):
+        new_turns = []
+        substitutions = []
+        for i, turn in enumerate(base_scenario["turns"]):
+            if i not in ticker_turn_indices:
+                new_turns.append(dict(turn))
+                continue
+            original_symbol = turn["symbol"]
+            new_symbol = rng.choice(pool)
+            new_turn = dict(turn)
+            new_turn["symbol"] = new_symbol
+            if "message" in new_turn:
+                new_turn["message"] = new_turn["message"].replace(original_symbol, new_symbol)
+            new_turn["note"] = f"mutated: {original_symbol} -> {new_symbol} (pool: {pool_name})"
+            new_turns.append(new_turn)
+            substitutions.append(f"{original_symbol}->{new_symbol}")
+
+        variant = {
+            "name": f"{base_scenario.get('name', 'scenario')}_mutant_{variant_i}",
+            "description": (
+                f"Real, auto-generated variant {variant_i + 1}/{count} of "
+                f"{base_scenario.get('name', '?')!r}, ticker-substitution "
+                f"mutation from the real {pool_name!r} pool "
+                f"(seed={seed}): {', '.join(substitutions)}."
+            ),
+            "scenario_tags": (base_scenario.get("scenario_tags") or []) + ["mutated", f"pool:{pool_name}"],
+            "turns": new_turns,
+        }
+        variants.append(variant)
+
+    return variants
 
 
 def _holdings_note_contamination(content: str, turn: dict) -> dict:
@@ -853,6 +952,88 @@ def run_cross_model(endpoint_id: str, models: list, scenario: dict = None,
                 print(row)
 
     return {"scenario_name": scenario["name"], "results": results}
+
+
+def run_fuzz(endpoint_id: str, model: str, base_scenario: dict, pool_name: str = "in_training",
+             count: int = 5, seed: int = None, verbose: bool = True) -> dict:
+    """Real, added 2026-08-28: generates real, grounded scenario variants
+    via mutate_ticker_substitution() and runs each one live, exactly
+    once each (repeated runs of the SAME variant belong to
+    run_multi_round_suite(), not this function -- fuzzing is about
+    breadth across many real, different variants, not depth on one).
+    Aggregates into the same real, structured summary shape the rest of
+    the harness already understands, plus the real seed used (for
+    reproducing this exact fuzz run again) and each variant's own real
+    substitution note, so a real, interesting finding can be traced back
+    to exactly which mutated variant produced it.
+    """
+    variants = mutate_ticker_substitution(base_scenario, pool_name=pool_name, count=count, seed=seed)
+
+    total_turns = 0
+    clean_turns = 0
+    flag_counts = {}
+    total_contamination = 0
+    variant_results = []
+
+    for variant in variants:
+        if verbose:
+            print(f"\n=== Fuzz variant: {variant['name']} ===")
+            print(f"    {variant['description']}")
+        result = run_sequence(endpoint_id, model, scenario=variant)
+        run_clean = True
+        for r in result["turn_results"]:
+            total_turns += 1
+            is_clean, flags = _classify_turn(r)
+            if is_clean:
+                clean_turns += 1
+            else:
+                run_clean = False
+                for f in flags:
+                    flag_counts[f] = flag_counts.get(f, 0) + 1
+            if verbose:
+                status = "CLEAN" if is_clean else " ".join(flags)
+                print(f"  [{r.get('prompt', '')[:50]}]: {status}")
+        if result["cross_turn_contamination"]:
+            total_contamination += len(result["cross_turn_contamination"])
+            run_clean = False
+        variant_results.append({
+            "variant_name": variant["name"],
+            "description": variant["description"],
+            "session_id": result["session_id"],
+            "clean": run_clean,
+            "turn_results": result["turn_results"],
+        })
+
+    summary = {
+        "timestamp": time.time(),
+        "model": model,
+        "endpoint_id": endpoint_id,
+        "fuzz_base_scenario": base_scenario.get("name", "?"),
+        "fuzz_pool": pool_name,
+        "fuzz_seed": seed,
+        "fuzz_count": count,
+        "total_turns": total_turns,
+        "clean_turns": clean_turns,
+        "flag_counts": flag_counts,
+        "total_cross_turn_contamination": total_contamination,
+        "variant_results": variant_results,
+    }
+
+    if verbose:
+        clean_pct = round(100 * clean_turns / total_turns) if total_turns else 0
+        variants_clean = sum(1 for v in variant_results if v["clean"])
+        print(f"\n=== Fuzz Summary: {count} variant(s) of '{base_scenario.get('name', '?')}', "
+              f"pool={pool_name}, seed={seed} ===")
+        print(f"Variants completely clean: {variants_clean}/{count}")
+        print(f"Turns completely clean: {clean_turns}/{total_turns} ({clean_pct}%)")
+        print(f"Flag breakdown: {flag_counts}")
+        print(f"Total cross-turn contamination: {total_contamination}")
+        if seed is not None:
+            print(f"To reproduce this exact fuzz run: --fuzz-seed {seed}")
+
+    return summary
+
+
 
 
 
@@ -1490,6 +1671,24 @@ def main():
                          help="Comma-separated real model names to compare "
                               "when --cross-model is used. Defaults to "
                               "DEFAULT_CROSS_MODEL_LIST.")
+    parser.add_argument("--fuzz", action="store_true",
+                         help="Generate real, grounded scenario variants "
+                              "from --scenario-file (ticker substitution "
+                              "from a real pool, not random symbols) and "
+                              "run each one live, once each. See "
+                              "MUTATION_TICKER_POOLS for real pool names.")
+    parser.add_argument("--fuzz-pool", default="in_training",
+                         choices=["in_training", "holdings", "held_out", "synthetic"],
+                         help="Real ticker pool to substitute from when "
+                              "--fuzz is used. Defaults to in_training.")
+    parser.add_argument("--fuzz-count", type=int, default=5,
+                         help="Number of real variants to generate and run "
+                              "when --fuzz is used.")
+    parser.add_argument("--fuzz-seed", type=int,
+                         help="Real seed for reproducible fuzzing -- same "
+                              "seed regenerates the exact same variants. "
+                              "Omit for a real, non-reproducible run "
+                              "(printed after the run so it can be reused).")
     parser.add_argument("--html-report", metavar="PATH",
                          help="Write a real, richer, human-readable HTML "
                               "report to PATH (self-contained, opens in any "
@@ -1513,6 +1712,22 @@ def main():
                               "requirement) -- for quick checks, e.g. in a "
                               "cron job or before a deploy.")
     args = parser.parse_args()
+
+    if args.fuzz:
+        base_scenario = load_scenario(args.scenario_file) if args.scenario_file else load_scenario(DEFAULT_SCENARIO_FILE)
+        # Real, deliberate: generate our own real seed if none was given,
+        # so every fuzz run is reproducible after the fact, not just when
+        # the user happened to think to pass one in advance.
+        seed = args.fuzz_seed if args.fuzz_seed is not None else random.randint(0, 2**31 - 1)
+        print(f"Fuzzing {args.fuzz_count} variant(s) of '{base_scenario['name']}' "
+              f"[pool: {args.fuzz_pool}, seed: {seed}] against {args.model}...")
+        fuzz_summary = run_fuzz(args.endpoint_id, args.model, base_scenario,
+                                 pool_name=args.fuzz_pool, count=args.fuzz_count, seed=seed)
+        if args.save_results:
+            with open(args.save_results, "w") as f:
+                json.dump(fuzz_summary, f, indent=2)
+            print(f"\nFull fuzz results written to {args.save_results}")
+        return
 
     if args.cross_model:
         models = [m.strip() for m in args.models.split(",")] if args.models else DEFAULT_CROSS_MODEL_LIST
