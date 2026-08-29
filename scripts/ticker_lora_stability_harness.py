@@ -1301,6 +1301,172 @@ def summarize_suite_trend(summaries: list, suite_name: str = None) -> list:
     return trend
 
 
+def compare_suite_trends(summaries: list) -> dict:
+    """Real, added 2026-08-28 (Design_suite_health_trend_report): the
+    genuine gap left after summarize_suite_trend() -- that function
+    shows ONE suite's own trend over time (or, with no suite_name
+    filter, every saved summary mixed into one flat, chronological
+    list regardless of which suite produced it, which is genuinely
+    confusing to read once more than one real suite has saved
+    history). This groups by real suite_name and returns
+    {suite_name: [trend_entries...]}, one real, separate trend list
+    per real suite -- reuses summarize_suite_trend() once per distinct
+    suite_name found in the data (not a separate, parallel
+    implementation of the same per-entry extraction logic), so a
+    multi-suite comparison chart can plot each suite as its own real,
+    distinct line rather than blend them.
+    """
+    suite_names = sorted({s["overview"].get("suite_name", "?") for s in summaries})
+    return {name: summarize_suite_trend(summaries, suite_name=name) for name in suite_names}
+
+
+def generate_multi_suite_trend_html_report(grouped_trends: dict, output_path: str = None) -> str:
+    """Real, added 2026-08-28 (Design_suite_health_trend_report):
+    renders a real compare_suite_trends() result as a self-contained
+    HTML report -- one colored line per real suite on a single chart,
+    the suite-level equivalent of the real multi-model comparison
+    chart already proven in generate_trend_report() (same technique:
+    a fixed palette cycled per real series, a real legend, real
+    gridlines). Reuses that exact proven approach rather than invent a
+    new charting technique, and the same dark-terminal CSS palette
+    used across every other report in this harness for real visual
+    consistency.
+
+    Real, deliberate: output_path is optional, matching generate_
+    health_summary_html_report()'s own real pattern -- returns the
+    HTML string when omitted, in case a future caller wants to embed
+    or serve this without a real file round trip, same real reasoning
+    as before.
+    """
+    import html as _html
+
+    def esc(s):
+        return _html.escape(str(s))
+
+    palette = ["#58A6FF", "#D2A8FF", "#F0883E", "#3FB950", "#FF7B72", "#79C0FF", "#F778BA"]
+    suite_names = sorted(grouped_trends.keys())
+
+    if not suite_names or not any(grouped_trends.values()):
+        html_doc = (
+            '<!DOCTYPE html><html><head><meta charset="utf-8">'
+            '<title>Multi-Suite Trend Comparison</title></head>'
+            '<body style="background:#0D1117;color:#E6EDF3;font-family:sans-serif;padding:32px;">'
+            '<h1>Multi-Suite Trend Comparison</h1>'
+            '<p style="color:#8B949E;">No saved health summaries found -- run suites with '
+            '--health-summary --save-summary a few times to build up real trend data.</p>'
+            '</body></html>'
+        )
+        if output_path:
+            with open(output_path, "w") as f:
+                f.write(html_doc)
+        return html_doc
+
+    suite_colors = {name: palette[i % len(palette)] for i, name in enumerate(suite_names)}
+    all_points = sorted({e["timestamp"] for trend in grouped_trends.values() for e in trend})
+    n = len(all_points)
+
+    chart_w, chart_h = 800, 240
+    pad_l, pad_r, pad_t, pad_b = 40, 20, 20, 30
+    plot_w = chart_w - pad_l - pad_r
+    plot_h = chart_h - pad_t - pad_b
+
+    def x_for_ts(ts):
+        if n == 1:
+            return pad_l + plot_w / 2
+        idx = all_points.index(ts)
+        return pad_l + (plot_w * idx / (n - 1))
+
+    def y_for(pct):
+        return pad_t + plot_h * (1 - pct / 100)
+
+    lines_svg = ""
+    legend_html = ""
+    for name in suite_names:
+        trend = grouped_trends[name]
+        if not trend:
+            continue
+        color = suite_colors[name]
+        poly = " ".join(f"{x_for_ts(e['timestamp']):.1f},{y_for(e['failure_rate']):.1f}" for e in trend)
+        dots = "".join(
+            f'<circle cx="{x_for_ts(e["timestamp"]):.1f}" cy="{y_for(e["failure_rate"]):.1f}" r="4" fill="{color}">'
+            f'<title>{esc(name)} @ {esc(e["label"])}: {e["failure_rate"]}% failure</title></circle>'
+            for e in trend
+        )
+        lines_svg += f'<polyline points="{poly}" fill="none" stroke="{color}" stroke-width="2"/>{dots}'
+        legend_html += (
+            f'<span class="legend-item"><span class="legend-dot" style="background:{color}"></span>'
+            f'<span class="mono">{esc(name)}</span></span>'
+        )
+
+    gridlines = "".join(
+        f'<line x1="{pad_l}" y1="{y_for(g):.1f}" x2="{chart_w - pad_r}" y2="{y_for(g):.1f}" stroke="#30363D"/>'
+        f'<text x="{pad_l - 6}" y="{y_for(g) + 3:.1f}" font-size="10" fill="#8B949E" text-anchor="end" font-family="monospace">{g}%</text>'
+        for g in (0, 25, 50, 75, 100)
+    )
+    x_labels = "".join(
+        f'<text x="{x_for_ts(ts):.1f}" y="{chart_h - 8}" font-size="10" fill="#8B949E" text-anchor="middle" font-family="monospace">'
+        f'{esc(time.strftime("%m/%d %H:%M", time.localtime(ts)))}</text>'
+        for i, ts in enumerate(all_points) if n <= 12 or i % max(1, n // 12) == 0
+    )
+    svg = (
+        f'<svg viewBox="0 0 {chart_w} {chart_h}" width="100%" style="max-width:800px">'
+        f'{gridlines}{lines_svg}{x_labels}</svg>'
+    )
+
+    rows = ""
+    for name in suite_names:
+        trend = grouped_trends[name]
+        if not trend:
+            continue
+        latest = trend[-1]
+        rows += (
+            f'<tr><td class="mono" style="color:{suite_colors[name]}">{esc(name)}</td>'
+            f'<td>{len(trend)}</td><td>{latest["failure_rate"]}%</td>'
+            f'<td>{latest["regression_count"]}</td></tr>'
+        )
+
+    style_block = """
+  :root { --bg: #0D1117; --panel: #161B22; --border: #30363D; --text: #E6EDF3; --dim: #8B949E; --accent: #58A6FF; }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font-family: -apple-system, "Segoe UI", Helvetica, Arial, sans-serif; padding: 32px 24px 64px; }
+  .mono { font-family: "SF Mono", "JetBrains Mono", ui-monospace, Menlo, Consolas, monospace; }
+  .dim { color: var(--dim); }
+  header { max-width: 900px; margin: 0 auto 24px; }
+  h1 { font-size: 22px; margin: 0 0 4px; letter-spacing: -0.02em; }
+  h2 { font-size: 13px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--dim); margin: 0 0 12px; }
+  .subtitle { color: var(--dim); font-size: 13px; }
+  .chart-card, .table-card { max-width: 900px; margin: 0 auto 24px; background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 20px; }
+  .legend { display: flex; flex-wrap: wrap; gap: 14px; margin-top: 10px; }
+  .legend-item { display: flex; align-items: center; gap: 6px; font-size: 11px; color: var(--dim); }
+  .legend-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
+  table { width: 100%; border-collapse: collapse; font-size: 12px; }
+  th, td { text-align: left; padding: 6px 10px; border-bottom: 1px solid var(--border); }
+  th { color: var(--dim); text-transform: uppercase; font-size: 10px; letter-spacing: 0.05em; }
+"""
+
+    html_doc = (
+        '<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">'
+        '<title>Multi-Suite Trend Comparison</title><style>' + style_block + '</style></head><body>'
+        '<header><h1>Multi-Suite Trend Comparison</h1>'
+        f'<div class="subtitle">{len(suite_names)} suite(s), {n} distinct saved snapshot(s)</div></header>'
+        '<div class="chart-card"><h2>Failure rate over time, by suite</h2>' + svg
+        + '<div class="legend">' + legend_html + '</div></div>'
+        '<div class="table-card"><h2>Latest status per suite</h2>'
+        '<table><thead><tr><th>Suite</th><th>Snapshots</th><th>Latest failure %</th><th>Latest regressions</th></tr></thead>'
+        f'<tbody>{rows}</tbody></table></div>'
+        '</body></html>'
+    )
+
+    if output_path:
+        with open(output_path, "w") as f:
+            f.write(html_doc)
+    return html_doc
+
+
+
+
+
+
 def generate_health_summary_html_report(summary: dict, trend: list = None, output_path: str = None) -> str:
     """Real, added 2026-08-28 (Add_summary_to_dashboard): renders a real
     generate_suite_health_summary() result as a self-contained HTML
@@ -2789,6 +2955,19 @@ def main():
     parser.add_argument("--suite-name-filter", metavar="NAME",
                          help="With --summary-trend, only show entries "
                               "for this real suite name.")
+    parser.add_argument("--summary-trend-html", metavar="PATH",
+                         help="With --summary-trend, also write a real, "
+                              "self-contained HTML report comparing "
+                              "EVERY real saved suite's failure-rate "
+                              "trend side by side, one colored line per "
+                              "suite -- the genuine gap left after "
+                              "--summary-trend's own console output, "
+                              "which shows one suite at a time (or all "
+                              "of them mixed into one flat, confusing "
+                              "list). --suite-name-filter, if given, is "
+                              "ignored for this specific output -- the "
+                              "whole point is comparing every real "
+                              "suite, not one.")
     parser.add_argument("--serve-dashboard", action="store_true",
                          help="Start a real, live, auto-refreshing local "
                               "HTTP server (127.0.0.1 only, stdlib "
@@ -3006,6 +3185,10 @@ def main():
             for entry in trend:
                 print(f"{entry['label']:<18} {entry['suite_name']:<28} {entry['failure_rate']:>9}% "
                       f"{entry['total_turns']:>7} {entry['regression_count']:>12}")
+        if args.summary_trend_html:
+            grouped = compare_suite_trends(summaries)
+            generate_multi_suite_trend_html_report(grouped, output_path=args.summary_trend_html)
+            print(f"\nMulti-suite trend comparison written to {args.summary_trend_html}")
         return
 
     if args.rank_scenarios:
