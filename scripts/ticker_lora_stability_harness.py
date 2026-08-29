@@ -1383,6 +1383,85 @@ def load_historical_results(results_dir: str = None) -> list:
     return summaries
 
 
+def rank_scenarios_by_failure_rate(historical_summaries: list, model: str = None) -> list:
+    """Real, added 2026-08-28: ranks real scenarios by how often they've
+    actually shown a real issue historically, highest failure rate
+    first -- so a time-constrained run can prioritize the scenarios most
+    likely to actually catch something, rather than run every scenario
+    with equal weight regardless of its real track record.
+
+    Real, deliberate scoping decision, learned from the cross-model
+    comparison built earlier the same night: the identical scenario can
+    swing from 80% clean to 0% clean depending purely on which model
+    ran it (a real, confirmed, live result). Ranking scenarios by
+    failure rate while mixing data from different models would mostly
+    just reflect which model happened to be tested most in the
+    historical data, not the scenario's own real difficulty -- pass a
+    real model name to scope the ranking to just that model's history
+    (the honest, meaningful comparison); omit it to aggregate across
+    every model in the historical data, with the same caveat noted
+    directly in this docstring rather than silently producing a
+    misleading number.
+
+    Real, handles all 3 genuinely different summary shapes this harness
+    can produce and load_historical_results() can load:
+      - a direct scenario run (has "scenario_name" at the top level)
+      - a suite run (has "suite_name" and a "scenario_results" list of
+        nested, per-scenario summaries -- each one is unpacked
+        separately, attributed to its own real scenario_name)
+      - a fuzz run (has "fuzz_base_scenario" instead of "scenario_name"
+        -- attributed to that real base scenario, since fuzzed variants
+        are still real evidence about that scenario's general area of
+        difficulty)
+    Cross-model comparison files (saved individually, one per model, by
+    the real --cross-model CLI path) are already single-scenario-shaped
+    and need no special handling here.
+
+    Returns a list of {"scenario_name", "failure_rate" (0-100),
+    "total_turns", "clean_turns", "runs_seen"}, sorted by failure_rate
+    descending (worst first). A scenario is EXCLUDED if no historical
+    data exists in the given model scope, rather than shown with a
+    fabricated 0% failure rate.
+    """
+    per_scenario = {}
+
+    def record(scenario_name, s):
+        if model is not None and s.get("model") != model:
+            return
+        bucket = per_scenario.setdefault(scenario_name, {"total_turns": 0, "clean_turns": 0, "runs_seen": 0})
+        bucket["total_turns"] += s.get("total_turns", 0)
+        bucket["clean_turns"] += s.get("clean_turns", 0)
+        bucket["runs_seen"] += 1
+
+    for s in historical_summaries:
+        if "scenario_name" in s:
+            record(s["scenario_name"], s)
+        elif "scenario_results" in s:
+            for nested in s["scenario_results"]:
+                if "scenario_name" in nested:
+                    record(nested["scenario_name"], nested)
+        elif "fuzz_base_scenario" in s:
+            record(s["fuzz_base_scenario"], s)
+
+    ranked = []
+    for scenario_name, bucket in per_scenario.items():
+        total = bucket["total_turns"]
+        clean = bucket["clean_turns"]
+        failure_rate = round(100 * (1 - clean / total)) if total else 0
+        ranked.append({
+            "scenario_name": scenario_name,
+            "failure_rate": failure_rate,
+            "total_turns": total,
+            "clean_turns": clean,
+            "runs_seen": bucket["runs_seen"],
+        })
+
+    ranked.sort(key=lambda r: r["failure_rate"], reverse=True)
+    return ranked
+
+
+
+
 def generate_trend_report(historical_summaries: list, output_path: str) -> None:
     """Real, added 2026-08-28, extended 2026-08-28 with multi-model
     comparison and a flag-trend chart: renders multiple saved suite
@@ -1711,7 +1790,40 @@ def main():
                               "(no historical-run-count line, no HTML report "
                               "requirement) -- for quick checks, e.g. in a "
                               "cron job or before a deploy.")
+    parser.add_argument("--rank-scenarios", action="store_true",
+                         help="Load every saved result under --results-dir "
+                              "and rank real scenarios by their historical "
+                              "failure rate, worst first -- for prioritizing "
+                              "which scenarios to run first under a time "
+                              "constraint. Scoped to --model by default "
+                              "(a real, deliberate choice -- the same "
+                              "scenario's failure rate can swing wildly by "
+                              "model, confirmed directly via --cross-model "
+                              "earlier the same night); pass "
+                              "--rank-all-models to aggregate across every "
+                              "model instead, with the same real caveat.")
+    parser.add_argument("--rank-all-models", action="store_true",
+                         help="With --rank-scenarios, aggregate across "
+                              "every model in the historical data instead "
+                              "of scoping to --model. Real, honest caveat: "
+                              "this can produce a misleading ranking if "
+                              "different models were tested unevenly.")
     args = parser.parse_args()
+
+    if args.rank_scenarios:
+        historical = load_historical_results(args.results_dir)
+        scope_model = None if args.rank_all_models else args.model
+        ranked = rank_scenarios_by_failure_rate(historical, model=scope_model)
+        scope_label = "all models (real caveat: may be misleading if models were tested unevenly)" if scope_model is None else scope_model
+        print(f"Scenario failure-rate ranking [{len(historical)} historical file(s), scope: {scope_label}]:\n")
+        if not ranked:
+            print("No historical data found for this scope.")
+        else:
+            print(f"{'Scenario':<32} {'Failure %':>10} {'Turns':>7} {'Runs':>6}")
+            print("-" * 58)
+            for r in ranked:
+                print(f"{r['scenario_name']:<32} {r['failure_rate']:>9}% {r['total_turns']:>7} {r['runs_seen']:>6}")
+        return
 
     if args.fuzz:
         base_scenario = load_scenario(args.scenario_file) if args.scenario_file else load_scenario(DEFAULT_SCENARIO_FILE)

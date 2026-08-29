@@ -868,3 +868,66 @@ def test_mutation_ticker_pools_are_real_and_grounded():
     assert _harness.MUTATION_TICKER_POOLS["in_training"] == _harness.IN_TRAINING_TICKERS
     assert _harness.MUTATION_TICKER_POOLS["holdings"] == sorted(_harness.REAL_DK_STOCK_HOLDINGS)
     assert set(_harness.MUTATION_TICKER_POOLS["synthetic"]).isdisjoint(_harness.IN_TRAINING_TICKERS)
+
+
+# ---------------------------------------------------------------------------
+# rank_scenarios_by_failure_rate (added 2026-08-28 as part of scenario
+# prioritization)
+# ---------------------------------------------------------------------------
+
+def test_rank_scenarios_sorts_worst_first():
+    historical = [
+        {"model": "m1", "scenario_name": "clean_one", "total_turns": 10, "clean_turns": 10},
+        {"model": "m1", "scenario_name": "bad_one", "total_turns": 10, "clean_turns": 2},
+    ]
+    ranked = _harness.rank_scenarios_by_failure_rate(historical, model="m1")
+    assert [r["scenario_name"] for r in ranked] == ["bad_one", "clean_one"]
+    assert ranked[0]["failure_rate"] == 80
+    assert ranked[1]["failure_rate"] == 0
+
+
+def test_rank_scenarios_handles_direct_suite_and_fuzz_shapes():
+    """Real, the three genuinely different real summary shapes this
+    harness can produce and load_historical_results() can load."""
+    direct_run = {"model": "m1", "scenario_name": "a", "total_turns": 10, "clean_turns": 8}
+    suite_run = {
+        "model": "m1", "suite_name": "full",
+        "scenario_results": [
+            {"scenario_name": "b", "model": "m1", "total_turns": 5, "clean_turns": 1},
+            {"scenario_name": "c", "model": "m1", "total_turns": 5, "clean_turns": 5},
+        ],
+    }
+    fuzz_run = {"model": "m1", "fuzz_base_scenario": "a", "total_turns": 12, "clean_turns": 6}
+    ranked = _harness.rank_scenarios_by_failure_rate([direct_run, suite_run, fuzz_run], model="m1")
+    by_name = {r["scenario_name"]: r for r in ranked}
+    assert by_name["a"]["total_turns"] == 22  # direct (10) + fuzz (12), correctly combined
+    assert by_name["a"]["runs_seen"] == 2
+    assert by_name["b"]["failure_rate"] == 80
+    assert by_name["c"]["failure_rate"] == 0
+
+
+def test_rank_scenarios_model_scoping_prevents_misleading_conflation():
+    """Real, deliberate design: the same scenario's failure rate can
+    swing wildly by model (confirmed directly via --cross-model earlier
+    the same night) -- scoping by model must produce genuinely
+    different, correct results, not an averaged, misleading one."""
+    historical = [
+        {"model": "good_model", "scenario_name": "x", "total_turns": 10, "clean_turns": 10},
+        {"model": "bad_model", "scenario_name": "x", "total_turns": 10, "clean_turns": 0},
+    ]
+    ranked_good = _harness.rank_scenarios_by_failure_rate(historical, model="good_model")
+    ranked_bad = _harness.rank_scenarios_by_failure_rate(historical, model="bad_model")
+    ranked_all = _harness.rank_scenarios_by_failure_rate(historical)
+    assert ranked_good[0]["failure_rate"] == 0
+    assert ranked_bad[0]["failure_rate"] == 100
+    assert ranked_all[0]["failure_rate"] == 50
+
+
+def test_rank_scenarios_excludes_scenarios_with_no_data_in_scope():
+    historical = [{"model": "other_model", "scenario_name": "x", "total_turns": 10, "clean_turns": 5}]
+    ranked = _harness.rank_scenarios_by_failure_rate(historical, model="ticker-lookup-lora")
+    assert ranked == []
+
+
+def test_rank_scenarios_empty_history_returns_empty_list():
+    assert _harness.rank_scenarios_by_failure_rate([]) == []
