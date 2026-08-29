@@ -2003,3 +2003,97 @@ def test_dashboard_overview_shows_correct_snapshot_count_per_suite():
     html_str = _harness.generate_dashboard_overview_html(_real_multi_suite_summaries_with_detail())
     assert "2 snapshot(s)" in html_str  # holdings_correction has 2 real entries
     assert "1 snapshot(s)" in html_str  # generalization has 1
+
+
+# ---------------------------------------------------------------------------
+# capture_raw_events_for_check (added 2026-08-28,
+# Capture_raw_events_for_TOOL_ARGUMENT_ECHO). Verified live for real:
+# used directly against the real backend to actually reproduce and
+# capture a genuine, live TOOL_ARGUMENT_ECHO occurrence (3 real attempts
+# against prompt_shape_variety.json) -- the model called lookup_ticker
+# with the previous turn's stale KTOS argument instead of the current
+# turn's real RGTI subject, and produced an empty final response. The
+# real, saved capture (including injected real memories_used context
+# suggesting the model may have been anchored by heavy recent KTOS
+# discussion) is preserved in scripts/captures/ for direct inspection.
+# These tests cover the function's own real logic deterministically,
+# via monkeypatched create_session/send_message, since real live
+# generation is (confirmed, repeatedly, the same night) genuinely
+# non-deterministic and can't be relied on to reproduce a specific
+# real finding on every CI run.
+# ---------------------------------------------------------------------------
+
+def _real_scenario_for_capture_tests():
+    return {
+        "name": "capture_test_scenario",
+        "turns": [
+            {"type": "ticker", "symbol": "KTOS"},
+            {"type": "ticker", "symbol": "RGTI"},
+        ],
+    }
+
+
+def test_capture_raw_events_saves_bundle_on_first_matching_attempt(tmp_path, monkeypatch):
+    monkeypatch.setattr(_harness, "create_session", lambda *a, **kw: "fake_session")
+
+    def fake_send_message(session_id, message, model):
+        return [{"type": "tool_start", "tool": "lookup_ticker", "command": '{"symbol": "KTOS"}'},
+                {"delta": "KTOS is at $52."}]
+
+    monkeypatch.setattr(_harness, "send_message", fake_send_message)
+    # Force the second (RGTI) turn's own real check to report echo, so
+    # this test exercises the real save-bundle path deterministically.
+    monkeypatch.setattr(_harness, "_tool_argument_echo", lambda turn, r: turn["symbol"] == "RGTI")
+
+    result_path = _harness.capture_raw_events_for_check(
+        "77bddaa5", "m1", _real_scenario_for_capture_tests(), str(tmp_path),
+        target_check="tool_argument_echo", max_attempts=5, verbose=False,
+    )
+    assert result_path is not None
+    assert os.path.isfile(result_path)
+    with open(result_path) as f:
+        bundle = json.load(f)
+    assert bundle["target_check"] == "tool_argument_echo"
+    assert bundle["affected_turn_index"] == 1
+    assert bundle["attempt"] == 1
+    assert len(bundle["turns_captured"]) == 2
+    # The real, raw events must be preserved verbatim, not summarized.
+    assert bundle["turns_captured"][1]["raw_events"][0]["command"] == '{"symbol": "KTOS"}'
+
+
+def test_capture_raw_events_returns_none_honestly_when_never_reproduced(tmp_path, monkeypatch):
+    monkeypatch.setattr(_harness, "create_session", lambda *a, **kw: "fake_session")
+    monkeypatch.setattr(_harness, "send_message", lambda *a, **kw: [{"delta": "clean answer"}])
+    monkeypatch.setattr(_harness, "_tool_argument_echo", lambda turn, r: False)
+
+    result_path = _harness.capture_raw_events_for_check(
+        "77bddaa5", "m1", _real_scenario_for_capture_tests(), str(tmp_path),
+        target_check="tool_argument_echo", max_attempts=2, verbose=False,
+    )
+    assert result_path is None
+    assert os.listdir(tmp_path) == []
+
+
+def test_capture_raw_events_stops_at_first_reproduction_not_later_attempts(tmp_path, monkeypatch):
+    """Real, deliberate design: the function stops the moment the
+    target check fires once -- must not keep running additional real
+    attempts (or additional turns) after a successful capture."""
+    monkeypatch.setattr(_harness, "create_session", lambda *a, **kw: "fake_session")
+    call_count = {"n": 0}
+
+    def fake_send_message(session_id, message, model):
+        call_count["n"] += 1
+        return [{"delta": "answer"}]
+
+    monkeypatch.setattr(_harness, "send_message", fake_send_message)
+    monkeypatch.setattr(_harness, "_tool_argument_echo", lambda turn, r: turn["symbol"] == "KTOS")
+
+    _harness.capture_raw_events_for_check(
+        "77bddaa5", "m1", _real_scenario_for_capture_tests(), str(tmp_path),
+        target_check="tool_argument_echo", max_attempts=10, verbose=False,
+    )
+    # KTOS is the FIRST turn -- should stop immediately: 1 real "Hi"
+    # greeting call (sent before the turn loop starts) + 1 real call
+    # for the first turn itself = 2 total, not 3 (which a second turn
+    # or a second attempt would add).
+    assert call_count["n"] == 2

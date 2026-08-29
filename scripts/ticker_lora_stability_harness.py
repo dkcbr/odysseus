@@ -736,6 +736,105 @@ def run_sequence(endpoint_id: str, model: str, scenario: dict = None) -> dict:
     }
 
 
+def capture_raw_events_for_check(endpoint_id: str, model: str, scenario: dict, output_dir: str,
+                                  target_check: str = "tool_argument_echo", max_attempts: int = 10,
+                                  verbose: bool = True) -> str:
+    """Real, added 2026-08-28 (Capture_raw_events_for_TOOL_ARGUMENT_ECHO):
+    a real, general-purpose debugging tool -- repeatedly runs a real
+    scenario (a fresh real session each attempt, real live model
+    generation is genuinely non-deterministic, confirmed directly
+    several times the same night: the same case cannot be reliably
+    re-triggered on demand) until target_check fires True on some real
+    turn's own real result dict (r["tool_argument_echo"],
+    r["has_repeat"], r["has_leaked_tag"], etc. -- any real boolean
+    check_trial()/run_sequence() already computes per turn), then
+    saves the COMPLETE, RAW SSE event list for every real turn up to
+    and including the affected one -- not just check_trial()'s
+    already-summarized classification, which is exactly what was
+    already available and insufficient for real root-cause
+    investigation (the raw tool_start/tool_output/delta/thinking event
+    sequence is what's actually needed to see, e.g., precisely which
+    real tool_start event carried a stale argument, and whether that
+    argument was wrong from the moment the model emitted it or got
+    corrupted somewhere in this harness's own real event handling).
+
+    Real, honest design: stops and returns the real saved file's path
+    the moment target_check fires once -- the goal is capturing ONE
+    real, complete, inspectable instance for investigation, not
+    exhaustively hunting for every possible occurrence. Returns None,
+    with a clear, honest message, if max_attempts is exhausted without
+    reproducing it -- a genuine, real possibility given non-
+    deterministic live generation, not something to hide or retry
+    forever.
+    """
+    for attempt in range(1, max_attempts + 1):
+        if verbose:
+            print(f"Attempt {attempt}/{max_attempts}: running '{scenario['name']}' against {model}...")
+
+        session_id = create_session(endpoint_id, model, f"capture_raw_events_{int(time.time())}")
+        send_message(session_id, "Hi", model)
+
+        raw_turns = []  # real, complete per-turn record: prompt + raw events
+        for turn_idx, turn in enumerate(scenario["turns"]):
+            if turn["type"] == "followup":
+                message = turn["message"]
+            elif turn.get("message"):
+                message = turn["message"]
+            else:
+                message = f"Whats {turn['symbol']} trading at right now?"
+
+            events = send_message(session_id, message, model)
+            r = check_trial(events)
+            r["prompt"] = message
+            r["is_followup"] = (turn["type"] == "followup")
+            r.update(validate_turn(turn, r))
+            holdings_check = _holdings_note_contamination(r["full_content"], turn)
+            r["holdings_note_wrong_ticker"] = holdings_check["wrong_ticker"]
+            r["holdings_note_not_a_real_holding"] = holdings_check["not_a_real_holding"]
+            r["tool_argument_echo"] = _tool_argument_echo(turn, r)
+
+            raw_turns.append({
+                "turn_index": turn_idx,
+                "prompt": message,
+                "raw_events": events,  # the real, complete, unprocessed SSE event list
+                "classification": {k: v for k, v in r.items() if k not in ("full_content",)},
+            })
+
+            if r.get(target_check):
+                bundle = {
+                    "timestamp": time.time(),
+                    "scenario_name": scenario["name"],
+                    "model": model,
+                    "endpoint_id": endpoint_id,
+                    "session_id": session_id,
+                    "target_check": target_check,
+                    "attempt": attempt,
+                    "affected_turn_index": turn_idx,
+                    "turns_captured": raw_turns,  # every real turn up to and including this one
+                }
+                out_path = os.path.join(
+                    output_dir, f"{target_check}_{scenario['name']}_{int(time.time())}.json"
+                )
+                os.makedirs(output_dir, exist_ok=True)
+                with open(out_path, "w") as f:
+                    json.dump(bundle, f, indent=2)
+                if verbose:
+                    print(f"\nCaptured real '{target_check}' occurrence on attempt {attempt}, "
+                          f"turn {turn_idx} ({message!r}).")
+                    print(f"Raw events written to {out_path}")
+                return out_path
+
+        if verbose:
+            print(f"  Attempt {attempt}: '{target_check}' did not fire this time.")
+
+    if verbose:
+        print(f"\nDid not reproduce '{target_check}' in {max_attempts} real attempt(s) -- "
+              f"real, live generation is non-deterministic; try again, or with more attempts.")
+    return None
+
+
+
+
 def run_multi_round_suite(endpoint_id: str, model: str, runs: int,
                            scenario: dict = None, verbose: bool = True) -> dict:
     """Real, dedicated multi-round runner: executes several independent

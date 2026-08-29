@@ -91,6 +91,7 @@ tasks/
 scripts/compound/*.json
 scripts/results/*.json
 scripts/summaries/*.json
+scripts/captures/*.json
 research_data/
 **/search_analytics.json
 
