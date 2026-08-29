@@ -1258,6 +1258,167 @@ def summarize_suite_trend(summaries: list, suite_name: str = None) -> list:
     return trend
 
 
+def generate_health_summary_html_report(summary: dict, trend: list = None, output_path: str = None) -> None:
+    """Real, added 2026-08-28 (Add_summary_to_dashboard): renders a real
+    generate_suite_health_summary() result as a self-contained HTML
+    report -- the visual counterpart to _print_health_summary()'s
+    console output, reusing the exact same dark-terminal CSS palette
+    and card layout already established across generate_html_report()
+    and generate_trend_report(), for real visual consistency across
+    this harness's real reports rather than inventing a new style.
+
+    Real, deliberate scope note: the original external proposal that
+    motivated this whole feature arc (Implement/Integrate/Persist/
+    Add_to_dashboard) assumed a real "dashboard" system (dashboard_
+    alerts.py, dashboard_model_comparison.py) that doesn't exist and
+    was already rejected when the underlying summary feature was
+    built. This is not that -- it's a real, standalone HTML report,
+    the same real pattern every other report in this harness already
+    uses (no server, no persistent UI, just a real, self-contained
+    file opened in a browser).
+
+    trend (optional): real output of summarize_suite_trend() -- when
+    given, adds a real SVG line chart of failure rate over the
+    suite's own saved history, the same real SVG-chart technique
+    already proven in generate_trend_report().
+    """
+    import html as _html
+    import time as _time
+
+    def esc(s):
+        return _html.escape(str(s))
+
+    ov = summary["overview"]
+    oc = summary["outcomes"]
+    ts_label = _time.strftime("%Y-%m-%d %H:%M:%S", _time.localtime(summary.get("timestamp", _time.time())))
+
+    overview_html = (
+        '<div class="chart-card"><h2>Overview</h2>'
+        f'<div class="stat-row">'
+        f'<div class="stat"><div class="stat-value">{ov["scenario_count"]}</div><div class="stat-label">Scenarios</div></div>'
+        f'<div class="stat"><div class="stat-value">{ov["model_count"]}</div><div class="stat-label">Models</div></div>'
+        f'<div class="stat"><div class="stat-value">{ov["total_turns"]}</div><div class="stat-label">Total turns</div></div>'
+        f'</div><div class="dim" style="margin-top:10px;font-size:12px;">Generated {esc(ts_label)}</div></div>'
+    )
+
+    clean_pct = 100 - oc["failure_rate"]
+    fail_color = "#3FB950" if oc["failure_rate"] < 20 else ("#D29922" if oc["failure_rate"] < 50 else "#F85149")
+    outcomes_html = (
+        '<div class="chart-card"><h2>Outcomes</h2>'
+        f'<div class="stat-row">'
+        f'<div class="stat"><div class="stat-value" style="color:{fail_color}">{clean_pct}%</div><div class="stat-label">Clean rate</div></div>'
+        f'<div class="stat"><div class="stat-value">{oc["clean_turns"]}/{oc["total_turns"]}</div><div class="stat-label">Turns clean</div></div>'
+        f'</div>'
+    )
+    if oc.get("flag_counts"):
+        flag_items = "".join(f"<li>{esc(f)}: {c}</li>" for f, c in oc["flag_counts"].items() if c > 0)
+        outcomes_html += f'<ul class="regression-list" style="color:var(--text);margin-top:12px;">{flag_items or "<li>No flags raised</li>"}</ul>'
+    outcomes_html += '</div>'
+
+    if "regressions" in summary:
+        regressions = summary["regressions"]
+        if regressions:
+            items = "".join(f'<li class="alert-{esc(a["severity"])}">{esc(a["message"])}</li>' for a in regressions)
+            regression_html = (
+                '<div class="regression-card"><h2>Regressions</h2>'
+                f'<ul class="regression-list">{items}</ul></div>'
+            )
+        else:
+            regression_html = (
+                '<div class="regression-card clean"><h2>Regressions</h2>'
+                '<p class="dim">None detected.</p></div>'
+            )
+    else:
+        regression_html = ""
+
+    model_comparison_html = ""
+    if "model_comparison" in summary:
+        rows = "".join(
+            f'<tr><td class="mono">{esc(model)}</td><td>{mc["clean_rate"]}%</td>'
+            f'<td>{mc["total_turns"]}</td></tr>'
+            for model, mc in summary["model_comparison"].items()
+        )
+        model_comparison_html = (
+            '<div class="table-card"><h2>Per-model comparison</h2>'
+            '<table><thead><tr><th>Model</th><th>Clean %</th><th>Turns</th></tr></thead>'
+            f'<tbody>{rows}</tbody></table></div>'
+        )
+
+    trend_html = ""
+    if trend:
+        chart_w, chart_h = 800, 200
+        pad_l, pad_r, pad_t, pad_b = 40, 20, 20, 30
+        plot_w = chart_w - pad_l - pad_r
+        plot_h = chart_h - pad_t - pad_b
+        n = len(trend)
+
+        def x_for(i):
+            return pad_l + plot_w / 2 if n == 1 else pad_l + (plot_w * i / (n - 1))
+
+        def y_for(pct):
+            return pad_t + plot_h * (1 - pct / 100)
+
+        poly = " ".join(f"{x_for(i):.1f},{y_for(e['failure_rate']):.1f}" for i, e in enumerate(trend))
+        dots = "".join(
+            f'<circle cx="{x_for(i):.1f}" cy="{y_for(e["failure_rate"]):.1f}" r="4" fill="#F85149">'
+            f'<title>{esc(e["label"])}: {e["failure_rate"]}% failure</title></circle>'
+            for i, e in enumerate(trend)
+        )
+        gridlines = "".join(
+            f'<line x1="{pad_l}" y1="{y_for(g):.1f}" x2="{chart_w - pad_r}" y2="{y_for(g):.1f}" stroke="#30363D"/>'
+            f'<text x="{pad_l - 6}" y="{y_for(g) + 3:.1f}" font-size="10" fill="#8B949E" text-anchor="end" font-family="monospace">{g}%</text>'
+            for g in (0, 25, 50, 75, 100)
+        )
+        x_labels = "".join(
+            f'<text x="{x_for(i):.1f}" y="{chart_h - 8}" font-size="10" fill="#8B949E" text-anchor="middle" font-family="monospace">{esc(e["label"])}</text>'
+            for i, e in enumerate(trend) if n <= 12 or i % max(1, n // 12) == 0
+        )
+        svg = (
+            f'<svg viewBox="0 0 {chart_w} {chart_h}" width="100%" style="max-width:800px">'
+            f'{gridlines}<polyline points="{poly}" fill="none" stroke="#F85149" stroke-width="2"/>{dots}{x_labels}</svg>'
+        )
+        trend_html = f'<div class="chart-card"><h2>Failure rate over time ({len(trend)} saved snapshot(s))</h2>{svg}</div>'
+
+    style_block = """
+  :root { --bg: #0D1117; --panel: #161B22; --border: #30363D; --text: #E6EDF3; --dim: #8B949E; --accent: #58A6FF; }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font-family: -apple-system, "Segoe UI", Helvetica, Arial, sans-serif; padding: 32px 24px 64px; }
+  .mono { font-family: "SF Mono", "JetBrains Mono", ui-monospace, Menlo, Consolas, monospace; }
+  .dim { color: var(--dim); }
+  header { max-width: 900px; margin: 0 auto 24px; }
+  h1 { font-size: 22px; margin: 0 0 4px; letter-spacing: -0.02em; }
+  h2 { font-size: 13px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--dim); margin: 0 0 12px; }
+  .subtitle { color: var(--dim); font-size: 13px; }
+  .chart-card, .table-card, .regression-card { max-width: 900px; margin: 0 auto 24px; background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 20px; }
+  .regression-card { border-color: #F85149; }
+  .regression-card.clean { border-color: var(--border); }
+  .regression-list { margin: 0; padding-left: 18px; font-size: 13px; color: #F85149; }
+  .regression-list li { margin-bottom: 4px; }
+  .regression-list li.alert-high { color: #F85149; }
+  .regression-list li.alert-moderate { color: #D29922; }
+  .stat-row { display: flex; gap: 32px; flex-wrap: wrap; }
+  .stat-value { font-size: 28px; font-weight: 600; letter-spacing: -0.02em; }
+  .stat-label { font-size: 11px; color: var(--dim); text-transform: uppercase; letter-spacing: 0.05em; margin-top: 2px; }
+  table { width: 100%; border-collapse: collapse; font-size: 12px; }
+  th, td { text-align: left; padding: 6px 10px; border-bottom: 1px solid var(--border); }
+  th { color: var(--dim); text-transform: uppercase; font-size: 10px; letter-spacing: 0.05em; }
+"""
+
+    html_doc = (
+        '<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">'
+        '<title>Suite Health Summary</title><style>' + style_block + '</style></head><body>'
+        f'<header><h1>Suite Health Summary: {esc(ov["suite_name"])}</h1>'
+        '<div class="subtitle">Synthesized from run_suite()/run_multi_model_suite() output</div></header>'
+        + overview_html + outcomes_html + regression_html + model_comparison_html + trend_html
+        + '</body></html>'
+    )
+
+    with open(output_path, "w") as f:
+        f.write(html_doc)
+
+
+
+
 
 
 
@@ -2338,6 +2499,15 @@ def main():
                               ".json) so --summary-trend can find it -- "
                               "that directory is gitignored for its *.json "
                               "contents, matching scripts/results/.")
+    parser.add_argument("--health-summary-html", metavar="PATH",
+                         help="With --health-summary, also write a real, "
+                              "self-contained HTML report to PATH -- the "
+                              "visual counterpart to the console output, "
+                              "reusing this harness's existing dark-"
+                              "terminal report style. Automatically "
+                              "includes a real failure-rate-over-time "
+                              "chart if --summaries-dir has prior saved "
+                              "summaries for this suite.")
     parser.add_argument("--summary-trend", action="store_true",
                          help="Load every saved health summary under "
                               "--summaries-dir (default scripts/"
@@ -2604,6 +2774,11 @@ def main():
                 with open(args.save_summary, "w") as f:
                     json.dump(health, f, indent=2)
                 print(f"\nHealth summary written to {args.save_summary}")
+            if args.health_summary_html:
+                past_summaries = load_historical_summaries(args.summaries_dir)
+                trend = summarize_suite_trend(past_summaries, suite_name=health["overview"]["suite_name"])
+                generate_health_summary_html_report(health, trend=trend, output_path=args.health_summary_html)
+                print(f"Health summary HTML report written to {args.health_summary_html}")
         return
 
     if args.multi_model_suite:
@@ -2631,6 +2806,11 @@ def main():
                 with open(args.save_summary, "w") as f:
                     json.dump(health, f, indent=2)
                 print(f"\nHealth summary written to {args.save_summary}")
+            if args.health_summary_html:
+                past_summaries = load_historical_summaries(args.summaries_dir)
+                trend = summarize_suite_trend(past_summaries, suite_name=health["overview"]["suite_name"])
+                generate_health_summary_html_report(health, trend=trend, output_path=args.health_summary_html)
+                print(f"Health summary HTML report written to {args.health_summary_html}")
         return
 
     if args.suite:
@@ -2651,6 +2831,11 @@ def main():
                 with open(args.save_summary, "w") as f:
                     json.dump(health, f, indent=2)
                 print(f"\nHealth summary written to {args.save_summary}")
+            if args.health_summary_html:
+                past_summaries = load_historical_summaries(args.summaries_dir)
+                trend = summarize_suite_trend(past_summaries, suite_name=health["overview"]["suite_name"])
+                generate_health_summary_html_report(health, trend=trend, output_path=args.health_summary_html)
+                print(f"Health summary HTML report written to {args.health_summary_html}")
         return
 
     if args.trends:
