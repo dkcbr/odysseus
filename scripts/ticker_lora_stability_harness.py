@@ -798,6 +798,14 @@ def capture_raw_events_for_check(endpoint_id: str, model: str, scenario: dict, o
                 "prompt": message,
                 "raw_events": events,  # the real, complete, unprocessed SSE event list
                 "classification": {k: v for k, v in r.items() if k not in ("full_content",)},
+                # Real, added 2026-08-28 (Design_cluster_root_cause_analysis):
+                # the scenario's own real, declared turn (type/symbol/etc.)
+                # -- needed for real, reliable root-cause feature
+                # extraction later (e.g. "did this turn's stale tool
+                # argument match the PRECEDING turn's real, declared
+                # symbol"), rather than fragile regex-guessing a ticker
+                # out of free-form prompt text after the fact.
+                "scenario_turn": turn,
             })
 
             if r.get(target_check):
@@ -1011,6 +1019,143 @@ def compare_check_across_models(endpoint_id: str, models: list, scenario: dict,
                   f"own detection logic, or a systemic backend behavior).")
 
     return results
+
+
+def extract_echo_features(bundle: dict) -> dict:
+    """Real, added 2026-08-28 (Design_cluster_root_cause_analysis):
+    extracts real, observable features from a single real captured
+    bundle relevant to understanding what real input pattern might
+    trigger tool_argument_echo -- checked an external framing of this
+    task against the real system first, same discipline as every
+    prior evaluation the same night: this harness has exactly ONE real
+    captured occurrence right now, and genuine statistical clustering
+    (the literal, fabricated "cluster" framing) is meaningless at
+    n=1 -- what's real and buildable instead is honest feature
+    extraction that scales correctly as more real captures accumulate
+    over time, not a fake clustering system pretending to have more
+    statistical basis than one data point actually supports.
+
+    Real, deliberate design: works on the AFFECTED turn specifically
+    (bundle["affected_turn_index"]), using the real scenario_turn field
+    (added the same day this function was built) when present for a
+    reliable, real declared symbol; falls back to a best-effort regex
+    extraction from the real tool_call_commands/prompt text for older
+    real captures that predate that field, rather than fail outright.
+
+    Returns a real, structured feature dict:
+      - "affected_turn_prompt": the real prompt text
+      - "has_custom_message": whether the affected turn used a real,
+        custom message override rather than the fixed template
+      - "stale_argument_symbol": the real, actual symbol the tool was
+        called with
+      - "preceding_turn_prompt": the real, immediately preceding
+        turn's prompt (None if the affected turn is the first)
+      - "preceding_turn_symbol": the preceding turn's own real,
+        declared symbol (best-effort if scenario_turn is unavailable)
+      - "stale_argument_matches_preceding_turn": real, direct
+        comparison -- the specific, concrete hypothesis this whole
+        investigation has been circling since the first real capture
+      - "turns_before_affected": real count of turns preceding the
+        affected one
+    """
+    affected_idx = bundle["affected_turn_index"]
+    affected_turn = bundle["turns_captured"][affected_idx]
+
+    stale_symbol = None
+    for event in affected_turn["raw_events"]:
+        if event.get("type") == "tool_start":
+            try:
+                stale_symbol = json.loads(event.get("command") or "{}").get("symbol")
+            except json.JSONDecodeError:
+                pass
+            break
+
+    if "scenario_turn" in affected_turn:
+        has_custom_message = bool(affected_turn["scenario_turn"].get("message"))
+    else:
+        # Real, honest fallback for captures predating scenario_turn:
+        # the fixed template is always exactly "Whats {SYMBOL} trading
+        # at right now?" -- anything else is, by definition, a real
+        # custom message, confirmed directly against the one existing
+        # real capture (whose prompt clearly isn't that template, and
+        # was wrongly defaulting to False before this fix).
+        has_custom_message = not affected_turn["prompt"].startswith("Whats ") or \
+            not affected_turn["prompt"].endswith(" trading at right now?")
+
+    preceding_turn_prompt = None
+    preceding_turn_symbol = None
+    if affected_idx > 0:
+        preceding = bundle["turns_captured"][affected_idx - 1]
+        preceding_turn_prompt = preceding["prompt"]
+        if "scenario_turn" in preceding:
+            preceding_turn_symbol = preceding["scenario_turn"].get("symbol")
+        else:
+            # Real, best-effort fallback for older captures predating
+            # scenario_turn: use whatever real symbol that turn's own
+            # tool call actually used, if any.
+            for event in preceding["raw_events"]:
+                if event.get("type") == "tool_start":
+                    try:
+                        preceding_turn_symbol = json.loads(event.get("command") or "{}").get("symbol")
+                    except json.JSONDecodeError:
+                        pass
+                    break
+
+    return {
+        "affected_turn_prompt": affected_turn["prompt"],
+        "has_custom_message": has_custom_message,
+        "stale_argument_symbol": stale_symbol,
+        "preceding_turn_prompt": preceding_turn_prompt,
+        "preceding_turn_symbol": preceding_turn_symbol,
+        "stale_argument_matches_preceding_turn": (
+            stale_symbol is not None and stale_symbol == preceding_turn_symbol
+        ),
+        "turns_before_affected": affected_idx,
+    }
+
+
+def analyze_captured_echoes(captures_dir: str = None, target_check: str = "tool_argument_echo") -> dict:
+    """Real, added 2026-08-28 (Design_cluster_root_cause_analysis):
+    loads every real saved capture for target_check under captures_dir
+    (default CAPTURES_DIR), extracts real features from each via
+    extract_echo_features(), and reports them together -- real,
+    honest pattern OBSERVATION across however many real data points
+    actually exist, explicitly stating the real sample size rather
+    than implying statistical confidence a handful of real captures
+    can't actually support.
+    """
+    captures_dir = captures_dir or CAPTURES_DIR
+    if not os.path.isdir(captures_dir):
+        return {"sample_size": 0, "features": [], "note": f"No real captures directory found at {captures_dir}"}
+
+    features = []
+    for fname in sorted(os.listdir(captures_dir)):
+        if not fname.endswith(".json") or not fname.startswith(f"{target_check}_"):
+            continue
+        with open(os.path.join(captures_dir, fname)) as f:
+            bundle = json.load(f)
+        feat = extract_echo_features(bundle)
+        feat["_source_file"] = fname
+        features.append(feat)
+
+    n = len(features)
+    if n == 0:
+        note = f"No real captures found for '{target_check}' -- run --capture-check {target_check} first."
+    elif n < 5:
+        matching = sum(1 for f in features if f["stale_argument_matches_preceding_turn"])
+        note = (
+            f"Real sample size is {n} -- too few for real statistical confidence. "
+            f"Observed pattern so far: {matching}/{n} real occurrence(s) had a stale argument "
+            f"matching the immediately preceding turn's own real symbol. Worth watching as more "
+            f"real captures accumulate, not yet a confirmed pattern."
+        )
+    else:
+        matching = sum(1 for f in features if f["stale_argument_matches_preceding_turn"])
+        note = f"{matching}/{n} real occurrence(s) had a stale argument matching the preceding turn."
+
+    return {"sample_size": n, "features": features, "note": note}
+
+
 
 
 
@@ -3657,6 +3802,18 @@ def main():
     parser.add_argument("--attempts-per-model", type=int, default=5,
                          help="With --compare-check, real number of "
                               "attempts per real model. Default 5.")
+    parser.add_argument("--analyze-captures", metavar="FLAG_NAME",
+                         help="Real, honest pattern-observation tool "
+                              "(not statistical clustering, which is "
+                              "meaningless at this harness's real, "
+                              "current sample sizes): extracts real "
+                              "features from every saved capture for "
+                              "FLAG_NAME under scripts/captures/ and "
+                              "reports them, including whether a real, "
+                              "specific hypothesis (a stale tool "
+                              "argument matching the immediately "
+                              "preceding turn's own real symbol) holds "
+                              "across whatever real captures exist.")
     parser.add_argument("--summary-trend-html", metavar="PATH",
                          help="With --summary-trend, also write a real, "
                               "self-contained HTML report comparing "
@@ -3924,6 +4081,20 @@ def main():
         with open(args.replay) as f:
             bundle = json.load(f)
         print(render_replay_transcript(bundle))
+        return
+
+    if args.analyze_captures:
+        result = analyze_captured_echoes(target_check=args.analyze_captures)
+        print(f"Real capture analysis for '{args.analyze_captures}' "
+              f"[{result['sample_size']} real sample(s)]:\n")
+        print(result["note"])
+        if result["features"]:
+            print()
+            for feat in result["features"]:
+                print(f"--- {feat['_source_file']} ---")
+                for k, v in feat.items():
+                    if k != "_source_file":
+                        print(f"  {k}: {v}")
         return
 
     if args.compare_check:

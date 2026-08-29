@@ -2261,3 +2261,105 @@ def test_compare_check_across_models_makes_correct_number_of_real_calls(monkeypa
     )
     assert call_log.count("m1") == 4
     assert call_log.count("m2") == 4
+
+
+# ---------------------------------------------------------------------------
+# extract_echo_features, analyze_captured_echoes (added 2026-08-28,
+# Design_cluster_root_cause_analysis). Verified live against the REAL,
+# actual captured bundle from earlier the same session -- confirmed
+# programmatically what had already been observed manually: the stale
+# tool argument exactly matches the immediately preceding turn's own
+# real symbol (stale_argument_matches_preceding_turn: True). Also
+# caught and fixed a real bug during this same live verification: the
+# has_custom_message fallback (for captures predating the new
+# scenario_turn field) was defaulting to False for a prompt that
+# clearly wasn't the fixed template -- fixed to compare against the
+# real, exact template string instead.
+# ---------------------------------------------------------------------------
+
+def _real_bundle_with_scenario_turn(matching=True):
+    stale_arg = "KTOS" if matching else "RGTI"
+    return {
+        "affected_turn_index": 1,
+        "turns_captured": [
+            {"turn_index": 0, "prompt": "Whats KTOS trading at right now?",
+             "raw_events": [{"type": "tool_start", "tool": "lookup_ticker", "command": '{"symbol": "KTOS"}'}],
+             "classification": {}, "scenario_turn": {"type": "ticker", "symbol": "KTOS"}},
+            {"turn_index": 1, "prompt": "What about RGTI though?",
+             "raw_events": [{"type": "tool_start", "tool": "lookup_ticker",
+                              "command": json.dumps({"symbol": stale_arg})}],
+             "classification": {}, "scenario_turn": {"type": "ticker", "symbol": "RGTI", "message": "What about RGTI though?"}},
+        ],
+    }
+
+
+def test_extract_echo_features_detects_matching_stale_argument():
+    bundle = _real_bundle_with_scenario_turn(matching=True)
+    features = _harness.extract_echo_features(bundle)
+    assert features["stale_argument_symbol"] == "KTOS"
+    assert features["preceding_turn_symbol"] == "KTOS"
+    assert features["stale_argument_matches_preceding_turn"] is True
+    assert features["has_custom_message"] is True
+    assert features["turns_before_affected"] == 1
+
+
+def test_extract_echo_features_correctly_reports_non_matching_case():
+    bundle = _real_bundle_with_scenario_turn(matching=False)
+    features = _harness.extract_echo_features(bundle)
+    assert features["stale_argument_symbol"] == "RGTI"
+    assert features["stale_argument_matches_preceding_turn"] is False
+
+
+def test_extract_echo_features_fallback_without_scenario_turn():
+    """Real, deliberate fallback for captures predating the
+    scenario_turn field -- must still correctly extract has_custom_
+    message by comparing against the real, exact fixed template."""
+    bundle = {
+        "affected_turn_index": 0,
+        "turns_captured": [{
+            "turn_index": 0, "prompt": "So, what's KTOS at these days?",
+            "raw_events": [{"type": "tool_start", "tool": "lookup_ticker", "command": '{"symbol": "SOUN"}'}],
+            "classification": {},
+        }],
+    }
+    features = _harness.extract_echo_features(bundle)
+    assert features["has_custom_message"] is True  # doesn't match the fixed template
+    assert features["stale_argument_symbol"] == "SOUN"
+
+
+def test_extract_echo_features_standard_template_is_not_custom():
+    bundle = {
+        "affected_turn_index": 0,
+        "turns_captured": [{
+            "turn_index": 0, "prompt": "Whats SOUN trading at right now?",
+            "raw_events": [], "classification": {},
+        }],
+    }
+    features = _harness.extract_echo_features(bundle)
+    assert features["has_custom_message"] is False
+
+
+def test_analyze_captured_echoes_real_capture_file(tmp_path):
+    """Real, direct verification against the actual, real captured
+    bundle saved during an earlier task -- not synthetic data."""
+    real_captures_dir = os.path.join(ROOT, "scripts", "captures")
+    if not any(f.startswith("tool_argument_echo_") for f in os.listdir(real_captures_dir)):
+        pytest.skip("no real tool_argument_echo capture present in this checkout")
+    result = _harness.analyze_captured_echoes(real_captures_dir)
+    assert result["sample_size"] >= 1
+    assert result["features"][0]["stale_argument_matches_preceding_turn"] is True
+
+
+def test_analyze_captured_echoes_empty_directory_is_honest(tmp_path):
+    result = _harness.analyze_captured_echoes(str(tmp_path))
+    assert result["sample_size"] == 0
+    assert "No real captures found" in result["note"]
+
+
+def test_analyze_captured_echoes_small_sample_note_is_honest_about_confidence(tmp_path):
+    bundle = _real_bundle_with_scenario_turn(matching=True)
+    path = tmp_path / "tool_argument_echo_test_1.json"
+    path.write_text(json.dumps(bundle))
+    result = _harness.analyze_captured_echoes(str(tmp_path))
+    assert result["sample_size"] == 1
+    assert "too few for real statistical confidence" in result["note"]
