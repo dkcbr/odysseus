@@ -37,6 +37,8 @@ import time
 import urllib.request
 import urllib.parse
 import urllib.error  # real, added 2026-08-28: explicit, not relying on urllib.request's internal import
+import html          # real, added 2026-08-28: stdlib-only, used by
+                      # serve_health_dashboard()'s drill-down error page
 import http.server  # real, added 2026-08-28: stdlib-only, used by
                      # serve_health_dashboard() -- no new dependency
 import shutil       # real, added 2026-08-28: stdlib-only, used by
@@ -1498,6 +1500,102 @@ def compare_suite_trends(summaries: list) -> dict:
     return {name: summarize_suite_trend(summaries, suite_name=name) for name in suite_names}
 
 
+def generate_dashboard_overview_html(summaries: list) -> str:
+    """Real, added 2026-08-28 (Suite_health_dashboard: full visual
+    overview): closes the real gap left by serve_health_dashboard()'s
+    original design -- that showed only the single most recently
+    saved summary, regardless of which real suite it belonged to, so
+    a person with saved history for several real suites would only
+    ever see whichever one happened to be touched last, not a genuine
+    overview of every real suite's current health at once.
+
+    Groups every real saved summary by suite_name (same real logic
+    compare_suite_trends() already uses, called directly rather than
+    duplicated), takes each real suite's own LATEST entry, and renders
+    one real, color-coded card per suite -- clean %, latest regression
+    count, last-updated time -- reusing the exact same dark-terminal
+    CSS palette and scenario-tile-style card layout already
+    established across every report in this harness. Each card links
+    to ?suite=NAME for a real drill-down into that suite's full,
+    existing detailed report (overview/outcomes/regressions/model
+    comparison/trend chart) -- reuses generate_health_summary_html_
+    report() unchanged for that, not a second rendering path.
+    """
+    import html as _html
+
+    def esc(s):
+        return _html.escape(str(s))
+
+    if not summaries:
+        return (
+            '<!DOCTYPE html><html><head><meta charset="utf-8">'
+            '<title>Suite Health Dashboard</title></head>'
+            '<body style="background:#0D1117;color:#E6EDF3;font-family:sans-serif;padding:32px;">'
+            '<h1>Suite Health Dashboard</h1>'
+            '<p style="color:#8B949E;">No saved summaries found yet. Run a suite with '
+            '--health-summary --save-summary to populate this.</p>'
+            '</body></html>'
+        )
+
+    grouped = compare_suite_trends(summaries)
+    latest_by_suite = {}
+    for s in summaries:
+        name = s["overview"].get("suite_name", "?")
+        if name not in latest_by_suite or s["timestamp"] > latest_by_suite[name]["timestamp"]:
+            latest_by_suite[name] = s
+
+    def _card_color(rate):
+        if rate == 0:
+            return "#3FB950"
+        if rate < 50:
+            return "#D29922"
+        return "#F85149"
+
+    cards = ""
+    for name in sorted(latest_by_suite.keys()):
+        latest = latest_by_suite[name]
+        rate = latest["outcomes"]["failure_rate"]
+        regression_count = len(latest.get("regressions", []))
+        when = time.strftime("%m/%d %H:%M", time.localtime(latest["timestamp"]))
+        snapshot_count = len(grouped.get(name, []))
+        color = _card_color(rate)
+        cards += (
+            f'<a href="/?suite={urllib.parse.quote(name)}" class="suite-card" style="border-color:{color}">'
+            f'<div class="mono" style="font-size:14px;color:var(--text);">{esc(name)}</div>'
+            f'<div class="stat-value" style="font-size:26px;color:{color}">{rate}%</div>'
+            f'<div class="dim" style="font-size:11px;">failure rate</div>'
+            f'<div class="dim" style="font-size:11px;margin-top:8px;">{regression_count} regression(s) '
+            f'&middot; {snapshot_count} snapshot(s)</div>'
+            f'<div class="dim" style="font-size:10px;margin-top:4px;">Updated {esc(when)}</div>'
+            f'</a>'
+        )
+
+    style_block = """
+  :root { --bg: #0D1117; --panel: #161B22; --border: #30363D; --text: #E6EDF3; --dim: #8B949E; --accent: #58A6FF; }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font-family: -apple-system, "Segoe UI", Helvetica, Arial, sans-serif; padding: 32px 24px 64px; }
+  .mono { font-family: "SF Mono", "JetBrains Mono", ui-monospace, Menlo, Consolas, monospace; }
+  .dim { color: var(--dim); }
+  header { max-width: 900px; margin: 0 auto 24px; }
+  h1 { font-size: 22px; margin: 0 0 4px; letter-spacing: -0.02em; }
+  .subtitle { color: var(--dim); font-size: 13px; }
+  .suite-grid { max-width: 900px; margin: 0 auto; display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 14px; }
+  .suite-card { display: block; border: 1px solid; border-radius: 8px; padding: 16px; background: var(--panel); text-decoration: none; transition: transform 0.1s; }
+  .suite-card:hover { transform: translateY(-2px); }
+"""
+
+    return (
+        '<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">'
+        '<title>Suite Health Dashboard</title><style>' + style_block + '</style></head><body>'
+        '<header><h1>Suite Health Dashboard</h1>'
+        f'<div class="subtitle">{len(latest_by_suite)} real suite(s) tracked &middot; click a card for full detail</div></header>'
+        f'<div class="suite-grid">{cards}</div>'
+        '</body></html>'
+    )
+
+
+
+
 def generate_multi_suite_trend_html_report(grouped_trends: dict, output_path: str = None) -> str:
     """Real, added 2026-08-28 (Design_suite_health_trend_report):
     renders a real compare_suite_trends() result as a self-contained
@@ -1890,6 +1988,10 @@ def serve_health_dashboard(port: int = 8765, summaries_dir: str = None,
 
         def do_GET(self):
             summaries = load_historical_summaries(summaries_dir)
+            parsed = urllib.parse.urlparse(self.path)
+            query = urllib.parse.parse_qs(parsed.query)
+            requested_suite = query.get("suite", [None])[0]
+
             if not summaries:
                 body = (
                     '<!DOCTYPE html><html><head><meta charset="utf-8">'
@@ -1902,21 +2004,49 @@ def serve_health_dashboard(port: int = 8765, summaries_dir: str = None,
                     f'This page auto-refreshes every {refresh_seconds}s.</p>'
                     '</body></html>'
                 )
-            else:
-                latest = summaries[-1]
-                suite_name = latest["overview"].get("suite_name", "?")
-                trend = summarize_suite_trend(summaries, suite_name=suite_name)
-                body = generate_health_summary_html_report(latest, trend=trend, output_path=None)
-                # Real, added: inject the real auto-refresh tag into
-                # the already-generated report head, so this live view
-                # reuses 100% of the same static-report HTML/CSS with
-                # one small, real addition, rather than a parallel
-                # template.
+            elif requested_suite is None:
+                # Real, added 2026-08-28 (full visual overview): the
+                # real, default landing page -- every real suite that
+                # has saved history, each as its own real card showing
+                # its own latest status, not just whichever summary
+                # happened to be saved most recently.
+                body = generate_dashboard_overview_html(summaries)
                 body = body.replace(
                     "<head><meta charset=\"utf-8\">",
                     f'<head><meta charset="utf-8"><meta http-equiv="refresh" content="{refresh_seconds}">',
                     1,
                 )
+            else:
+                # Real drill-down: this specific real suite's own
+                # latest summary and its own real trend, reusing the
+                # exact same detailed report every other real health-
+                # summary command already produces.
+                matching = [s for s in summaries if s["overview"].get("suite_name") == requested_suite]
+                if not matching:
+                    body = (
+                        '<!DOCTYPE html><html><head><meta charset="utf-8">'
+                        f'<meta http-equiv="refresh" content="{refresh_seconds}">'
+                        '<title>Suite Health Dashboard</title></head>'
+                        '<body style="background:#0D1117;color:#E6EDF3;font-family:sans-serif;padding:32px;">'
+                        f'<p style="color:#8B949E;">No saved summaries found for suite '
+                        f'{html.escape(requested_suite)!r}. <a href="/" style="color:#58A6FF;">Back to overview</a></p>'
+                        '</body></html>'
+                    )
+                else:
+                    latest = matching[-1]
+                    trend = summarize_suite_trend(summaries, suite_name=requested_suite)
+                    body = generate_health_summary_html_report(latest, trend=trend, output_path=None)
+                    body = body.replace(
+                        "<head><meta charset=\"utf-8\">",
+                        f'<head><meta charset="utf-8"><meta http-equiv="refresh" content="{refresh_seconds}">',
+                        1,
+                    )
+                    body = body.replace(
+                        "<body>",
+                        '<body><div style="max-width:900px;margin:0 auto 12px;">'
+                        '<a href="/" style="color:#58A6FF;font-size:13px;">&larr; Back to overview</a></div>',
+                        1,
+                    )
             encoded = body.encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
