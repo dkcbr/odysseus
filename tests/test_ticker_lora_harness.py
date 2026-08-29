@@ -793,3 +793,78 @@ def test_default_cross_model_list_includes_both_ticker_lora_names():
     cross-model run can directly demonstrate that fix's real effect."""
     assert "ticker-lookup-lora" in _harness.DEFAULT_CROSS_MODEL_LIST
     assert "odysseus-qwen3-tickers-lora" in _harness.DEFAULT_CROSS_MODEL_LIST
+
+
+# ---------------------------------------------------------------------------
+# mutate_ticker_substitution (added 2026-08-28 as part of scenario mutation)
+# ---------------------------------------------------------------------------
+
+def _real_base_scenario_for_mutation():
+    return _harness.load_scenario(
+        os.path.join(ROOT, "scripts", "scenarios", "prompt_shape_variety.json")
+    )
+
+
+def test_mutate_ticker_substitution_is_reproducible_with_same_seed():
+    base = _real_base_scenario_for_mutation()
+    v1 = _harness.mutate_ticker_substitution(base, pool_name="in_training", count=3, seed=42)
+    v2 = _harness.mutate_ticker_substitution(base, pool_name="in_training", count=3, seed=42)
+    assert v1 == v2
+
+
+def test_mutate_ticker_substitution_differs_with_different_seed():
+    base = _real_base_scenario_for_mutation()
+    v1 = _harness.mutate_ticker_substitution(base, pool_name="in_training", count=3, seed=1)
+    v2 = _harness.mutate_ticker_substitution(base, pool_name="in_training", count=3, seed=2)
+    assert v1 != v2
+
+
+def test_mutate_ticker_substitution_updates_message_text_to_match_symbol():
+    """Real, important correctness check: a message override containing
+    the original ticker must have it replaced too, or the mutated
+    prompt would ask about a different ticker than it names in text."""
+    base = _real_base_scenario_for_mutation()
+    variants = _harness.mutate_ticker_substitution(base, pool_name="in_training", count=5, seed=7)
+    for variant in variants:
+        for turn in variant["turns"]:
+            if turn["type"] == "ticker" and "message" in turn:
+                assert turn["symbol"] in turn["message"]
+
+
+def test_mutate_ticker_substitution_rejects_unknown_pool():
+    base = _real_base_scenario_for_mutation()
+    with pytest.raises(ValueError, match="Unknown mutation ticker pool"):
+        _harness.mutate_ticker_substitution(base, pool_name="not-a-real-pool", count=1)
+
+
+def test_mutate_ticker_substitution_rejects_scenario_with_no_ticker_turns():
+    base = {"name": "no_tickers", "turns": [{"type": "followup", "message": "hi"}]}
+    with pytest.raises(ValueError, match="no real 'ticker' type turns"):
+        _harness.mutate_ticker_substitution(base, count=1)
+
+
+def test_mutate_ticker_substitution_produces_real_valid_scenarios():
+    """Real, round-trip check: every generated variant must actually be
+    a loadable, valid scenario per the real schema, not just a
+    plausible-looking dict."""
+    base = _real_base_scenario_for_mutation()
+    variants = _harness.mutate_ticker_substitution(base, pool_name="holdings", count=2, seed=3)
+    for variant in variants:
+        path = None
+        try:
+            fd, path = tempfile.mkstemp(suffix=".json")
+            with os.fdopen(fd, "w") as f:
+                json.dump(variant, f)
+            loaded = _harness.load_scenario(path)
+            assert loaded["turns"]
+        finally:
+            if path:
+                os.remove(path)
+
+
+def test_mutation_ticker_pools_are_real_and_grounded():
+    """Real, deliberate design: every pool is grounded in real, already-
+    verified symbols used elsewhere this session, not arbitrary strings."""
+    assert _harness.MUTATION_TICKER_POOLS["in_training"] == _harness.IN_TRAINING_TICKERS
+    assert _harness.MUTATION_TICKER_POOLS["holdings"] == sorted(_harness.REAL_DK_STOCK_HOLDINGS)
+    assert set(_harness.MUTATION_TICKER_POOLS["synthetic"]).isdisjoint(_harness.IN_TRAINING_TICKERS)
