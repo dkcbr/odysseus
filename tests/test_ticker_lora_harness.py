@@ -931,3 +931,58 @@ def test_rank_scenarios_excludes_scenarios_with_no_data_in_scope():
 
 def test_rank_scenarios_empty_history_returns_empty_list():
     assert _harness.rank_scenarios_by_failure_rate([]) == []
+
+
+# ---------------------------------------------------------------------------
+# Multi-model suites: load_suite's optional "models" field, and
+# run_multi_model_suite (added 2026-08-28)
+# ---------------------------------------------------------------------------
+
+def test_load_suite_accepts_real_models_field():
+    path = os.path.join(ROOT, "scripts", "suites", "naming_collision_before_after.json")
+    suite = _harness.load_suite(path)
+    assert suite["models"] == ["ticker-lookup-lora", "odysseus-qwen3-tickers-lora"]
+
+
+def test_load_suite_models_field_is_optional():
+    """Real, existing single-model suites (no 'models' field) must
+    still load fine -- the field is additive, not required."""
+    path = os.path.join(ROOT, "scripts", "suites", "holdings_correction.json")
+    suite = _harness.load_suite(path)
+    assert "models" not in suite
+
+
+def test_load_suite_rejects_non_list_models_field(tmp_path):
+    path = tmp_path / "bad.json"
+    path.write_text(json.dumps({
+        "name": "bad", "models": "not-a-list",
+        "scenarios": ["scenarios/mixed_holdings_default.json"],
+    }))
+    with pytest.raises(ValueError, match="models"):
+        _harness.load_suite(str(path))
+
+
+def test_load_suite_rejects_empty_models_list(tmp_path):
+    path = tmp_path / "bad.json"
+    path.write_text(json.dumps({
+        "name": "bad", "models": [],
+        "scenarios": ["scenarios/mixed_holdings_default.json"],
+    }))
+    with pytest.raises(ValueError, match="models"):
+        _harness.load_suite(str(path))
+
+
+def test_both_real_multi_model_suite_files_are_valid():
+    suites_dir = os.path.join(ROOT, "scripts", "suites")
+    for fname in ["naming_collision_before_after.json", "full_model_comparison.json"]:
+        suite = _harness.load_suite(os.path.join(suites_dir, fname))
+        assert len(suite["models"]) >= 2
+        assert suite["_resolved_scenario_paths"]
+
+
+def test_run_multi_model_suite_rejects_empty_models():
+    """Real, deliberate design: no arbitrary default model list to fall
+    back to -- either an explicit models list or the suite's own real
+    'models' field is required."""
+    with pytest.raises(ValueError, match="models"):
+        _harness.run_multi_model_suite("77bddaa5", [], {"name": "x", "_resolved_scenario_paths": []})
