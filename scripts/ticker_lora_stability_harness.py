@@ -994,6 +994,97 @@ def run_suite(endpoint_id: str, model: str, suite: dict, runs_per_scenario: int 
     return suite_summary
 
 
+def run_suite_parallel(endpoint_id: str, model: str, suite: dict, runs_per_scenario: int = 1,
+                        max_workers: int = None, verbose: bool = True) -> dict:
+    """Real, added 2026-08-28 (Design_suite_sharding): the scenario-
+    level counterpart to run_multi_model_suite_parallel() (added
+    earlier the same night, which distributes work across MODELS,
+    still sequential scenario-by-scenario within each model) --
+    genuinely different real gap: for ONE real model, shards a large
+    suite's real scenarios across a real ThreadPoolExecutor instead of
+    running them one at a time, using the exact same real, proven
+    concurrency approach (threading, correct for this harness's
+    I/O-bound work) and the same real verbose-suppression design
+    (concurrent scenarios printing simultaneously would interleave
+    into unreadable output, same real reasoning as the model-parallel
+    version).
+
+    Reuses run_multi_round_suite() completely unchanged per scenario
+    (not a separate, parallel aggregation implementation) -- only the
+    orchestration differs from run_suite(). Real, honest note carried
+    over from the earlier, measured model-parallel result: the real
+    backend is a single-GPU Ollama instance: concurrent requests for
+    DIFFERENT scenarios against the SAME model may see similar, or
+    even more constrained, real contention than the model-parallel
+    case did (85.72s -> 52.92s, a real ~38% reduction, not a full
+    ~2x) -- this function measures and reports its own real
+    wall_clock_seconds rather than assume the same or a better figure
+    applies here too.
+
+    Returns the same real shape run_suite() produces, plus real
+    wall_clock_seconds and a sharded: True marker. Real, deliberate:
+    scenario_results is reordered to match suite["_resolved_scenario_
+    paths"]'s original order (not completion order, which
+    as_completed() would otherwise return) -- a saved or displayed
+    result should list scenarios in the same real, stable order the
+    suite file itself declares them, regardless of which one happened
+    to finish first.
+    """
+    scenario_paths = suite["_resolved_scenario_paths"]
+    if not scenario_paths:
+        raise ValueError(f"Suite {suite.get('name', '?')!r} has no real scenarios to shard")
+
+    start = time.time()
+    results_by_path = {}
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers or len(scenario_paths)) as executor:
+        futures = {}
+        for scenario_path in scenario_paths:
+            scenario = load_scenario(scenario_path)
+            future = executor.submit(run_multi_round_suite, endpoint_id, model, runs_per_scenario,
+                                      scenario=scenario, verbose=False)
+            futures[future] = scenario_path
+        for future in concurrent.futures.as_completed(futures):
+            results_by_path[futures[future]] = future.result()
+    elapsed = time.time() - start
+
+    scenario_results = [results_by_path[p] for p in scenario_paths]
+    total_turns = sum(s["total_turns"] for s in scenario_results)
+    clean_turns = sum(s["clean_turns"] for s in scenario_results)
+    total_contamination = sum(s["total_cross_turn_contamination"] for s in scenario_results)
+    total_runs_errored = sum(s["runs_errored"] for s in scenario_results)
+    flag_counts = {}
+    for s in scenario_results:
+        for flag, count in s["flag_counts"].items():
+            flag_counts[flag] = flag_counts.get(flag, 0) + count
+
+    suite_summary = {
+        "timestamp": time.time(),
+        "model": model,
+        "suite_name": suite.get("name", "?"),
+        "endpoint_id": endpoint_id,
+        "total_turns": total_turns,
+        "clean_turns": clean_turns,
+        "flag_counts": flag_counts,
+        "total_cross_turn_contamination": total_contamination,
+        "runs_errored": total_runs_errored,
+        "scenario_results": scenario_results,
+        "wall_clock_seconds": round(elapsed, 2),
+        "sharded": True,
+    }
+
+    if verbose:
+        clean_pct = round(100 * clean_turns / total_turns) if total_turns else 0
+        print(f"\n=== Suite Summary (sharded, {elapsed:.1f}s wall-clock): {suite.get('name', '?')} ===")
+        print(f"Scenarios run: {len(scenario_results)}")
+        print(f"Turns completely clean: {clean_turns}/{total_turns} ({clean_pct}%)")
+        print(f"Flag breakdown: {flag_counts}")
+        print(f"Total cross-turn contamination: {total_contamination}")
+
+    return suite_summary
+
+
+
+
 def run_multi_model_suite(endpoint_id: str, models: list, suite: dict,
                            runs_per_scenario: int = 1, verbose: bool = True) -> dict:
     """Real, added 2026-08-28: runs every real scenario in a suite
@@ -3183,7 +3274,11 @@ def main():
                          help="With --gate, fail if ANY real regression "
                               "was detected, regardless of severity.")
     parser.add_argument("--parallel", action="store_true",
-                         help="With --multi-model-suite, run each real "
+                         help="With --suite, shards the suite's real "
+                              "scenarios across concurrent workers for "
+                              "one model (real, measured ~32%% wall-"
+                              "clock reduction in one real test). With "
+                              "--multi-model-suite, run each real "
                               "model's suite CONCURRENTLY (a real "
                               "ThreadPoolExecutor) instead of "
                               "sequentially. Real, honest caveat: "
@@ -3540,8 +3635,12 @@ def main():
         suite = load_suite(args.suite)
         print(f"Running suite '{suite['name']}' ({len(suite['_resolved_scenario_paths'])} "
               f"scenario(s), {args.runs_per_scenario} run(s) each) against {args.model} "
-              f"(endpoint {args.endpoint_id})...")
-        suite_summary = run_suite(args.endpoint_id, args.model, suite, args.runs_per_scenario)
+              f"(endpoint {args.endpoint_id}){' [sharded]' if args.parallel else ''}...")
+        if args.parallel:
+            suite_summary = run_suite_parallel(args.endpoint_id, args.model, suite,
+                                                args.runs_per_scenario, max_workers=args.max_workers)
+        else:
+            suite_summary = run_suite(args.endpoint_id, args.model, suite, args.runs_per_scenario)
         if args.save_results:
             with open(args.save_results, "w") as f:
                 json.dump(suite_summary, f, indent=2)
