@@ -811,6 +811,71 @@ def run_multi_round_suite(endpoint_id: str, model: str, runs: int,
     return summary
 
 
+def generate_suite_from_tags(tags: list, match_mode: str = "any", name: str = None) -> dict:
+    """Real, added 2026-08-28: builds a real, valid suite dict on the fly
+    by scanning every real scenario file under scripts/scenarios/ and
+    selecting those whose own real scenario_tags match -- no suite JSON
+    file needs to exist for this to work, and the returned dict is
+    already in exactly the shape load_suite() produces (including
+    "_resolved_scenario_paths"), so it can be passed straight into
+    run_suite()/run_multi_model_suite() without a round-trip through a
+    file. Genuinely different from the hand-curated suite files under
+    scripts/suites/ -- this is for ad-hoc, tag-driven grouping ("give me
+    every scenario about holdings correction, right now"), not a
+    themed, permanently-maintained collection.
+
+    match_mode: "any" (default) includes a scenario if it has AT LEAST
+    ONE of the given tags; "all" requires it to have EVERY given tag.
+    Real, deliberate rejection of a fabricated empty suite: raises a
+    real, clear error if no real scenario matches, rather than return
+    an empty-but-technically-valid suite that would silently do nothing
+    if handed to a runner.
+    """
+    if match_mode not in ("any", "all"):
+        raise ValueError(f"match_mode must be 'any' or 'all', got {match_mode!r}")
+    if not tags:
+        raise ValueError("generate_suite_from_tags() needs at least one real tag")
+    tag_set = set(tags)
+
+    matched_files = []
+    for fname in sorted(os.listdir(SCENARIOS_DIR)):
+        if not fname.endswith(".json"):
+            continue
+        full_path = os.path.join(SCENARIOS_DIR, fname)
+        scenario = load_scenario(full_path)
+        scenario_tag_set = set(scenario.get("scenario_tags") or [])
+        if match_mode == "any":
+            matches = bool(tag_set & scenario_tag_set)
+        else:
+            matches = tag_set.issubset(scenario_tag_set)
+        if matches:
+            matched_files.append((fname, scenario["name"]))
+
+    if not matched_files:
+        raise ValueError(
+            f"No real scenario matches tags {sorted(tag_set)} (match_mode={match_mode!r}) -- "
+            f"a suite with zero scenarios would silently do nothing if run"
+        )
+
+    tag_desc = f" {match_mode} of " + ", ".join(sorted(tag_set))
+    suite = {
+        "name": name or f"auto_{match_mode}_" + "_".join(sorted(t.replace('-', '_') for t in tag_set)),
+        "description": (
+            f"Real, auto-generated suite: every real scenario matching{tag_desc} "
+            f"-- {len(matched_files)} scenario(s): "
+            + ", ".join(sname for _, sname in matched_files) + "."
+        ),
+        "suite_tags": ["auto-generated"] + sorted(tag_set),
+        "scenarios": [f"scenarios/{fname}" for fname, _ in matched_files],
+    }
+    # Real validation via the exact same path a hand-written suite file
+    # goes through -- resolves and re-validates each scenario, populates
+    # "_resolved_scenario_paths" the same way load_suite() would.
+    resolved = [os.path.join(SCENARIOS_DIR, fname) for fname, _ in matched_files]
+    suite["_resolved_scenario_paths"] = resolved
+    return suite
+
+
 def load_suite(path: str) -> dict:
     """Real, added 2026-08-28: loads a suite file -- a named, themed
     grouping of scenario files (see scripts/suites/*.json for real
@@ -1959,6 +2024,24 @@ def main():
     parser.add_argument("--runs-per-scenario", type=int, default=1,
                          help="Number of independent runs per scenario "
                               "when --suite or --multi-model-suite is used.")
+    parser.add_argument("--auto-suite-tags", metavar="TAG1,TAG2,...",
+                         help="Build a real suite on the fly from every "
+                              "real scenario file matching these "
+                              "scenario_tags, and run it -- no suite JSON "
+                              "file needed. See --auto-suite-match for "
+                              "how multiple tags combine.")
+    parser.add_argument("--auto-suite-match", default="any", choices=["any", "all"],
+                         help="With --auto-suite-tags: 'any' (default) "
+                              "includes a scenario with at least one "
+                              "matching tag; 'all' requires every given "
+                              "tag to be present.")
+    parser.add_argument("--save-suite-file", metavar="PATH",
+                         help="With --auto-suite-tags, also write the "
+                              "real, auto-generated suite definition to "
+                              "PATH as real, loadable suite JSON -- so it "
+                              "can be inspected, tweaked, or reused later "
+                              "via the normal --suite/--multi-model-suite "
+                              "flags.")
     parser.add_argument("--multi-model-suite", metavar="PATH",
                          help="Real suite JSON file with its own real "
                               "'models' field (see scripts/suites/"
@@ -2139,6 +2222,24 @@ def main():
                 with open(out_path, "w") as f:
                     json.dump(summary, f, indent=2)
                 print(f"\n{model} results written to {out_path}")
+        return
+
+    if args.auto_suite_tags:
+        tags = [t.strip() for t in args.auto_suite_tags.split(",") if t.strip()]
+        suite = generate_suite_from_tags(tags, match_mode=args.auto_suite_match)
+        print(f"Auto-generated suite '{suite['name']}' ({len(suite['_resolved_scenario_paths'])} "
+              f"scenario(s), tags={tags}, match={args.auto_suite_match})")
+        if args.save_suite_file:
+            to_save = {k: v for k, v in suite.items() if k != "_resolved_scenario_paths"}
+            with open(args.save_suite_file, "w") as f:
+                json.dump(to_save, f, indent=2)
+            print(f"Suite definition written to {args.save_suite_file}")
+        print(f"\nRunning against {args.model} (endpoint {args.endpoint_id})...")
+        suite_summary = run_suite(args.endpoint_id, args.model, suite, args.runs_per_scenario)
+        if args.save_results:
+            with open(args.save_results, "w") as f:
+                json.dump(suite_summary, f, indent=2)
+            print(f"\nFull suite results written to {args.save_results}")
         return
 
     if args.multi_model_suite:

@@ -1173,3 +1173,83 @@ def test_rank_scenarios_by_failure_rate_still_uses_full_history_not_recent_n():
     # All 6 runs (1+1+1+10+10+10 clean out of 60) should be reflected,
     # not just the most recent ones.
     assert ranked[0]["runs_seen"] == 6
+
+
+# ---------------------------------------------------------------------------
+# generate_suite_from_tags (added 2026-08-28 as part of suite
+# auto-generation)
+# ---------------------------------------------------------------------------
+
+def test_generate_suite_from_tags_matches_hand_curated_holdings_correction():
+    """Real, direct correctness check against an already-shipped,
+    hand-curated suite file -- the auto-generated result for the
+    equivalent tag must match it exactly."""
+    auto = _harness.generate_suite_from_tags(["holdings-correction"])
+    hand = _harness.load_suite(os.path.join(ROOT, "scripts", "suites", "holdings_correction.json"))
+    auto_names = sorted(os.path.basename(p) for p in auto["_resolved_scenario_paths"])
+    hand_names = sorted(os.path.basename(p) for p in hand["_resolved_scenario_paths"])
+    assert auto_names == hand_names
+
+
+def test_generate_suite_from_tags_matches_hand_curated_generalization():
+    auto = _harness.generate_suite_from_tags(["generalization"])
+    hand = _harness.load_suite(os.path.join(ROOT, "scripts", "suites", "generalization.json"))
+    auto_names = sorted(os.path.basename(p) for p in auto["_resolved_scenario_paths"])
+    hand_names = sorted(os.path.basename(p) for p in hand["_resolved_scenario_paths"])
+    assert auto_names == hand_names
+
+
+def test_generate_suite_from_tags_any_mode_unions():
+    auto = _harness.generate_suite_from_tags(
+        ["holdings-correction", "generalization"], match_mode="any"
+    )
+    assert len(auto["_resolved_scenario_paths"]) == 5  # 3 holdings + 2 generalization
+
+
+def test_generate_suite_from_tags_all_mode_intersects():
+    """synthetic_ticker_generalization.json has all of generalization,
+    synthetic, and hallucination-risk -- the only real scenario that
+    should match "all" of generalization + synthetic."""
+    auto = _harness.generate_suite_from_tags(
+        ["generalization", "synthetic"], match_mode="all"
+    )
+    names = [os.path.basename(p) for p in auto["_resolved_scenario_paths"]]
+    assert names == ["synthetic_ticker_generalization.json"]
+
+
+def test_generate_suite_from_tags_all_mode_raises_when_no_overlap():
+    with pytest.raises(ValueError, match="No real scenario matches"):
+        _harness.generate_suite_from_tags(
+            ["holdings-correction", "generalization"], match_mode="all"
+        )
+
+
+def test_generate_suite_from_tags_rejects_invalid_match_mode():
+    with pytest.raises(ValueError, match="match_mode"):
+        _harness.generate_suite_from_tags(["x"], match_mode="bogus")
+
+
+def test_generate_suite_from_tags_rejects_empty_tags():
+    with pytest.raises(ValueError, match="at least one real tag"):
+        _harness.generate_suite_from_tags([])
+
+
+def test_generate_suite_from_tags_rejects_unmatched_tag():
+    with pytest.raises(ValueError, match="No real scenario matches"):
+        _harness.generate_suite_from_tags(["this-tag-does-not-exist-anywhere"])
+
+
+def test_generate_suite_from_tags_produces_a_real_loadable_suite():
+    """Real round-trip check: the generated dict, saved and reloaded via
+    the real load_suite() path (like --save-suite-file does), must
+    still be valid and resolve the same scenarios."""
+    auto = _harness.generate_suite_from_tags(["prompt-shape"])
+    to_save = {k: v for k, v in auto.items() if k != "_resolved_scenario_paths"}
+    fd, path = tempfile.mkstemp(suffix=".json")
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump(to_save, f)
+        reloaded = _harness.load_suite(path)
+        assert reloaded["_resolved_scenario_paths"] == auto["_resolved_scenario_paths"]
+    finally:
+        os.remove(path)
