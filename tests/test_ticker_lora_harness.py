@@ -1946,3 +1946,60 @@ def test_run_suite_parallel_aggregates_correctly(tmp_path, monkeypatch):
     assert result["flag_counts"] == {"EMPTY": 1}
     assert result["total_cross_turn_contamination"] == 1
     assert result["sharded"] is True
+
+
+# ---------------------------------------------------------------------------
+# generate_dashboard_overview_html (added 2026-08-28, Suite_health_
+# dashboard: full visual overview). The live server routing itself
+# (overview page, ?suite= drill-down, unknown-suite handling, live
+# pickup of newly-added suites without restart) is verified live, not
+# by CI unit test -- covered directly during development: seeded 2 real
+# suites, confirmed both real cards render with correct, distinct
+# status; drilled into one and confirmed its own real detail and
+# regression; confirmed an unknown suite shows an honest error with a
+# working back-link; then, without restarting the running server,
+# added a THIRD real suite's data and confirmed the overview picked it
+# up live on the next request.
+# ---------------------------------------------------------------------------
+
+def _real_multi_suite_summaries_with_detail():
+    now = time.time()
+    return [
+        {"timestamp": now - 7200, "overview": {"suite_name": "holdings_correction"},
+         "outcomes": {"failure_rate": 10, "clean_turns": 9, "total_turns": 10}, "regressions": []},
+        {"timestamp": now - 3600, "overview": {"suite_name": "holdings_correction"},
+         "outcomes": {"failure_rate": 20, "clean_turns": 8, "total_turns": 10}, "regressions": [{"type": "x"}]},
+        {"timestamp": now, "overview": {"suite_name": "generalization"},
+         "outcomes": {"failure_rate": 60, "clean_turns": 4, "total_turns": 10}, "regressions": []},
+    ]
+
+
+def test_dashboard_overview_shows_every_suite():
+    html_str = _harness.generate_dashboard_overview_html(_real_multi_suite_summaries_with_detail())
+    assert "holdings_correction" in html_str
+    assert "generalization" in html_str
+
+
+def test_dashboard_overview_shows_latest_not_first_entry_per_suite():
+    """Real, deliberate check: holdings_correction has 2 real entries
+    (10%, then 20%) -- the overview must show the latest (20%), not
+    the first."""
+    html_str = _harness.generate_dashboard_overview_html(_real_multi_suite_summaries_with_detail())
+    assert "20%" in html_str
+
+
+def test_dashboard_overview_has_drill_down_links():
+    html_str = _harness.generate_dashboard_overview_html(_real_multi_suite_summaries_with_detail())
+    assert 'href="/?suite=holdings_correction"' in html_str
+    assert 'href="/?suite=generalization"' in html_str
+
+
+def test_dashboard_overview_empty_shows_honest_message():
+    html_str = _harness.generate_dashboard_overview_html([])
+    assert "No saved summaries found" in html_str
+
+
+def test_dashboard_overview_shows_correct_snapshot_count_per_suite():
+    html_str = _harness.generate_dashboard_overview_html(_real_multi_suite_summaries_with_detail())
+    assert "2 snapshot(s)" in html_str  # holdings_correction has 2 real entries
+    assert "1 snapshot(s)" in html_str  # generalization has 1
