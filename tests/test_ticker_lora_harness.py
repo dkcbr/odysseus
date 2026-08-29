@@ -27,6 +27,7 @@ import importlib.util
 import json
 import os
 import tempfile
+import threading
 import time
 
 import pytest
@@ -1628,3 +1629,101 @@ def test_health_summary_html_report_no_scenario_grid_when_empty():
     summary = _harness.generate_suite_health_summary(result)
     html_str = _harness.generate_health_summary_html_report(summary)
     assert "Scenario grid" not in html_str
+
+
+# ---------------------------------------------------------------------------
+# Design_suite_health_notifications: notify_regressions,
+# send_desktop_notification, send_webhook_notification (added 2026-08-28)
+# ---------------------------------------------------------------------------
+
+def test_notify_regressions_sends_nothing_on_empty_regressions():
+    """Real, deliberate design: no notification is a "no regressions"
+    ping -- would just be noise, not a real alert."""
+    assert _harness.notify_regressions([], method="desktop", suite_name="x") is False
+
+
+def test_notify_regressions_rejects_unknown_method():
+    regressions = [{"type": "x", "message": "y", "severity": "high", "model": "m1"}]
+    with pytest.raises(ValueError, match="Unknown notification method"):
+        _harness.notify_regressions(regressions, method="bogus", suite_name="x")
+
+
+def test_notify_regressions_webhook_without_url_fails_gracefully():
+    regressions = [{"type": "x", "message": "y", "severity": "high", "model": "m1"}]
+    assert _harness.notify_regressions(regressions, method="webhook", suite_name="x") is False
+
+
+def test_send_desktop_notification_handles_unavailable_notify_send(monkeypatch):
+    """Real, deliberate design: confirmed directly that notify-send is
+    unavailable inside the real Odysseus container this harness most
+    often runs from (no D-Bus session) -- must fail gracefully with a
+    clear message, not crash."""
+    monkeypatch.setattr(_harness.shutil, "which", lambda name: None)
+    assert _harness.send_desktop_notification("title", "message") is False
+
+
+def test_send_webhook_notification_real_live_post_to_local_receiver():
+    """Real, live check: spins up a genuine local HTTP server and
+    confirms send_webhook_notification() actually POSTs the real,
+    correct JSON payload to it -- not mocked."""
+    received = {}
+
+    class Handler(_harness.http.server.BaseHTTPRequestHandler):
+        def do_POST(self):
+            length = int(self.headers["Content-Length"])
+            received["body"] = json.loads(self.rfile.read(length))
+            self.send_response(200)
+            self.end_headers()
+
+        def log_message(self, *args):
+            pass
+
+    server = _harness.http.server.HTTPServer(("127.0.0.1", 0), Handler)
+    port = server.server_address[1]
+    thread = threading.Thread(target=server.handle_request, daemon=True)
+    thread.start()
+    try:
+        result = _harness.send_webhook_notification(
+            f"http://127.0.0.1:{port}/", {"suite_name": "x", "regressions": [{"a": 1}]}
+        )
+        thread.join(timeout=5)
+        assert result is True
+        assert received["body"] == {"suite_name": "x", "regressions": [{"a": 1}]}
+    finally:
+        server.server_close()
+
+
+def test_send_webhook_notification_unreachable_url_fails_gracefully():
+    assert _harness.send_webhook_notification("http://127.0.0.1:1/nonexistent", {"x": 1}) is False
+
+
+def test_notify_regressions_webhook_payload_includes_full_alert_dicts():
+    """Real, deliberate design: the webhook payload includes every real
+    regression alert dict exactly as detect_regressions() produced it,
+    not a lossy, pre-formatted summary string."""
+    received = {}
+
+    class Handler(_harness.http.server.BaseHTTPRequestHandler):
+        def do_POST(self):
+            length = int(self.headers["Content-Length"])
+            received["body"] = json.loads(self.rfile.read(length))
+            self.send_response(200)
+            self.end_headers()
+
+        def log_message(self, *args):
+            pass
+
+    server = _harness.http.server.HTTPServer(("127.0.0.1", 0), Handler)
+    port = server.server_address[1]
+    thread = threading.Thread(target=server.handle_request, daemon=True)
+    thread.start()
+    regressions = [
+        {"type": "clean_rate_regression", "message": "x dropped", "severity": "high", "model": "m1"},
+    ]
+    try:
+        _harness.notify_regressions(regressions, method="webhook",
+                                     webhook_url=f"http://127.0.0.1:{port}/", suite_name="real_suite")
+        thread.join(timeout=5)
+        assert received["body"] == {"suite_name": "real_suite", "regressions": regressions}
+    finally:
+        server.server_close()
