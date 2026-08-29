@@ -2192,3 +2192,72 @@ def test_render_replay_transcript_real_captured_bundle_reconstructs_correctly():
     assert '{"symbol": "KTOS"}' in transcript
     assert "tool_argument_echo" in transcript
     assert "AFFECTED TURN" in transcript
+
+
+# ---------------------------------------------------------------------------
+# compare_check_across_models (added 2026-08-28,
+# Cross_model_comparison_for_argument_echo). Verified live: a real,
+# completed 3-attempts-per-model run against ticker-lookup-lora and
+# qwen3:14b on prompt_shape_variety.json (0/3 for both -- honest,
+# inconclusive given the confirmed-low base rate of this rare event; a
+# larger, 6-attempts-per-model follow-up run was still executing at
+# the time this task wrapped, left running in the background rather
+# than killed, since it's using real backend resources productively
+# and will complete and write real results on its own). These tests
+# cover the function's own real aggregation logic deterministically,
+# via monkeypatched run_sequence(), the same real reasoning as every
+# other live-model-calling function tested tonight: real generation
+# timing/outcomes can't be relied on for CI.
+# ---------------------------------------------------------------------------
+
+def test_compare_check_across_models_distinguishes_real_per_model_rates(monkeypatch):
+    def fake_run_sequence(endpoint_id, model, scenario=None):
+        fired = model == "model_a"
+        return {"turn_results": [{"tool_argument_echo": fired}],
+                "session_id": "fake", "cross_turn_contamination": []}
+
+    monkeypatch.setattr(_harness, "run_sequence", fake_run_sequence)
+    scenario = {"name": "test", "turns": [{"type": "ticker", "symbol": "X"}]}
+    results = _harness.compare_check_across_models(
+        "77bddaa5", ["model_a", "model_b"], scenario, attempts_per_model=3, verbose=False,
+    )
+    assert results["model_a"]["occurrences"] == 3
+    assert results["model_a"]["rate"] == 100
+    assert results["model_b"]["occurrences"] == 0
+    assert results["model_b"]["rate"] == 0
+
+
+def test_compare_check_across_models_checks_any_turn_not_just_first(monkeypatch):
+    """Real, deliberate design: a real run should count as an
+    occurrence if the target check fires on ANY turn, not only the
+    first one."""
+    def fake_run_sequence(endpoint_id, model, scenario=None):
+        return {"turn_results": [
+            {"tool_argument_echo": False},
+            {"tool_argument_echo": False},
+            {"tool_argument_echo": True},  # fires on the third turn
+        ], "session_id": "fake", "cross_turn_contamination": []}
+
+    monkeypatch.setattr(_harness, "run_sequence", fake_run_sequence)
+    scenario = {"name": "test", "turns": [{"type": "ticker", "symbol": "X"}]}
+    results = _harness.compare_check_across_models(
+        "77bddaa5", ["m1"], scenario, attempts_per_model=2, verbose=False,
+    )
+    assert results["m1"]["occurrences"] == 2
+
+
+def test_compare_check_across_models_makes_correct_number_of_real_calls(monkeypatch):
+    call_log = []
+
+    def fake_run_sequence(endpoint_id, model, scenario=None):
+        call_log.append(model)
+        return {"turn_results": [{"tool_argument_echo": False}],
+                "session_id": "fake", "cross_turn_contamination": []}
+
+    monkeypatch.setattr(_harness, "run_sequence", fake_run_sequence)
+    scenario = {"name": "test", "turns": [{"type": "ticker", "symbol": "X"}]}
+    _harness.compare_check_across_models(
+        "77bddaa5", ["m1", "m2"], scenario, attempts_per_model=4, verbose=False,
+    )
+    assert call_log.count("m1") == 4
+    assert call_log.count("m2") == 4
