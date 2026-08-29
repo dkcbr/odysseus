@@ -824,11 +824,29 @@ def load_suite(path: str) -> dict:
     calling load_scenario() on it -- a suite referencing a missing or
     malformed scenario file fails loudly here, at suite-load time, not
     partway through a real run.
+
+    Real, added 2026-08-28: an optional "models" field (a real, non-
+    empty list of real model name strings) marks a suite as multi-model
+    -- run_multi_model_suite() uses this; run_suite() (single-model)
+    ignores it entirely, so the same suite file works with either
+    runner. Deliberately NOT validated against a live model registry
+    here (that would require a real, live API call just to load a
+    file) -- an unknown model name fails naturally and loudly the first
+    time run_multi_model_suite() actually tries to use it, same as an
+    unknown --model already does for the rest of this harness.
     """
     with open(path) as f:
         suite = json.load(f)
     if "scenarios" not in suite or not isinstance(suite["scenarios"], list) or not suite["scenarios"]:
         raise ValueError(f"Suite file {path} is missing a real, non-empty 'scenarios' list")
+    if "models" in suite and (
+        not isinstance(suite["models"], list) or not suite["models"]
+        or not all(isinstance(m, str) and m for m in suite["models"])
+    ):
+        raise ValueError(
+            f"Suite file {path}: 'models' must be a real, non-empty list "
+            f"of real model name strings, got {suite['models']!r}"
+        )
     resolved = []
     for rel_path in suite["scenarios"]:
         full_path = os.path.join(SCRIPTS_DIR, rel_path)
@@ -893,6 +911,62 @@ def run_suite(endpoint_id: str, model: str, suite: dict, runs_per_scenario: int 
         print(f"Total cross-turn contamination: {total_contamination}")
 
     return suite_summary
+
+
+def run_multi_model_suite(endpoint_id: str, models: list, suite: dict,
+                           runs_per_scenario: int = 1, verbose: bool = True) -> dict:
+    """Real, added 2026-08-28: runs every real scenario in a suite
+    against every real model in a list -- the genuine combination of
+    run_suite() (many scenarios, one model) and run_cross_model() (one
+    scenario, many models) that neither alone provides. Reuses
+    run_suite() per model (not a separate, third aggregation
+    implementation) -- each model's per-suite summary comes back in
+    exactly the shape run_suite() already produces, plus a real,
+    direct comparison table across models printed at the end, and
+    detect_regressions()-compatible data for each model (each model's
+    real summary can still be saved individually and fed into the
+    existing --trends machinery unchanged).
+
+    Real, deliberate: models can be passed explicitly (overriding
+    anything in the suite file's own optional "models" field) or left
+    None to use the suite file's own real "models" list -- a suite
+    file with no "models" field at all requires an explicit models
+    argument, since there's no real default to fall back to that
+    wouldn't be an arbitrary guess.
+    """
+    if not models:
+        raise ValueError(
+            "run_multi_model_suite() needs a real, non-empty models list -- "
+            "either pass one explicitly, or use a suite file with its own "
+            "real 'models' field"
+        )
+
+    results = {}
+    for model in models:
+        if verbose:
+            print(f"\n{'=' * 60}\nModel: {model}\n{'=' * 60}")
+        results[model] = run_suite(endpoint_id, model, suite, runs_per_scenario, verbose=verbose)
+
+    if verbose:
+        print(f"\n=== Multi-Model Suite Comparison: {suite.get('name', '?')} ===")
+        header = f"{'Model':<32} {'Clean %':>8} {'Turns':>6}"
+        print(header)
+        print("-" * len(header))
+        for model, summary in results.items():
+            total = summary["total_turns"] or 1
+            clean_pct = round(100 * summary["clean_turns"] / total)
+            print(f"{model:<32} {clean_pct:>7}% {summary['total_turns']:>6}")
+        all_flags = sorted({f for s in results.values() for f in s["flag_counts"]})
+        if all_flags:
+            print()
+            print(f"{'Flag':<28} " + " ".join(f"{m[:14]:>14}" for m in results))
+            for flag in all_flags:
+                row = f"{flag:<28} " + " ".join(f"{results[m]['flag_counts'].get(flag, 0):>14}" for m in results)
+                print(row)
+
+    return {"suite_name": suite.get("name", "?"), "results": results}
+
+
 
 
 DEFAULT_CROSS_MODEL_LIST = [
@@ -1734,7 +1808,19 @@ def main():
                               "own summary available too.")
     parser.add_argument("--runs-per-scenario", type=int, default=1,
                          help="Number of independent runs per scenario "
-                              "when --suite is used.")
+                              "when --suite or --multi-model-suite is used.")
+    parser.add_argument("--multi-model-suite", metavar="PATH",
+                         help="Real suite JSON file with its own real "
+                              "'models' field (see scripts/suites/"
+                              "naming_collision_before_after.json and "
+                              "full_model_comparison.json for real "
+                              "examples) -- runs every scenario in the "
+                              "suite against every model, printing a "
+                              "direct comparison. The genuine combination "
+                              "of --suite (many scenarios, one model) and "
+                              "--cross-model (one scenario, many models). "
+                              "Combine with --models to override the "
+                              "suite file's own model list.")
     parser.add_argument("--cross-model", action="store_true",
                          help="Run the same real scenario (--scenario-file, "
                               "or the default) against several real models "
@@ -1850,6 +1936,25 @@ def main():
                                       runs_per_model=args.runs_per_scenario)
         if args.save_results:
             for model, summary in comparison["results"].items():
+                safe_model = model.replace(":", "_").replace("/", "_")
+                out_path = args.save_results.replace(".json", f"_{safe_model}.json")
+                with open(out_path, "w") as f:
+                    json.dump(summary, f, indent=2)
+                print(f"\n{model} results written to {out_path}")
+        return
+
+    if args.multi_model_suite:
+        suite = load_suite(args.multi_model_suite)
+        models = [m.strip() for m in args.models.split(",")] if args.models else suite.get("models")
+        if not models:
+            print(f"Suite '{suite['name']}' has no real 'models' field and --models "
+                  f"wasn't given -- nowhere to get a model list from.")
+            return
+        print(f"Running multi-model suite '{suite['name']}' ({len(suite['_resolved_scenario_paths'])} "
+              f"scenario(s)) across {len(models)} model(s): {', '.join(models)}...")
+        mm_summary = run_multi_model_suite(args.endpoint_id, models, suite, args.runs_per_scenario)
+        if args.save_results:
+            for model, summary in mm_summary["results"].items():
                 safe_model = model.replace(":", "_").replace("/", "_")
                 out_path = args.save_results.replace(".json", f"_{safe_model}.json")
                 with open(out_path, "w") as f:
