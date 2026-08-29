@@ -1448,3 +1448,95 @@ def test_summarize_suite_trend_filters_by_suite_name():
 
 def test_summarize_suite_trend_empty_input_returns_empty_list():
     assert _harness.summarize_suite_trend([]) == []
+
+
+# ---------------------------------------------------------------------------
+# generate_health_summary_html_report (added 2026-08-28, Add_summary_to_dashboard)
+# ---------------------------------------------------------------------------
+
+def test_health_summary_html_report_renders_core_sections(tmp_path):
+    summary = {
+        "timestamp": 1000,
+        "overview": {"suite_name": "x", "scenario_count": 2, "model_count": 1, "total_turns": 10},
+        "outcomes": {"clean_turns": 6, "total_turns": 10, "failure_rate": 40, "flag_counts": {"TOOL_ERROR": 2}},
+        "regressions": [{"type": "clean_rate_regression", "message": "x: dropped 90% -> 60%",
+                          "severity": "moderate", "model": "m1"}],
+    }
+    out_path = str(tmp_path / "report.html")
+    _harness.generate_health_summary_html_report(summary, output_path=out_path)
+    with open(out_path) as f:
+        html = f.read()
+    assert html.startswith("<!DOCTYPE html>")
+    assert html.rstrip().endswith("</html>")
+    assert "dropped 90%" in html
+    assert "TOOL_ERROR: 2" in html
+
+
+def test_health_summary_html_report_no_regressions_shows_honest_none_detected(tmp_path):
+    summary = {
+        "timestamp": 1000,
+        "overview": {"suite_name": "x", "scenario_count": 1, "model_count": 1, "total_turns": 5},
+        "outcomes": {"clean_turns": 5, "total_turns": 5, "failure_rate": 0, "flag_counts": {}},
+        "regressions": [],
+    }
+    out_path = str(tmp_path / "report.html")
+    _harness.generate_health_summary_html_report(summary, output_path=out_path)
+    with open(out_path) as f:
+        html = f.read()
+    assert "None detected" in html
+
+
+def test_health_summary_html_report_includes_model_comparison_table(tmp_path):
+    summary = {
+        "timestamp": 1000,
+        "overview": {"suite_name": "y", "scenario_count": 2, "model_count": 2, "total_turns": 20},
+        "outcomes": {"clean_turns": 10, "total_turns": 20, "failure_rate": 50, "flag_counts": {}},
+        "model_comparison": {
+            "good": {"clean_turns": 10, "total_turns": 10, "clean_rate": 100, "failure_rate": 0, "flag_counts": {}},
+            "bad": {"clean_turns": 0, "total_turns": 10, "clean_rate": 0, "failure_rate": 100, "flag_counts": {}},
+        },
+    }
+    out_path = str(tmp_path / "report.html")
+    _harness.generate_health_summary_html_report(summary, output_path=out_path)
+    with open(out_path) as f:
+        html = f.read()
+    assert "good" in html and "bad" in html
+    assert "<table>" in html
+
+
+def test_health_summary_html_report_includes_real_trend_chart_when_given():
+    summary = {
+        "timestamp": 2000,
+        "overview": {"suite_name": "y", "scenario_count": 1, "model_count": 1, "total_turns": 10},
+        "outcomes": {"clean_turns": 5, "total_turns": 10, "failure_rate": 50, "flag_counts": {}},
+    }
+    trend = [
+        {"timestamp": 1000, "label": "08/29 09:00", "suite_name": "y", "failure_rate": 20,
+         "clean_turns": 8, "total_turns": 10, "regression_count": 0, "source_file": "a.json"},
+        {"timestamp": 2000, "label": "08/29 10:00", "suite_name": "y", "failure_rate": 50,
+         "clean_turns": 5, "total_turns": 10, "regression_count": 0, "source_file": "b.json"},
+    ]
+    fd, out_path = tempfile.mkstemp(suffix=".html")
+    try:
+        os.close(fd)
+        _harness.generate_health_summary_html_report(summary, trend=trend, output_path=out_path)
+        with open(out_path) as f:
+            html = f.read()
+        assert "<svg" in html
+        assert "<polyline" in html
+        assert html.count("<circle") == 2
+    finally:
+        os.remove(out_path)
+
+
+def test_health_summary_html_report_no_trend_chart_when_omitted(tmp_path):
+    summary = {
+        "timestamp": 1000,
+        "overview": {"suite_name": "x", "scenario_count": 1, "model_count": 1, "total_turns": 5},
+        "outcomes": {"clean_turns": 5, "total_turns": 5, "failure_rate": 0, "flag_counts": {}},
+    }
+    out_path = str(tmp_path / "report.html")
+    _harness.generate_health_summary_html_report(summary, output_path=out_path)
+    with open(out_path) as f:
+        html = f.read()
+    assert "Failure rate over time" not in html
