@@ -1318,6 +1318,22 @@ _THINKING_MODEL_PATTERNS = (
     "qwen3", "qwq", "deepseek-r1", "deepseek-reasoner", "minimax",
     "m2-reap", "gemma", "stepfun", "step-3", "step3",
     "magistral", "mistral-small", "mistral-medium",
+    # Real, added 2026-08-28: ticker-lookup-lora is a real, custom LoRA
+    # fine-tune of a Qwen3 base model. Confirmed directly, via a real,
+    # live captured stability-harness run, that this exact real,
+    # documented "</think> without opening tag" failure mode occurs for
+    # it -- but its own distinct model name (renamed the same night from
+    # odysseus-qwen3-tickers-lora to fix an unrelated, real naming-
+    # collision tool-suppression bug) no longer contains "qwen3", so this
+    # check was silently returning False for it after that rename, an
+    # unintended, real side effect: the same substring the earlier fix
+    # correctly removed to solve tool suppression was also, coincidentally,
+    # the only thing making this separate, unrelated check pass. Registered
+    # explicitly here rather than re-adding a "qwen3" substring, since a
+    # custom LoRA's own name should be recognized on its own real, known
+    # identity, not by fragile inheritance from a base-model name it may
+    # or may not still contain.
+    "ticker-lookup-lora",
 )
 
 def _supports_thinking(model: str) -> bool:
