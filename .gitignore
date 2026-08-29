@@ -90,6 +90,7 @@ reports/
 tasks/
 scripts/compound/*.json
 scripts/results/*.json
+scripts/summaries/*.json
 research_data/
 **/search_analytics.json
 
