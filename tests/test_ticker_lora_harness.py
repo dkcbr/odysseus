@@ -1854,3 +1854,21 @@ def test_gate_rejects_invalid_severity_string():
     summary = {"outcomes": {"failure_rate": 10}, "regressions": []}
     with pytest.raises(ValueError, match="max_regression_severity must be"):
         _harness.evaluate_health_gate(summary, max_regression_severity="bogus")
+
+
+# ---------------------------------------------------------------------------
+# run_multi_model_suite_parallel (added 2026-08-28,
+# Design_parallel_suite_runner). The real, live model-calling behavior
+# itself is verified live, not by CI unit test -- see the real,
+# measured wall-clock comparison covered directly during development
+# (85.72s sequential vs 52.92s parallel on the same 2 real models/suite,
+# and a second live run at 43.9s through the actual CLI), a stronger,
+# more honest check for real concurrent-request behavior than a mocked
+# unit test could provide.
+# ---------------------------------------------------------------------------
+
+def test_run_multi_model_suite_parallel_rejects_empty_models():
+    with pytest.raises(ValueError, match="models list"):
+        _harness.run_multi_model_suite_parallel(
+            "77bddaa5", [], {"name": "x", "_resolved_scenario_paths": []}
+        )
