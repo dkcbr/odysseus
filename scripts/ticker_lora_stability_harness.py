@@ -379,13 +379,30 @@ _HOLDINGS_NOTE_TICKER_RE = re.compile(
     r"stored reference document lists\s+[\d,]+\s+shares of\s+([A-Z]{1,6})",
 )
 
-# Real, DK's actual, current stock holdings (from userPreferences,
-# confirmed 2026-08-28) that would legitimately trigger the real
-# holdings-correction path -- crypto and non-stock holdings are
-# irrelevant here since lookup_ticker only ever covers equities.
+# Real, DK's actual, current stock holdings that would legitimately
+# trigger the real holdings-correction path -- crypto and non-stock
+# holdings are irrelevant here since lookup_ticker only ever covers
+# equities.
+#
+# Real, corrected 2026-08-30: this list was stale, sourced from
+# userPreferences (dated July 6), and caused a real, significant false
+# positive -- an entire "holdings fabrication" investigation earlier
+# the same night characterized 21 real captures as "100% total
+# fabrication," when the notes were in fact 100% accurate, generated
+# by real, deterministic production code (agent_loop.py's own
+# `_ticker in _hc_parsed.confirmed_holdings` check) against the real,
+# authoritative, live-reconciled data/portfolio_context.md (updated
+# August 30, 2026, verified against the actual Public.com API) -- NOT
+# a model hallucination at all. Corrected directly against that real,
+# authoritative source rather than userPreferences going forward:
+# added IONQ, RGTI (both real re-entry positions that filled since
+# July -- IONQ 8 shares, RGTI 5 shares + 3 pending) and SOFI (a real,
+# new position, not previously tracked at all). Every one of the
+# original 12 tickers was independently confirmed still a real,
+# current, non-zero holding in the same real file -- none removed.
 REAL_DK_STOCK_HOLDINGS = {
     "PL", "ADUR", "KTOS", "MP", "TMC", "XE", "SOUN", "WDAY", "MSFT",
-    "UUUU", "ENPH", "ABTC",
+    "UUUU", "ENPH", "ABTC", "IONQ", "RGTI", "SOFI",
 }
 
 
@@ -1632,6 +1649,31 @@ def check_turn_holdings_integrity(turn: dict) -> dict:
     holding, and every claimed number genuinely grounded in that
     turn's own real, injected memories.
 
+    CRITICAL, real correction added 2026-08-30, same day this
+    function shipped: "is_real_holding" and "numbers_grounded" are
+    NOT the same kind of check, and a caller MUST NOT conflate them.
+    is_real_holding checks against REAL_DK_STOCK_HOLDINGS, itself
+    sourced from the real, live, authoritative data/portfolio_
+    context.md (corrected 2026-08-30 after a real, significant false
+    positive -- see REAL_DK_STOCK_HOLDINGS's own comment) -- a
+    genuinely reliable ground-truth check. numbers_grounded, by
+    contrast, only checks whether a note's numbers appear in THAT
+    TURN'S OWN injected memories_used text -- and confirmed directly,
+    the same day, that injected memory can itself be a STALER
+    snapshot of DK's real portfolio than the deterministic holdings-
+    note generator (agent_loop.py, reading the same live-reconciled
+    file directly) actually used. A real, confirmed example: a note
+    correctly, accurately said "3 pending" (matching the real, live,
+    current data), while that turn's own injected memory said "1
+    pending" (an older, stale recollection) -- the NOTE was right, the
+    MEMORY was stale, yet numbers_grounded correctly, honestly reports
+    this as "not grounded," because that's genuinely what it checks:
+    agreement with memory, not agreement with reality. A caller must
+    NOT interpret numbers_grounded: False as "the note is fabricated"
+    without separately confirming is_real_holding and considering that
+    the injected memory itself may be the stale side of the
+    disagreement, not the note.
+
     Real, direct motivation: extract_holdings_fabrication_features()
     only ever examined the ONE affected turn a capture was made for --
     a real, current blind spot, confirmed directly by checking both
@@ -1844,35 +1886,50 @@ def generate_holdings_integrity_report(bundle: dict, output_path: str = None) ->
 
 def characterize_holdings_fabrication(captures_dir: str = None, target_check: str = "holdings_note_not_a_real_holding") -> dict:
     """Real, added 2026-08-30 (Accumulate_more_holdings_integrity_
-    captures): the real payoff of accumulating a real dataset --
-    aggregate statistics across every real captured occurrence,
-    genuinely different in kind from analyze_captured_echoes()'s
-    honest "n is too small to say anything real" framing, since this
-    is built to run once a real dataset large enough to actually
-    characterize the pattern exists (n>=5, matching the same real
-    confidence threshold established for tool_argument_echo's own
-    analysis).
+    captures), CORRECTED same day after a real, significant
+    misinterpretation was caught: aggregate statistics across every
+    real captured occurrence.
 
-    Reuses extract_holdings_fabrication_features() unchanged per real
-    capture -- not a separate extraction implementation.
+    CRITICAL, real correction: this function's FIRST version
+    conflated two genuinely different real checks under one
+    "fabrication" framing. is_real_holding_breakdown checks against
+    REAL_DK_STOCK_HOLDINGS (itself sourced from the real, live,
+    authoritative data/portfolio_context.md) -- a genuinely reliable
+    ground-truth signal. grounding_breakdown checks a note's numbers
+    against that SAME turn's own injected memories_used text only --
+    confirmed directly, the same day, that injected memory can itself
+    be a staler snapshot of DK's real portfolio than the deterministic
+    holdings-note generator (agent_loop.py) actually used, so
+    "ungrounded in memory" does NOT mean "fabricated" -- it may mean
+    the note was MORE current than memory, not less accurate. Reports
+    both real, separate dimensions independently now, rather than
+    the original, single, conflated "fabrication" note.
+
+    Reuses check_bundle_holdings_integrity() (for is_real_holding) and
+    extract_holdings_fabrication_features() (for note/ticker/number
+    extraction) unchanged per real capture -- not separate extraction
+    implementations.
 
     Returns a real, structured dict:
       - "sample_size": real count of captures analyzed
-      - "ticker_frequency": {ticker: count} -- which ticker the
-        fabricated note referred to, across every real occurrence
+      - "ticker_frequency": {ticker: count} -- which ticker the note
+        referred to, across every real occurrence
+      - "is_real_holding_breakdown": {"real_holding", "not_real_holding"}
+        counts -- the real, reliable ground-truth signal
       - "grounding_breakdown": {"fully_grounded", "partially_grounded",
-        "totally_fabricated"} counts -- the real severity distribution
-      - "affected_turn_position_frequency": {turn_index: count} --
-        real, structural signal for whether this correlates with
-        WHERE in a conversation it happens, not just whether it
-        happens at all
-      - "note": a real, honest summary sentence
+        "totally_fabricated"} counts against injected memory
+        specifically -- real, but NOT synonymous with note accuracy
+        (see the critical correction above)
+      - "affected_turn_position_frequency": {turn_index: count}
+      - "note": a real, honest, separated summary -- never claims
+        "fabrication" from the memory-grounding numbers alone
     """
     if not os.path.isdir(captures_dir or CAPTURES_DIR):
         return {"sample_size": 0, "note": f"No real captures directory found."}
     captures_dir = captures_dir or CAPTURES_DIR
 
     ticker_frequency = {}
+    is_real_holding_breakdown = {"real_holding": 0, "not_real_holding": 0}
     grounding_breakdown = {"fully_grounded": 0, "partially_grounded": 0, "totally_fabricated": 0}
     turn_position_frequency = {}
     n = 0
@@ -1888,6 +1945,14 @@ def characterize_holdings_fabrication(captures_dir: str = None, target_check: st
         ticker = features["note_ticker"]
         ticker_frequency[ticker] = ticker_frequency.get(ticker, 0) + 1
 
+        turn_idx = bundle["affected_turn_index"]
+        turn_results = check_bundle_holdings_integrity(bundle)
+        affected_result = next((r for r in turn_results if r["turn_index"] == turn_idx), None)
+        if affected_result and affected_result["is_real_holding"]:
+            is_real_holding_breakdown["real_holding"] += 1
+        else:
+            is_real_holding_breakdown["not_real_holding"] += 1
+
         if features["note_numbers_grounded_in_memory"]:
             grounding_breakdown["fully_grounded"] += 1
         elif features["any_note_number_grounded"]:
@@ -1895,7 +1960,6 @@ def characterize_holdings_fabrication(captures_dir: str = None, target_check: st
         else:
             grounding_breakdown["totally_fabricated"] += 1
 
-        turn_idx = bundle["affected_turn_index"]
         turn_position_frequency[turn_idx] = turn_position_frequency.get(turn_idx, 0) + 1
 
     if n == 0:
@@ -1903,17 +1967,25 @@ def characterize_holdings_fabrication(captures_dir: str = None, target_check: st
     elif n < 5:
         note = f"Real sample size is {n} -- too few for real statistical confidence."
     else:
-        fabricated_pct = round(100 * grounding_breakdown["totally_fabricated"] / n)
+        not_real_pct = round(100 * is_real_holding_breakdown["not_real_holding"] / n)
+        ungrounded_pct = round(100 * grounding_breakdown["totally_fabricated"] / n)
         note = (
-            f"Real sample size is {n}, enough for real statistical characterization. "
-            f"{fabricated_pct}% of real occurrences show total fabrication (zero grounded "
-            f"numbers) -- this is a systematic real behavior pattern, not occasional "
-            f"embellishment of real context."
+            f"Real sample size is {n}. {not_real_pct}% of real occurrences referred to a "
+            f"ticker that genuinely is NOT a real DK holding (checked against the real, "
+            f"live, authoritative REAL_DK_STOCK_HOLDINGS) -- this IS a real, reliable "
+            f"fabrication signal. Separately, {ungrounded_pct}% show numbers that don't "
+            f"match that turn's own injected memory text -- this is NOT the same thing as "
+            f"fabrication: injected memory can itself be a staler snapshot of DK's real "
+            f"portfolio than the deterministic holdings-note generator actually used, "
+            f"confirmed directly in at least one real, checked case. Interpret grounding_"
+            f"breakdown as a memory-staleness signal, not a note-accuracy signal, unless "
+            f"is_real_holding_breakdown also shows a real problem for the same occurrence."
         )
 
     return {
         "sample_size": n,
         "ticker_frequency": ticker_frequency,
+        "is_real_holding_breakdown": is_real_holding_breakdown,
         "grounding_breakdown": grounding_breakdown,
         "affected_turn_position_frequency": turn_position_frequency,
         "note": note,
@@ -5009,7 +5081,9 @@ def main():
         if result["sample_size"] > 0:
             print()
             print("Ticker frequency:", result["ticker_frequency"])
-            print("Grounding breakdown:", result["grounding_breakdown"])
+            print("Is-real-holding breakdown:", result["is_real_holding_breakdown"])
+            print("Grounding breakdown (memory-staleness signal, NOT fabrication):",
+                  result["grounding_breakdown"])
             print("Affected turn position frequency:", result["affected_turn_position_frequency"])
         return
 
