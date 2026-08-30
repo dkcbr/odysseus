@@ -1509,6 +1509,114 @@ def extract_holdings_fabrication_features(bundle: dict) -> dict:
     }
 
 
+def check_turn_holdings_integrity(turn: dict) -> dict:
+    """Real, added 2026-08-30 (Per-turn holdings integrity check):
+    the smallest real unit of value from the holdings-fabrication
+    investigation -- checks a SINGLE turn (any turn, not just whatever
+    turn happened to be bundle["affected_turn_index"] for the check a
+    capture originally targeted) for a real holdings-correction note,
+    and, if present, whether it's genuinely trustworthy: a real DK
+    holding, and every claimed number genuinely grounded in that
+    turn's own real, injected memories.
+
+    Real, direct motivation: extract_holdings_fabrication_features()
+    only ever examined the ONE affected turn a capture was made for --
+    a real, current blind spot, confirmed directly by checking both
+    existing real captures for a holdings note on any OTHER turn
+    (found none this time, but the blind spot is real regardless: a
+    capture made for a completely different check, e.g.
+    tool_argument_echo, could easily contain a holdings-note issue on
+    some other turn that nothing currently looks at). This function
+    closes that blind spot at the smallest possible unit -- one turn --
+    so it can be applied to every turn in a bundle, or reused directly
+    by a future, real production integration on live content, without
+    needing a full multi-turn bundle or a specific "affected" turn
+    concept at all.
+
+    Reuses every piece of already-proven infrastructure unchanged:
+    reconstruct_rounds() for content, _HOLDINGS_NOTE_TICKER_RE and
+    _HOLDINGS_NOTE_NUMBERS_RE for extraction, REAL_DK_STOCK_HOLDINGS
+    for the real holding check, check_numeric_grounding() (the
+    hardened, word-boundary-aware version) for number grounding.
+
+    Returns a real, structured dict:
+      - "has_holdings_note": bool -- whether this turn's real content
+        contains a holdings-correction note at all
+      - "note_ticker", "note_text", "note_numbers": None/empty if no
+        note is present
+      - "is_real_holding": None if no note; else whether note_ticker
+        is a genuine, real DK holding
+      - "numbers_grounded": the real check_numeric_grounding() result,
+        None if no note or no numbers in it
+      - "has_integrity_issue": real, convenience boolean -- True only
+        when a note IS present and it's EITHER for a non-real holding
+        OR has any ungrounded number. False (not None) when no note is
+        present at all -- a turn with no note has nothing to flag.
+    """
+    rounds = reconstruct_rounds(turn["raw_events"])
+    full_content = "".join(r["content"] for r in rounds)
+
+    match = _HOLDINGS_NOTE_TICKER_RE.search(full_content)
+    if not match:
+        return {
+            "has_holdings_note": False, "note_ticker": None, "note_text": None,
+            "note_numbers": [], "is_real_holding": None, "numbers_grounded": None,
+            "has_integrity_issue": False,
+        }
+
+    note_ticker = match.group(1)
+    note_start = full_content.find("(Note:")
+    note_text = full_content[note_start:].strip() if note_start != -1 else \
+        full_content[max(0, match.start() - 40):match.end() + 80].strip()
+    note_numbers = _HOLDINGS_NOTE_NUMBERS_RE.findall(note_text)
+
+    memories = []
+    for event in turn["raw_events"]:
+        if event.get("type") == "memories_used":
+            memories.extend(m.get("text", "") for m in event.get("data", []))
+    memories_text = " ".join(memories)
+
+    is_real_holding = note_ticker in REAL_DK_STOCK_HOLDINGS
+    numbers_grounded = check_numeric_grounding(note_numbers, memories_text)
+
+    return {
+        "has_holdings_note": True,
+        "note_ticker": note_ticker,
+        "note_text": note_text,
+        "note_numbers": note_numbers,
+        "is_real_holding": is_real_holding,
+        "numbers_grounded": numbers_grounded,
+        "has_integrity_issue": (not is_real_holding) or (not numbers_grounded["all_grounded"]),
+    }
+
+
+def check_bundle_holdings_integrity(bundle: dict) -> list:
+    """Real, added 2026-08-30 (Per-turn holdings integrity check):
+    applies check_turn_holdings_integrity() to EVERY turn in a real
+    captured bundle, not just bundle["affected_turn_index"] -- plugs
+    directly into the existing capture pipeline (any bundle from
+    capture_raw_events_for_check(), for ANY target_check) to give
+    immediate, real visibility into holdings-note fabrication across
+    every turn a capture happened to record, regardless of what check
+    the capture was originally made for.
+
+    Returns a real list of {"turn_index", **check_turn_holdings_
+    integrity()'s own result}, one entry per real turn, in order --
+    real, deliberate design: includes every turn, not just ones with
+    an issue, so a caller can see the full real picture (or filter for
+    has_integrity_issue themselves) rather than lose track of which
+    turns were even checked.
+    """
+    results = []
+    for turn in bundle["turns_captured"]:
+        check = check_turn_holdings_integrity(turn)
+        check["turn_index"] = turn["turn_index"]
+        results.append(check)
+    return results
+
+
+
+
 
 
 
