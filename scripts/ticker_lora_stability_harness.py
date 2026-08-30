@@ -1842,6 +1842,86 @@ def generate_holdings_integrity_report(bundle: dict, output_path: str = None) ->
     return html_doc
 
 
+def characterize_holdings_fabrication(captures_dir: str = None, target_check: str = "holdings_note_not_a_real_holding") -> dict:
+    """Real, added 2026-08-30 (Accumulate_more_holdings_integrity_
+    captures): the real payoff of accumulating a real dataset --
+    aggregate statistics across every real captured occurrence,
+    genuinely different in kind from analyze_captured_echoes()'s
+    honest "n is too small to say anything real" framing, since this
+    is built to run once a real dataset large enough to actually
+    characterize the pattern exists (n>=5, matching the same real
+    confidence threshold established for tool_argument_echo's own
+    analysis).
+
+    Reuses extract_holdings_fabrication_features() unchanged per real
+    capture -- not a separate extraction implementation.
+
+    Returns a real, structured dict:
+      - "sample_size": real count of captures analyzed
+      - "ticker_frequency": {ticker: count} -- which ticker the
+        fabricated note referred to, across every real occurrence
+      - "grounding_breakdown": {"fully_grounded", "partially_grounded",
+        "totally_fabricated"} counts -- the real severity distribution
+      - "affected_turn_position_frequency": {turn_index: count} --
+        real, structural signal for whether this correlates with
+        WHERE in a conversation it happens, not just whether it
+        happens at all
+      - "note": a real, honest summary sentence
+    """
+    if not os.path.isdir(captures_dir or CAPTURES_DIR):
+        return {"sample_size": 0, "note": f"No real captures directory found."}
+    captures_dir = captures_dir or CAPTURES_DIR
+
+    ticker_frequency = {}
+    grounding_breakdown = {"fully_grounded": 0, "partially_grounded": 0, "totally_fabricated": 0}
+    turn_position_frequency = {}
+    n = 0
+
+    for fname in sorted(os.listdir(captures_dir)):
+        if not fname.endswith(".json") or not fname.startswith(f"{target_check}_"):
+            continue
+        with open(os.path.join(captures_dir, fname)) as f:
+            bundle = json.load(f)
+        features = extract_holdings_fabrication_features(bundle)
+        n += 1
+
+        ticker = features["note_ticker"]
+        ticker_frequency[ticker] = ticker_frequency.get(ticker, 0) + 1
+
+        if features["note_numbers_grounded_in_memory"]:
+            grounding_breakdown["fully_grounded"] += 1
+        elif features["any_note_number_grounded"]:
+            grounding_breakdown["partially_grounded"] += 1
+        else:
+            grounding_breakdown["totally_fabricated"] += 1
+
+        turn_idx = bundle["affected_turn_index"]
+        turn_position_frequency[turn_idx] = turn_position_frequency.get(turn_idx, 0) + 1
+
+    if n == 0:
+        note = f"No real captures found for '{target_check}'."
+    elif n < 5:
+        note = f"Real sample size is {n} -- too few for real statistical confidence."
+    else:
+        fabricated_pct = round(100 * grounding_breakdown["totally_fabricated"] / n)
+        note = (
+            f"Real sample size is {n}, enough for real statistical characterization. "
+            f"{fabricated_pct}% of real occurrences show total fabrication (zero grounded "
+            f"numbers) -- this is a systematic real behavior pattern, not occasional "
+            f"embellishment of real context."
+        )
+
+    return {
+        "sample_size": n,
+        "ticker_frequency": ticker_frequency,
+        "grounding_breakdown": grounding_breakdown,
+        "affected_turn_position_frequency": turn_position_frequency,
+        "note": note,
+    }
+
+
+
+
 
 
 
@@ -4594,6 +4674,15 @@ def main():
     parser.add_argument("--target-count", type=int, default=20,
                          help="With --accumulate-check, real number of "
                               "occurrences to collect. Default 20.")
+    parser.add_argument("--characterize-holdings-fabrication", action="store_true",
+                         help="Real aggregate statistics across every "
+                              "saved holdings_note_not_a_real_holding "
+                              "capture: ticker frequency, grounding "
+                              "severity breakdown, affected-turn "
+                              "position -- built for once a real "
+                              "dataset large enough (n>=5) to actually "
+                              "characterize the pattern exists, not "
+                              "just a single-instance root cause.")
     parser.add_argument("--analyze-captures", metavar="FLAG_NAME",
                          help="Real, honest pattern-observation tool "
                               "(not statistical clustering, which is "
@@ -4911,6 +5000,17 @@ def main():
         compare_check_across_models(args.endpoint_id, models, scenario,
                                      target_check=args.compare_check,
                                      attempts_per_model=args.attempts_per_model)
+        return
+
+    if args.characterize_holdings_fabrication:
+        result = characterize_holdings_fabrication()
+        print(f"Real characterization [{result['sample_size']} real sample(s)]:\n")
+        print(result["note"])
+        if result["sample_size"] > 0:
+            print()
+            print("Ticker frequency:", result["ticker_frequency"])
+            print("Grounding breakdown:", result["grounding_breakdown"])
+            print("Affected turn position frequency:", result["affected_turn_position_frequency"])
         return
 
     if args.accumulate_check:

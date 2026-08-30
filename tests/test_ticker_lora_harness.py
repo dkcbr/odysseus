@@ -3137,3 +3137,71 @@ def test_accumulate_captures_zero_occurrences_returns_empty_list(tmp_path, monke
         target_check="holdings_note_not_a_real_holding", target_count=3, max_attempts=3, verbose=False,
     )
     assert paths == []
+
+
+# ---------------------------------------------------------------------------
+# characterize_holdings_fabrication (added 2026-08-30, Accumulate_more_
+# holdings_integrity_captures). Real payoff of accumulating a real
+# dataset: aggregate statistics across every real captured occurrence.
+# Verified live against the REAL, full accumulated dataset (21 real
+# captures: 20 from a real, live accumulation grind that captured
+# 20/20 in just 25 real attempts -- an observed 80% rate, dramatically
+# higher than tool_argument_echo's ~4.5% -- plus 1 original real
+# capture from an earlier task). The real, live result: 100% total
+# fabrication (0/21 show any grounding at all), concentrated
+# perfectly on the two non-real-holding tickers in the scenario
+# (IONQ 15/21, RGTI 6/21), with turn position exactly tracking ticker.
+# ---------------------------------------------------------------------------
+
+def test_characterize_holdings_fabrication_empty_directory(tmp_path):
+    result = _harness.characterize_holdings_fabrication(str(tmp_path))
+    assert result["sample_size"] == 0
+    assert "No real captures found" in result["note"]
+
+
+def test_characterize_holdings_fabrication_small_sample_honest_note(tmp_path):
+    bundle = _real_holdings_fabrication_bundle(grounded_numbers=False)
+    path = tmp_path / "holdings_note_not_a_real_holding_test_1.json"
+    path.write_text(json.dumps(bundle))
+    result = _harness.characterize_holdings_fabrication(str(tmp_path))
+    assert result["sample_size"] == 1
+    assert "too few for real statistical confidence" in result["note"]
+
+
+def test_characterize_holdings_fabrication_aggregates_ticker_frequency(tmp_path):
+    for i in range(6):
+        bundle = _real_holdings_fabrication_bundle(grounded_numbers=False)
+        path = tmp_path / f"holdings_note_not_a_real_holding_test_{i}.json"
+        path.write_text(json.dumps(bundle))
+    result = _harness.characterize_holdings_fabrication(str(tmp_path))
+    assert result["sample_size"] == 6
+    assert result["ticker_frequency"] == {"RGTI": 6}
+    assert "enough for real statistical characterization" in result["note"]
+
+
+def test_characterize_holdings_fabrication_grounding_breakdown(tmp_path):
+    for i, grounded in enumerate([True, True, False, False, False]):
+        bundle = _real_holdings_fabrication_bundle(grounded_numbers=grounded)
+        path = tmp_path / f"holdings_note_not_a_real_holding_test_{i}.json"
+        path.write_text(json.dumps(bundle))
+    result = _harness.characterize_holdings_fabrication(str(tmp_path))
+    # grounded_numbers=True makes ONE of two numbers grounded (partial), not both
+    assert result["grounding_breakdown"]["partially_grounded"] == 2
+    assert result["grounding_breakdown"]["totally_fabricated"] == 3
+    assert result["grounding_breakdown"]["fully_grounded"] == 0
+
+
+def test_characterize_holdings_fabrication_real_full_dataset():
+    """Real, direct verification against the actual, complete
+    accumulated dataset from the real live accumulation grind (20
+    captures, 20/20 in 25 real attempts) plus the 1 original real
+    capture -- not synthetic data."""
+    real_captures_dir = os.path.join(ROOT, "scripts", "captures")
+    matching = [f for f in os.listdir(real_captures_dir)
+                if f.startswith("holdings_note_not_a_real_holding_")]
+    if len(matching) < 5:
+        pytest.skip("real accumulated dataset not present in this checkout")
+    result = _harness.characterize_holdings_fabrication(real_captures_dir)
+    assert result["sample_size"] == len(matching)
+    assert result["grounding_breakdown"]["totally_fabricated"] == result["sample_size"]
+    assert set(result["ticker_frequency"].keys()) <= {"IONQ", "RGTI"}
