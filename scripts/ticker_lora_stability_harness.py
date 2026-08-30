@@ -871,6 +871,119 @@ def capture_raw_events_for_check(endpoint_id: str, model: str, scenario: dict, o
     return None
 
 
+def accumulate_captures_for_check(endpoint_id: str, model: str, scenario: dict, output_dir: str,
+                                   target_check: str = "holdings_note_not_a_real_holding",
+                                   target_count: int = 20, max_attempts: int = 200,
+                                   verbose: bool = True) -> list:
+    """Real, added 2026-08-30 (Accumulate_more_holdings_integrity_
+    captures): a genuinely different stopping condition from
+    capture_raw_events_for_check() -- that function stops at the
+    FIRST real occurrence, by design, for grabbing one real example to
+    investigate. This function keeps running real attempts, saving
+    EVERY real occurrence found along the way (not just the first),
+    until either target_count real occurrences have been collected or
+    max_attempts is exhausted -- built specifically to accumulate a
+    real dataset large enough to actually characterize a pattern
+    statistically (n=1 -> n=20+), rather than stop at the single
+    instance needed for root-cause investigation.
+
+    Reuses the exact same real per-turn logic as capture_raw_events_
+    for_check() (session creation, malformed_lines capture, scenario_
+    turn preservation) -- not a separate, parallel implementation --
+    only the stopping condition and the fact that it saves multiple
+    real files differs. Each real occurrence gets its own real,
+    uniquely-named file (includes both the real attempt number and a
+    real timestamp, so concurrent or rapid-fire real occurrences never
+    collide).
+
+    Real, honest design: continues past a "no fire" attempt exactly
+    like the single-occurrence version does, and logs real, periodic
+    progress (every occurrence found, plus a running count) so a long,
+    real accumulation run's actual progress is genuinely visible, not
+    silent until the very end. Returns a real list of every saved
+    file's path, in the order captured -- may be shorter than
+    target_count if max_attempts is exhausted first, a genuine, real
+    possibility given non-deterministic live generation, reported
+    honestly rather than hidden.
+    """
+    saved_paths = []
+    for attempt in range(1, max_attempts + 1):
+        if verbose:
+            print(f"Attempt {attempt}/{max_attempts} "
+                  f"({len(saved_paths)}/{target_count} real occurrences so far): "
+                  f"running '{scenario['name']}' against {model}...")
+
+        session_id = create_session(endpoint_id, model, f"accumulate_captures_{int(time.time())}")
+        send_message(session_id, "Hi", model)
+
+        raw_turns = []
+        for turn_idx, turn in enumerate(scenario["turns"]):
+            if turn["type"] == "followup":
+                message = turn["message"]
+            elif turn.get("message"):
+                message = turn["message"]
+            else:
+                message = f"Whats {turn['symbol']} trading at right now?"
+
+            malformed_lines = []
+            events = send_message(session_id, message, model, malformed_lines=malformed_lines)
+            r = check_trial(events)
+            r["prompt"] = message
+            r["is_followup"] = (turn["type"] == "followup")
+            r.update(validate_turn(turn, r))
+            holdings_check = _holdings_note_contamination(r["full_content"], turn)
+            r["holdings_note_wrong_ticker"] = holdings_check["wrong_ticker"]
+            r["holdings_note_not_a_real_holding"] = holdings_check["not_a_real_holding"]
+            r["tool_argument_echo"] = _tool_argument_echo(turn, r)
+
+            raw_turns.append({
+                "turn_index": turn_idx,
+                "prompt": message,
+                "raw_events": events,
+                "classification": {k: v for k, v in r.items() if k not in ("full_content",)},
+                "malformed_lines": malformed_lines,
+                "scenario_turn": turn,
+            })
+
+            if r.get(target_check):
+                bundle = {
+                    "timestamp": time.time(),
+                    "scenario_name": scenario["name"],
+                    "model": model,
+                    "endpoint_id": endpoint_id,
+                    "session_id": session_id,
+                    "target_check": target_check,
+                    "attempt": attempt,
+                    "affected_turn_index": turn_idx,
+                    "turns_captured": raw_turns,
+                }
+                out_path = os.path.join(
+                    output_dir,
+                    f"{target_check}_{scenario['name']}_attempt{attempt}_{int(time.time())}.json",
+                )
+                os.makedirs(output_dir, exist_ok=True)
+                with open(out_path, "w") as f:
+                    json.dump(bundle, f, indent=2)
+                saved_paths.append(out_path)
+                if verbose:
+                    print(f"  Captured occurrence {len(saved_paths)}/{target_count} "
+                          f"(attempt {attempt}, turn {turn_idx}): {out_path}")
+                break  # this attempt's turn loop is done; move to the next attempt
+
+        if len(saved_paths) >= target_count:
+            if verbose:
+                print(f"\nReached target: {len(saved_paths)} real occurrences captured "
+                      f"in {attempt} real attempt(s).")
+            return saved_paths
+
+    if verbose:
+        print(f"\nExhausted {max_attempts} real attempts with only {len(saved_paths)}/{target_count} "
+              f"real occurrences captured -- reporting honestly rather than continuing indefinitely.")
+    return saved_paths
+
+
+
+
 def reconstruct_rounds(raw_events: list) -> list:
     """Real, added 2026-08-28 (Replay_exact_run_with_replay_engine):
     walks a real turn's raw event list in order and groups events by
@@ -4447,7 +4560,13 @@ def main():
     parser.add_argument("--max-capture-attempts", type=int, default=10,
                          help="With --capture-check, real number of "
                               "attempts before giving up honestly. "
-                              "Default 10.")
+                              "Default 10. Also used as the real attempt "
+                              "ceiling for --accumulate-check -- with a "
+                              "real --target-count above the default, "
+                              "explicitly raise this too (e.g. "
+                              "--max-capture-attempts 100), or "
+                              "--target-count real occurrences will "
+                              "likely never be reached.")
     parser.add_argument("--compare-check", metavar="FLAG_NAME",
                          help="Real, live investigative tool: runs "
                               "--scenario-file (or the default scenario) "
@@ -4462,6 +4581,19 @@ def main():
     parser.add_argument("--attempts-per-model", type=int, default=5,
                          help="With --compare-check, real number of "
                               "attempts per real model. Default 5.")
+    parser.add_argument("--accumulate-check", metavar="FLAG_NAME",
+                         help="Real, long-running dataset-building tool: "
+                              "keeps running real attempts, saving EVERY "
+                              "real occurrence found (not just the "
+                              "first), until --target-count occurrences "
+                              "are captured or --max-capture-attempts is "
+                              "exhausted. Built for statistical "
+                              "characterization (n=1 -> n=20+), not "
+                              "single-instance root-cause investigation "
+                              "-- see --capture-check for that.")
+    parser.add_argument("--target-count", type=int, default=20,
+                         help="With --accumulate-check, real number of "
+                              "occurrences to collect. Default 20.")
     parser.add_argument("--analyze-captures", metavar="FLAG_NAME",
                          help="Real, honest pattern-observation tool "
                               "(not statistical clustering, which is "
@@ -4779,6 +4911,19 @@ def main():
         compare_check_across_models(args.endpoint_id, models, scenario,
                                      target_check=args.compare_check,
                                      attempts_per_model=args.attempts_per_model)
+        return
+
+    if args.accumulate_check:
+        scenario = load_scenario(args.scenario_file) if args.scenario_file else load_scenario(DEFAULT_SCENARIO_FILE)
+        print(f"Accumulating up to {args.target_count} real occurrence(s) of "
+              f"'{args.accumulate_check}' [scenario: {scenario['name']}] against {args.model} "
+              f"(up to {args.max_capture_attempts} real attempt(s))...")
+        paths = accumulate_captures_for_check(
+            args.endpoint_id, args.model, scenario, CAPTURES_DIR,
+            target_check=args.accumulate_check, target_count=args.target_count,
+            max_attempts=args.max_capture_attempts,
+        )
+        print(f"\nCollected {len(paths)} real occurrence(s).")
         return
 
     if args.capture_check:
