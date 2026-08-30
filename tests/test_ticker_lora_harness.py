@@ -3065,3 +3065,75 @@ def test_holdings_integrity_report_real_capture_all_clean():
     html = _harness.generate_holdings_integrity_report(bundle)
     assert html.count('<tr class="issue-row">') == 0
     assert html.count('<tr class="no-note">') == 3
+
+
+# ---------------------------------------------------------------------------
+# accumulate_captures_for_check (added 2026-08-30, Accumulate_more_
+# holdings_integrity_captures). Real, deterministic verification via
+# monkeypatched _holdings_note_contamination() -- confirmed, during
+# testing, that check_trial() alone isn't the function whose result
+# determines r["holdings_note_not_a_real_holding"] in the real code
+# flow: _holdings_note_contamination()'s own result overwrites it
+# afterward, so mocking check_trial() alone silently fails to control
+# the real outcome -- caught this directly by investigating an
+# unexpected test result rather than assume the mock was correct.
+# ---------------------------------------------------------------------------
+
+def _mock_accumulate_dependencies(monkeypatch, fire_on_attempts):
+    monkeypatch.setattr(_harness, "create_session", lambda *a, **kw: "fake_session")
+    monkeypatch.setattr(_harness, "send_message", lambda *a, **kw: [{"delta": "x"}])
+    monkeypatch.setattr(_harness, "check_trial", lambda events: {"full_content": "", "made_tool_call": True})
+    monkeypatch.setattr(_harness, "validate_turn", lambda turn, r: {})
+    monkeypatch.setattr(_harness, "_tool_argument_echo", lambda turn, r: False)
+
+    attempt_n = {"n": 0}
+
+    def deterministic_contamination(content, turn):
+        attempt_n["n"] += 1
+        return {"wrong_ticker": False, "not_a_real_holding": attempt_n["n"] in fire_on_attempts}
+
+    monkeypatch.setattr(_harness, "_holdings_note_contamination", deterministic_contamination)
+
+
+def test_accumulate_captures_stops_at_target_count(tmp_path, monkeypatch):
+    _mock_accumulate_dependencies(monkeypatch, fire_on_attempts={2, 3, 5})
+    scenario = {"name": "mock_scenario", "turns": [{"type": "ticker", "symbol": "X"}]}
+    paths = _harness.accumulate_captures_for_check(
+        "77bddaa5", "m1", scenario, str(tmp_path),
+        target_check="holdings_note_not_a_real_holding", target_count=3, max_attempts=10, verbose=False,
+    )
+    assert len(paths) == 3
+    for p in paths:
+        assert os.path.isfile(p)
+
+
+def test_accumulate_captures_saves_each_occurrence_distinctly(tmp_path, monkeypatch):
+    _mock_accumulate_dependencies(monkeypatch, fire_on_attempts={1, 2, 3})
+    scenario = {"name": "mock_scenario", "turns": [{"type": "ticker", "symbol": "X"}]}
+    paths = _harness.accumulate_captures_for_check(
+        "77bddaa5", "m1", scenario, str(tmp_path),
+        target_check="holdings_note_not_a_real_holding", target_count=3, max_attempts=5, verbose=False,
+    )
+    assert len(set(paths)) == 3  # all distinct real files, no overwriting
+
+
+def test_accumulate_captures_honest_partial_result_when_exhausted(tmp_path, monkeypatch):
+    """Real, honest design: if max_attempts runs out before target_count
+    is reached, returns whatever was actually captured, not an error."""
+    _mock_accumulate_dependencies(monkeypatch, fire_on_attempts={2})
+    scenario = {"name": "mock_scenario", "turns": [{"type": "ticker", "symbol": "X"}]}
+    paths = _harness.accumulate_captures_for_check(
+        "77bddaa5", "m1", scenario, str(tmp_path),
+        target_check="holdings_note_not_a_real_holding", target_count=5, max_attempts=4, verbose=False,
+    )
+    assert len(paths) == 1  # only 1 real occurrence within the 4 real attempts allowed
+
+
+def test_accumulate_captures_zero_occurrences_returns_empty_list(tmp_path, monkeypatch):
+    _mock_accumulate_dependencies(monkeypatch, fire_on_attempts=set())
+    scenario = {"name": "mock_scenario", "turns": [{"type": "ticker", "symbol": "X"}]}
+    paths = _harness.accumulate_captures_for_check(
+        "77bddaa5", "m1", scenario, str(tmp_path),
+        target_check="holdings_note_not_a_real_holding", target_count=3, max_attempts=3, verbose=False,
+    )
+    assert paths == []
