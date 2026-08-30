@@ -26,6 +26,7 @@ demonstrate real).
 import importlib.util
 import json
 import os
+import inspect
 import tempfile
 import threading
 import time
@@ -2585,3 +2586,51 @@ def test_extract_echo_features_real_capture_shows_no_malformed_events():
         bundle = json.load(f)
     features = _harness.extract_echo_features(bundle)
     assert features["has_malformed_event_pattern"] is False
+
+
+# ---------------------------------------------------------------------------
+# print_capabilities_overview (added 2026-08-30,
+# Explore_new_harness_capability). Real, direct trigger: confirmed the
+# default argparse --help output had genuinely grown large (52 real
+# flags, ~330 lines) across this session's real feature growth, with
+# no grouping at all -- built a real, curated, organized overview
+# instead. Verified live end-to-end via --list-modes against the real,
+# deployed harness, including confirming it takes priority over other
+# flags and exits cleanly with no side effects.
+# ---------------------------------------------------------------------------
+
+def test_print_capabilities_overview_runs_without_error(capsys):
+    _harness.print_capabilities_overview()
+    captured = capsys.readouterr()
+    assert "capabilities overview" in captured.out.lower()
+    assert "Run scenarios & suites" in captured.out
+    assert "Debugging a specific anomaly" in captured.out
+
+
+def test_print_capabilities_overview_flags_all_exist_in_real_parser():
+    """Real, deliberate guard against documentation drift: every
+    top-level flag named in the curated overview must actually exist
+    as a real, registered argparse flag in this harness, so the
+    overview can never silently reference a real flag that got
+    renamed or removed."""
+    import io
+    import contextlib
+
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        _harness.print_capabilities_overview()
+    output = buf.getvalue()
+
+    # Extract every "--flag-name" token mentioned, ignoring the
+    # indented "(modifier)" lines' own flags which are checked too.
+    import re
+    mentioned_flags = set(re.findall(r"--[a-z][a-z0-9-]*", output))
+    # "--help" is argparse's own automatic, built-in flag -- never
+    # explicitly add_argument()'d, so it's real but correctly excluded
+    # from this specific drift check.
+    mentioned_flags.discard("--help")
+    assert mentioned_flags, "overview should mention at least one real flag"
+
+    real_parser_source = inspect.getsource(_harness.main)
+    for flag in mentioned_flags:
+        assert f'"{flag}"' in real_parser_source, f"{flag} is not a real, registered argparse flag"

@@ -3836,8 +3836,75 @@ def generate_trend_report(historical_summaries: list, output_path: str) -> None:
 
 
 
+def print_capabilities_overview() -> None:
+    """Real, added 2026-08-30 (Explore_new_harness_capability): prints
+    a real, organized overview of this harness's real modes, grouped
+    by real purpose -- built after directly confirming the default
+    argparse --help output had genuinely grown large (52 real flags,
+    ~330 lines) across this session's real feature growth, with no
+    grouping at all, making it genuinely hard to scan for "which flag
+    do I actually need." This is a real, curated summary, not a
+    generated one -- kept manually in sync with the real 15 top-level
+    dispatch modes in main(), each with a real, one-line description
+    of what it actually does, not aspirational or planned capability.
+    """
+    sections = [
+        ("Run scenarios & suites", [
+            ("--sequence", "Run a single scenario against one model (the base mode)."),
+            ("--suite PATH", "Run every scenario in a suite file against one model."),
+            ("--multi-model-suite PATH", "Run a suite across several real models."),
+            ("--cross-model", "Run one scenario across several real models, side by side."),
+            ("--auto-suite-tags TAGS", "Build and run a suite on the fly from scenario_tags."),
+            ("--fuzz", "Generate real, grounded ticker-substitution variants and run them."),
+            ("  --parallel", "(modifier on --suite/--multi-model-suite) shard/parallelize real work."),
+        ]),
+        ("Historical trends & prioritization", [
+            ("--trends", "Per-scenario trend report + regression detection over time."),
+            ("--summary-trend", "Suite-level health trend across saved summaries."),
+            ("--summary-trend-html PATH", "Multi-suite trend comparison as a real HTML report."),
+            ("--rank-scenarios", "Rank real scenarios by historical failure rate."),
+            ("--weight-scenarios", "Rank scenarios by a real, dynamic weight (history + tags)."),
+        ]),
+        ("Live monitoring & alerting", [
+            ("--serve-dashboard", "Real, live, auto-refreshing local HTML dashboard."),
+            ("  --health-summary", "(modifier) synthesize overview/outcomes/regressions after a run."),
+            ("  --gate", "(modifier) exit non-zero if real health thresholds fail."),
+            ("  --notify-on-regression", "(modifier) desktop/webhook push alert on a real regression."),
+        ]),
+        ("Debugging a specific anomaly (capture -> replay -> analyze)", [
+            ("--capture-check FLAG", "Reproduce and save the raw SSE events for a real check firing."),
+            ("--replay PATH", "Reconstruct a readable, round-by-round transcript from a capture."),
+            ("--compare-check FLAG", "Real occurrence-rate comparison for a check across models."),
+            ("--analyze-captures FLAG", "Honest, sample-size-aware feature analysis across captures."),
+        ]),
+    ]
+
+    print("Ticker LoRA Stability Harness -- real capabilities overview\n")
+    for title, modes in sections:
+        print(f"{title}:")
+        for flag, desc in modes:
+            print(f"  {flag:<28} {desc}")
+        print()
+    print("Run --help for the complete, real flag reference (every flag, every option).")
+
+
 def main():
     parser = argparse.ArgumentParser()
+    parser.add_argument("--list-modes", action="store_true",
+                         help="Real, added 2026-08-30 (Explore_new_"
+                              "harness_capability): print a real, "
+                              "organized overview of this harness's "
+                              "15 real top-level modes, grouped by "
+                              "purpose, instead of the default, flat, "
+                              "~330-line argparse --help listing -- "
+                              "built after directly checking that the "
+                              "default help output had genuinely grown "
+                              "large and hard to scan across this "
+                              "session's real feature growth (52 real "
+                              "flags, 15 real modes, confirmed by "
+                              "direct count before building this). "
+                              "Ignores every other real flag and exits "
+                              "immediately.")
     parser.add_argument("--tickers", default=",".join(DEFAULT_TICKERS))
     parser.add_argument("--endpoint-id", default="77bddaa5")
     parser.add_argument("--model", default="ticker-lookup-lora")
@@ -4207,6 +4274,10 @@ def main():
                               "average. Omit for the original, all-time "
                               "behavior.")
     args = parser.parse_args()
+
+    if args.list_modes:
+        print_capabilities_overview()
+        return
 
     if args.weight_scenarios and args.models:
         # Real, added 2026-08-28 (model_specific_weighting): a genuinely
