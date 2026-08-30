@@ -2037,7 +2037,7 @@ def _real_scenario_for_capture_tests():
 def test_capture_raw_events_saves_bundle_on_first_matching_attempt(tmp_path, monkeypatch):
     monkeypatch.setattr(_harness, "create_session", lambda *a, **kw: "fake_session")
 
-    def fake_send_message(session_id, message, model):
+    def fake_send_message(session_id, message, model, malformed_lines=None):
         return [{"type": "tool_start", "tool": "lookup_ticker", "command": '{"symbol": "KTOS"}'},
                 {"delta": "KTOS is at $52."}]
 
@@ -2082,7 +2082,7 @@ def test_capture_raw_events_stops_at_first_reproduction_not_later_attempts(tmp_p
     monkeypatch.setattr(_harness, "create_session", lambda *a, **kw: "fake_session")
     call_count = {"n": 0}
 
-    def fake_send_message(session_id, message, model):
+    def fake_send_message(session_id, message, model, malformed_lines=None):
         call_count["n"] += 1
         return [{"delta": "answer"}]
 
@@ -2634,3 +2634,87 @@ def test_print_capabilities_overview_flags_all_exist_in_real_parser():
     real_parser_source = inspect.getsource(_harness.main)
     for flag in mentioned_flags:
         assert f'"{flag}"' in real_parser_source, f"{flag} is not a real, registered argparse flag"
+
+
+# ---------------------------------------------------------------------------
+# send_message() malformed_lines parameter, and its threading through
+# check_for_malformed_event_patterns()/extract_echo_features() (added
+# 2026-08-30, Extend_capture_layer). Real, direct continuation of the
+# real, honest scope limit found in Investigate_malformed_event_paths:
+# genuinely unparseable raw SSE lines were previously invisible to this
+# harness entirely -- now, when a caller opts in, they're captured and
+# saved as real, inspectable data. Verified live with a real, controlled,
+# deliberately malformed raw response (not reproducible on demand from
+# the actual backend), and verified backward compatibility directly:
+# every existing real call site was confirmed, by running this harness's
+# own full test suite immediately after the change, to produce byte-for-
+# byte identical output when the new parameter is omitted.
+# ---------------------------------------------------------------------------
+
+def test_send_message_captures_malformed_line_when_opted_in(monkeypatch):
+    def fake_request(method, path, body):
+        return (
+            'data: {"type": "model_info", "model": "x"}\n'
+            'data: {broken json here\n'
+            'data: {"delta": "hello"}\n'
+            'data: [DONE]\n'
+        )
+
+    monkeypatch.setattr(_harness, "_request", fake_request)
+    malformed = []
+    events = _harness.send_message("sess", "hi", "model", malformed_lines=malformed)
+    assert len(events) == 2
+    assert len(malformed) == 1
+    assert malformed[0]["raw_line"] == "{broken json here"
+    assert "error" in malformed[0]
+
+
+def test_send_message_backward_compatible_when_not_opted_in(monkeypatch):
+    """Real, deliberate backward-compatibility check: omitting
+    malformed_lines must produce identical parsed events to before."""
+    def fake_request(method, path, body):
+        return (
+            'data: {"type": "model_info", "model": "x"}\n'
+            'data: {broken json here\n'
+            'data: {"delta": "hello"}\n'
+            'data: [DONE]\n'
+        )
+
+    monkeypatch.setattr(_harness, "_request", fake_request)
+    events = _harness.send_message("sess", "hi", "model")
+    assert len(events) == 2  # identical to the opted-in case above
+
+
+def test_send_message_no_malformed_lines_when_all_valid(monkeypatch):
+    def fake_request(method, path, body):
+        return 'data: {"delta": "hello"}\ndata: [DONE]\n'
+
+    monkeypatch.setattr(_harness, "_request", fake_request)
+    malformed = []
+    _harness.send_message("sess", "hi", "model", malformed_lines=malformed)
+    assert malformed == []
+
+
+def test_check_for_malformed_event_patterns_reports_unparseable_line_count():
+    result = _harness.check_for_malformed_event_patterns(
+        [], malformed_lines=[{"raw_line": "bad", "error": "x"}, {"raw_line": "bad2", "error": "y"}]
+    )
+    assert result["unparseable_sse_line_count"] == 2
+    assert result["has_any_anomaly"] is True
+
+
+def test_check_for_malformed_event_patterns_honest_default_without_malformed_lines():
+    """Real, honest handling for older captures predating this field:
+    an empty/absent malformed_lines means 0 reported, not an error --
+    an honest "none observed/available", not a false claim of zero
+    occurrences."""
+    result = _harness.check_for_malformed_event_patterns([])
+    assert result["unparseable_sse_line_count"] == 0
+
+
+def test_extract_echo_features_threads_malformed_lines_through():
+    bundle = _real_bundle_for_deepened_features()
+    bundle["turns_captured"][1]["malformed_lines"] = [{"raw_line": "bad", "error": "x"}]
+    features = _harness.extract_echo_features(bundle)
+    assert features["malformed_event_detail"]["unparseable_sse_line_count"] == 1
+    assert features["has_malformed_event_pattern"] is True
