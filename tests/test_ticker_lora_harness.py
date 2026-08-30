@@ -2973,3 +2973,95 @@ def test_check_bundle_holdings_integrity_real_capture_matches_known_finding():
     assert len(issues) == 1
     assert issues[0]["turn_index"] == 4
     assert issues[0]["note_ticker"] == "RGTI"
+
+
+# ---------------------------------------------------------------------------
+# generate_holdings_integrity_report (added 2026-08-30, Per-Turn
+# Integrity Dashboard). Genuinely new territory: existing reports show
+# real flag_counts, but never the specific, structured per-turn detail
+# a holdings-integrity check produces. Reuses check_bundle_holdings_
+# integrity() and the established dark-terminal CSS unchanged. Verified
+# live against BOTH real captured bundles.
+# ---------------------------------------------------------------------------
+
+def test_holdings_integrity_report_renders_real_issue():
+    bundle = {
+        "scenario_name": "test", "model": "m1", "affected_turn_index": 0,
+        "turns_captured": [
+            _turn_with_holdings_note("RGTI", ["5", "3"], "User has a pending buy order for 1 RGTI share."),
+        ],
+    }
+    html = _harness.generate_holdings_integrity_report(bundle)
+    assert html.startswith("<!DOCTYPE html>")
+    assert '<tr class="issue-row">' in html
+    assert "RGTI" in html
+    assert "NOT a real holding" in html
+    assert ">fabricated<" in html
+
+
+def test_holdings_integrity_report_renders_clean_no_note_turns():
+    bundle = {
+        "scenario_name": "test", "model": "m1", "affected_turn_index": 0,
+        "turns_captured": [_clean_turn_no_note(), _clean_turn_no_note(turn_index=1)],
+    }
+    html = _harness.generate_holdings_integrity_report(bundle)
+    assert html.count('<tr class="no-note">') == 2
+    assert '<tr class="issue-row">' not in html
+
+
+def test_holdings_integrity_report_shows_correct_issue_count():
+    bundle = {
+        "scenario_name": "test", "model": "m1", "affected_turn_index": 0,
+        "turns_captured": [
+            _clean_turn_no_note(),
+            _turn_with_holdings_note("RGTI", ["5", "3"], "no relevant memory", turn_index=1),
+        ],
+    }
+    html = _harness.generate_holdings_integrity_report(bundle)
+    assert "<div class=\"stat-value\" style=\"color:var(--bad)\">1</div>" in html
+
+
+def test_holdings_integrity_report_writes_file_when_path_given(tmp_path):
+    bundle = {
+        "scenario_name": "test", "model": "m1", "affected_turn_index": 0,
+        "turns_captured": [_clean_turn_no_note()],
+    }
+    out_path = str(tmp_path / "report.html")
+    returned = _harness.generate_holdings_integrity_report(bundle, output_path=out_path)
+    assert os.path.isfile(out_path)
+    with open(out_path) as f:
+        written = f.read()
+    assert written == returned
+
+
+def test_holdings_integrity_report_real_capture_with_issue():
+    """Real, direct verification against the actual captured bundle
+    with a known real issue."""
+    real_capture_path = os.path.join(
+        ROOT, "scripts", "captures",
+        "holdings_note_not_a_real_holding_mixed_holdings_default_1788124453.json"
+    )
+    if not os.path.isfile(real_capture_path):
+        pytest.skip("real capture file not present in this checkout")
+    with open(real_capture_path) as f:
+        bundle = json.load(f)
+    html = _harness.generate_holdings_integrity_report(bundle)
+    assert html.count('<tr class="issue-row">') == 1
+    assert "RGTI" in html
+
+
+def test_holdings_integrity_report_real_capture_all_clean():
+    """Real, direct verification against the actual, unrelated
+    tool_argument_echo capture, which has no holdings notes at all --
+    must render zero issue rows, not a false positive."""
+    real_capture_path = os.path.join(
+        ROOT, "scripts", "captures",
+        "tool_argument_echo_prompt_shape_variety_1788042034.json"
+    )
+    if not os.path.isfile(real_capture_path):
+        pytest.skip("real capture file not present in this checkout")
+    with open(real_capture_path) as f:
+        bundle = json.load(f)
+    html = _harness.generate_holdings_integrity_report(bundle)
+    assert html.count('<tr class="issue-row">') == 0
+    assert html.count('<tr class="no-note">') == 3
