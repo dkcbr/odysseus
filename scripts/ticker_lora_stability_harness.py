@@ -1382,6 +1382,85 @@ def analyze_captured_echoes(captures_dir: str = None, target_check: str = "tool_
     return {"sample_size": n, "features": features, "note": note}
 
 
+_HOLDINGS_NOTE_NUMBERS_RE = re.compile(r"\d+")
+
+
+def extract_holdings_fabrication_features(bundle: dict) -> dict:
+    """Real, added 2026-08-30 (fresh investigation thread, shifted to
+    per DK's own explicit choice after the malformed-SSE-line work
+    completed): a genuinely different real anomaly from
+    tool_argument_echo, discovered by applying this harness's own
+    already-general-purpose toolkit (capture_raw_events_for_check(),
+    render_replay_transcript(), check_for_malformed_event_patterns() --
+    all reused completely unchanged, zero modification needed) to a
+    check that had never been deeply investigated:
+    holdings_note_not_a_real_holding.
+
+    The real, captured instance this was built against shows something
+    more concerning than a stale argument: the model's holdings-
+    correction note claims specific, concrete financial details --
+    "the stored reference document lists 5 shares of RGTI, with a
+    separate, unexecuted pending buy order for 3 more" -- that do not
+    match the real, injected memory for that turn at all ("User has a
+    pending buy order for 1 RGTI share."). This isn't misapplied real
+    context (like tool_argument_echo's stale-but-real prior symbol);
+    it's specific numbers with no real grounding in what was actually
+    injected -- a genuine confabulation risk for a real financial
+    assistant, worth investigating as its own real thread.
+
+    Extracts, from a single real captured bundle's affected turn:
+      - "note_text": the real, extracted holdings-note sentence
+      - "note_ticker": the real ticker the note referred to
+      - "note_numbers": real numbers mentioned in the note (e.g.
+        share counts) as a list of strings
+      - "memories_used_count"
+      - "note_numbers_grounded_in_memory": real, honest check -- does
+        EVERY number in the note appear somewhere in the real,
+        injected memory text? False if even one doesn't (the specific,
+        concrete signal this function exists to surface)
+      - "any_note_number_grounded": real, weaker check -- does AT
+        LEAST ONE number in the note appear in real memory text
+        (distinguishes "totally fabricated" from "partially real,
+        partially embellished")
+    """
+    affected_idx = bundle["affected_turn_index"]
+    affected_turn = bundle["turns_captured"][affected_idx]
+    rounds = reconstruct_rounds(affected_turn["raw_events"])
+    full_content = "".join(r["content"] for r in rounds)
+
+    match = _HOLDINGS_NOTE_TICKER_RE.search(full_content)
+    note_ticker = match.group(1) if match else None
+
+    # Real, honest extraction: the note is the parenthetical sentence
+    # starting at "(Note:" if present, else the whole real matched
+    # sentence's real surrounding context -- best-effort, not claiming
+    # perfect sentence boundaries for free-form real model text.
+    note_start = full_content.find("(Note:")
+    note_text = full_content[note_start:].strip() if note_start != -1 else (
+        full_content[max(0, match.start() - 40):match.end() + 80].strip() if match else None
+    )
+    note_numbers = _HOLDINGS_NOTE_NUMBERS_RE.findall(note_text) if note_text else []
+
+    memories = []
+    for event in affected_turn["raw_events"]:
+        if event.get("type") == "memories_used":
+            memories.extend(m.get("text", "") for m in event.get("data", []))
+    memories_text = " ".join(memories)
+
+    numbers_grounded = [n in memories_text for n in note_numbers]
+
+    return {
+        "note_text": note_text,
+        "note_ticker": note_ticker,
+        "note_numbers": note_numbers,
+        "memories_used_count": len(memories),
+        "note_numbers_grounded_in_memory": bool(note_numbers) and all(numbers_grounded),
+        "any_note_number_grounded": any(numbers_grounded),
+    }
+
+
+
+
 
 
 
