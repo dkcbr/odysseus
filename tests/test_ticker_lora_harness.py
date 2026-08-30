@@ -584,10 +584,15 @@ def test_holdings_note_contamination_detects_wrong_ticker():
 
 def test_holdings_note_contamination_detects_not_a_real_holding():
     """Real, distinct data-accuracy signal: the ticker matches this turn,
-    but isn't in DK's real, known holdings at all."""
-    turn = {"type": "ticker", "symbol": "IONQ"}
-    content = ("IONQ is trading at $38. (Note: the stored reference document "
-               "lists 10 shares of IONQ. more text)")
+    but isn't in DK's real, known holdings at all. Uses RKLB, confirmed
+    still 0 shares (fully exited) in the real, current, authoritative
+    portfolio_context.md as of 2026-08-30 -- unlike IONQ/RGTI, which
+    were removed from this example after being confirmed as real,
+    current holdings (see REAL_DK_STOCK_HOLDINGS's own real,
+    corrected-2026-08-30 comment)."""
+    turn = {"type": "ticker", "symbol": "RKLB"}
+    content = ("RKLB is trading at $38. (Note: the stored reference document "
+               "lists 10 shares of RKLB. more text)")
     result = _harness._holdings_note_contamination(content, turn)
     assert result["not_a_real_holding"] is True
     assert result["wrong_ticker"] is False
@@ -2909,10 +2914,15 @@ def test_check_turn_holdings_integrity_no_note_is_clean():
 
 
 def test_check_turn_holdings_integrity_flags_non_real_holding():
-    turn = _turn_with_holdings_note("RGTI", ["5", "3"], "User has a pending buy order for 1 RGTI share.")
+    # Real, corrected 2026-08-30: uses RKLB, confirmed still 0 shares
+    # (fully exited) in the real, current portfolio_context.md --
+    # RGTI is now a genuine, real holding, no longer a valid example
+    # of "not a real holding" (see REAL_DK_STOCK_HOLDINGS's own
+    # corrected-2026-08-30 comment).
+    turn = _turn_with_holdings_note("RKLB", ["5", "3"], "User has a pending buy order for 1 RKLB share.")
     result = _harness.check_turn_holdings_integrity(turn)
     assert result["has_holdings_note"] is True
-    assert result["is_real_holding"] is False  # RGTI is not in REAL_DK_STOCK_HOLDINGS
+    assert result["is_real_holding"] is False  # RKLB is not in REAL_DK_STOCK_HOLDINGS
     assert result["has_integrity_issue"] is True
 
 
@@ -2985,16 +2995,20 @@ def test_check_bundle_holdings_integrity_real_capture_matches_known_finding():
 # ---------------------------------------------------------------------------
 
 def test_holdings_integrity_report_renders_real_issue():
+    # Real, corrected 2026-08-30: uses RKLB, confirmed still 0 shares
+    # (fully exited) in the real, current portfolio_context.md -- RGTI
+    # is now a genuine, real holding (see REAL_DK_STOCK_HOLDINGS's own
+    # corrected-2026-08-30 comment).
     bundle = {
         "scenario_name": "test", "model": "m1", "affected_turn_index": 0,
         "turns_captured": [
-            _turn_with_holdings_note("RGTI", ["5", "3"], "User has a pending buy order for 1 RGTI share."),
+            _turn_with_holdings_note("RKLB", ["5", "3"], "User has a pending buy order for 1 RKLB share."),
         ],
     }
     html = _harness.generate_holdings_integrity_report(bundle)
     assert html.startswith("<!DOCTYPE html>")
     assert '<tr class="issue-row">' in html
-    assert "RGTI" in html
+    assert "RKLB" in html
     assert "NOT a real holding" in html
     assert ">fabricated<" in html
 
@@ -3176,7 +3190,13 @@ def test_characterize_holdings_fabrication_aggregates_ticker_frequency(tmp_path)
     result = _harness.characterize_holdings_fabrication(str(tmp_path))
     assert result["sample_size"] == 6
     assert result["ticker_frequency"] == {"RGTI": 6}
-    assert "enough for real statistical characterization" in result["note"]
+    # Real, corrected 2026-08-30: RGTI is now a genuine, real holding
+    # (see REAL_DK_STOCK_HOLDINGS's own corrected comment), so the
+    # real, honest note correctly reports 0% real fabrication for
+    # is_real_holding, separately from the memory-grounding signal.
+    assert result["is_real_holding_breakdown"] == {"real_holding": 6, "not_real_holding": 0}
+    assert "0% of real occurrences referred to a ticker that genuinely is NOT" in result["note"]
+    assert "NOT the same thing as fabrication" in result["note"]
 
 
 def test_characterize_holdings_fabrication_grounding_breakdown(tmp_path):
@@ -3195,7 +3215,22 @@ def test_characterize_holdings_fabrication_real_full_dataset():
     """Real, direct verification against the actual, complete
     accumulated dataset from the real live accumulation grind (20
     captures, 20/20 in 25 real attempts) plus the 1 original real
-    capture -- not synthetic data."""
+    capture -- not synthetic data.
+
+    Real, corrected 2026-08-30, same day as the original capture: the
+    real, live-authoritative REAL_DK_STOCK_HOLDINGS was found to be
+    stale (dated userPreferences, July 6) and has been corrected
+    against the real, current, live-reconciled data/portfolio_
+    context.md (August 30). IONQ and RGTI -- the only two tickers in
+    this real dataset -- are now correctly recognized as real,
+    genuine holdings. This test verifies BOTH real signals separately:
+    the corrected is_real_holding_breakdown (now genuinely 0% real
+    fabrication -- confirms the "fabrication" was always a false
+    positive from stale ground truth, not a real model bug) and the
+    still-present grounding_breakdown mismatch (a genuinely different,
+    real, and separately-worth-investigating memory-staleness signal,
+    not fabrication -- see check_turn_holdings_integrity()'s own
+    critical, corrected docstring)."""
     real_captures_dir = os.path.join(ROOT, "scripts", "captures")
     matching = [f for f in os.listdir(real_captures_dir)
                 if f.startswith("holdings_note_not_a_real_holding_")]
@@ -3203,5 +3238,7 @@ def test_characterize_holdings_fabrication_real_full_dataset():
         pytest.skip("real accumulated dataset not present in this checkout")
     result = _harness.characterize_holdings_fabrication(real_captures_dir)
     assert result["sample_size"] == len(matching)
+    assert result["is_real_holding_breakdown"]["not_real_holding"] == 0
+    assert result["is_real_holding_breakdown"]["real_holding"] == result["sample_size"]
     assert result["grounding_breakdown"]["totally_fabricated"] == result["sample_size"]
     assert set(result["ticker_frequency"].keys()) <= {"IONQ", "RGTI"}
