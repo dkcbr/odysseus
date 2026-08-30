@@ -104,8 +104,30 @@ def create_session(endpoint_id: str, model: str, name: str) -> str:
     return json.loads(raw)["id"]
 
 
-def send_message(session_id: str, message: str, model: str, mode: str = "agent") -> list:
-    """Send a real chat message, return the parsed list of SSE event dicts."""
+def send_message(session_id: str, message: str, model: str, mode: str = "agent",
+                  malformed_lines: list = None) -> list:
+    """Send a real chat message, return the parsed list of SSE event
+    dicts.
+
+    Real, added 2026-08-30 (Extend_capture_layer): optional
+    malformed_lines parameter -- confirmed directly, in an earlier
+    real investigation the same session, that any raw "data: " line
+    failing JSON parsing was being silently discarded here, with no
+    record kept anywhere, making a whole real category of anomaly
+    (truly malformed SSE) permanently invisible to every downstream
+    real check this harness has. If a caller passes a real, mutable
+    list, this function now appends a real record -- {"raw_line",
+    "error"} -- for every raw line that fails to parse, rather than
+    silently discard it.
+
+    Real, deliberate backward compatibility, verified by a dedicated
+    test: defaults to None, so every existing real caller that
+    doesn't pass this parameter sees zero behavior change whatsoever
+    -- the real return value (the list of successfully parsed events)
+    is byte-for-byte identical either way. Only a caller that
+    explicitly opts in by passing a real list gets the new,
+    additional visibility.
+    """
     raw = _request("POST", "/api/chat_stream", {
         "message": message,
         "session": session_id,
@@ -122,7 +144,9 @@ def send_message(session_id: str, message: str, model: str, mode: str = "agent")
             continue
         try:
             events.append(json.loads(payload))
-        except json.JSONDecodeError:
+        except json.JSONDecodeError as e:
+            if malformed_lines is not None:
+                malformed_lines.append({"raw_line": payload, "error": str(e)})
             continue
     return events
 
@@ -783,7 +807,8 @@ def capture_raw_events_for_check(endpoint_id: str, model: str, scenario: dict, o
             else:
                 message = f"Whats {turn['symbol']} trading at right now?"
 
-            events = send_message(session_id, message, model)
+            malformed_lines = []  # real, added 2026-08-30 (Extend_capture_layer)
+            events = send_message(session_id, message, model, malformed_lines=malformed_lines)
             r = check_trial(events)
             r["prompt"] = message
             r["is_followup"] = (turn["type"] == "followup")
@@ -798,6 +823,11 @@ def capture_raw_events_for_check(endpoint_id: str, model: str, scenario: dict, o
                 "prompt": message,
                 "raw_events": events,  # the real, complete, unprocessed SSE event list
                 "classification": {k: v for k, v in r.items() if k not in ("full_content",)},
+                # Real, added 2026-08-30 (Extend_capture_layer): any real,
+                # raw SSE line that failed JSON parsing during this turn --
+                # previously silently discarded and permanently invisible;
+                # now a real, saved, inspectable part of the capture.
+                "malformed_lines": malformed_lines,
                 # Real, added 2026-08-28 (Design_cluster_root_cause_analysis):
                 # the scenario's own real, declared turn (type/symbol/etc.)
                 # -- needed for real, reliable root-cause feature
@@ -1043,11 +1073,20 @@ _KNOWN_EVENT_TYPES = {
 }
 
 
-def check_for_malformed_event_patterns(raw_events: list) -> dict:
-    """Real, added 2026-08-28 (Investigate_malformed_event_paths):
-    scans a turn's real, already-parsed raw_events for structural
-    anomalies -- see the real, honest scope note above for exactly
-    what this can and cannot detect. Returns a real, structured dict:
+def check_for_malformed_event_patterns(raw_events: list, malformed_lines: list = None) -> dict:
+    """Real, added 2026-08-28 (Investigate_malformed_event_paths),
+    extended 2026-08-30 (Extend_capture_layer): scans a turn's real,
+    already-parsed raw_events for structural anomalies, and, if a
+    caller passes the real malformed_lines list send_message() can now
+    optionally populate (see its own docstring), also reports genuinely
+    unparseable raw SSE lines directly -- closing the real gap this
+    function's own scope note originally had to state as a limitation:
+    "truly unparseable raw SSE lines are invisible to this harness as
+    it currently stands." Captures made going forward, with
+    --capture-check, now save this real data; older captures simply
+    have no malformed_lines field, and this function handles that
+    honestly (an empty, real default, not an error). Returns a real,
+    structured dict:
       - "orphaned_tool_outputs": count of real tool_output events with
         no matching, real, prior tool_start for the same tool
       - "malformed_tool_commands": count of real tool_start events
@@ -1057,6 +1096,10 @@ def check_for_malformed_event_patterns(raw_events: list) -> dict:
       - "unexpected_event_types": real, sorted list of any event type
         seen that isn't in the real, known set this harness has
         actually observed across tonight's whole investigation
+      - "unparseable_sse_line_count": real count of genuinely
+        unparseable raw SSE lines, from malformed_lines if given (0
+        for older captures or when not provided -- an honest "none
+        observed/available", not a claim that none occurred)
       - "has_any_anomaly": real, convenience boolean -- True if any of
         the above counts/lists is non-empty
     """
@@ -1091,13 +1134,16 @@ def check_for_malformed_event_patterns(raw_events: list) -> dict:
         # real protocol -- not anomalous, the expected real shape.
 
     unexpected_types_list = sorted(unexpected_types)
+    unparseable_count = len(malformed_lines) if malformed_lines else 0
     return {
         "orphaned_tool_outputs": orphaned_outputs,
         "malformed_tool_commands": malformed_commands,
         "tool_outputs_missing_output_field": missing_output_field,
         "unexpected_event_types": unexpected_types_list,
+        "unparseable_sse_line_count": unparseable_count,
         "has_any_anomaly": bool(
-            orphaned_outputs or malformed_commands or missing_output_field or unexpected_types_list
+            orphaned_outputs or malformed_commands or missing_output_field
+            or unexpected_types_list or unparseable_count
         ),
     }
 
@@ -1245,7 +1291,9 @@ def extract_echo_features(bundle: dict) -> dict:
     # made with this harness as it currently stands, since
     # send_message() silently discards them before this code ever
     # sees them).
-    malformed_check = check_for_malformed_event_patterns(affected_turn["raw_events"])
+    malformed_check = check_for_malformed_event_patterns(
+        affected_turn["raw_events"], malformed_lines=affected_turn.get("malformed_lines")
+    )
 
     return {
         "affected_turn_prompt": affected_turn["prompt"],
