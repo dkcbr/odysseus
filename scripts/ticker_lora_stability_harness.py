@@ -1385,6 +1385,49 @@ def analyze_captured_echoes(captures_dir: str = None, target_check: str = "tool_
 _HOLDINGS_NOTE_NUMBERS_RE = re.compile(r"\d+")
 
 
+def check_numeric_grounding(claim_numbers: list, known_facts_text: str) -> dict:
+    """Real, added 2026-08-30 (Design_holdings_safety_checks): a
+    general-purpose, hardened grounding check -- given a list of real
+    numbers a piece of generated content claims, determines whether
+    each one genuinely appears in a real, trusted source of ground
+    truth (e.g. concatenated real tool outputs and real injected
+    memories), rather than merely resembling a substring of something
+    unrelated there.
+
+    Real, important correctness fix made while building this,
+    confirmed directly before trusting this function for anything: a
+    naive `number in known_facts_text` substring check is genuinely
+    unreliable for this purpose -- a claimed "15" would incorrectly
+    register as grounded if known_facts_text contains "$115.00"
+    anywhere, since "15" is a real substring of "115". Uses real,
+    word-boundary-aware regex matching (\\b...\\b) instead, so a claimed
+    number only counts as grounded when it appears as its own real,
+    complete number in the known facts, not as a fragment of a larger
+    one.
+
+    Returns {"grounded": [...], "ungrounded": [...], "all_grounded":
+    bool, "any_grounded": bool} -- designed to be callable directly on
+    live, real-time content (a list of numbers plus a known-facts
+    string), not requiring a full captured bundle, so this is ready
+    for a future, real production integration if and when that's
+    explicitly decided -- not wired into the live app tonight.
+    """
+    grounded = []
+    ungrounded = []
+    for number in claim_numbers:
+        pattern = r"\b" + re.escape(number) + r"\b"
+        if re.search(pattern, known_facts_text):
+            grounded.append(number)
+        else:
+            ungrounded.append(number)
+    return {
+        "grounded": grounded,
+        "ungrounded": ungrounded,
+        "all_grounded": bool(claim_numbers) and not ungrounded,
+        "any_grounded": bool(grounded),
+    }
+
+
 def extract_holdings_fabrication_features(bundle: dict) -> dict:
     """Real, added 2026-08-30 (fresh investigation thread, shifted to
     per DK's own explicit choice after the malformed-SSE-line work
@@ -1447,15 +1490,22 @@ def extract_holdings_fabrication_features(bundle: dict) -> dict:
             memories.extend(m.get("text", "") for m in event.get("data", []))
     memories_text = " ".join(memories)
 
-    numbers_grounded = [n in memories_text for n in note_numbers]
+    # Real, added 2026-08-30 (Design_holdings_safety_checks): reuses the
+    # real, hardened, word-boundary-aware grounding check rather than
+    # a second, less reliable inline implementation -- fixes a real,
+    # confirmed correctness bug this earlier, naive version had (a
+    # claimed "15" would incorrectly register as grounded if memory
+    # text contained "$115.00" anywhere, since "15" is a real substring
+    # of "115").
+    grounding = check_numeric_grounding(note_numbers, memories_text)
 
     return {
         "note_text": note_text,
         "note_ticker": note_ticker,
         "note_numbers": note_numbers,
         "memories_used_count": len(memories),
-        "note_numbers_grounded_in_memory": bool(note_numbers) and all(numbers_grounded),
-        "any_note_number_grounded": any(numbers_grounded),
+        "note_numbers_grounded_in_memory": grounding["all_grounded"],
+        "any_note_number_grounded": grounding["any_grounded"],
     }
 
 
