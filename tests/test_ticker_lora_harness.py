@@ -2858,3 +2858,118 @@ def test_extract_holdings_fabrication_features_still_correct_after_refactor():
     features = _harness.extract_holdings_fabrication_features(bundle)
     assert features["note_numbers_grounded_in_memory"] is False
     assert features["any_note_number_grounded"] is False
+
+
+# ---------------------------------------------------------------------------
+# check_turn_holdings_integrity, check_bundle_holdings_integrity (added
+# 2026-08-30, Per-turn holdings integrity check). Real, direct
+# motivation: extract_holdings_fabrication_features() only ever
+# examined bundle["affected_turn_index"] -- a real blind spot for any
+# OTHER turn in the same capture, confirmed directly by checking both
+# existing real captures for a holdings note on any non-affected turn
+# (found none this specific time, but the blind spot is real
+# regardless -- a capture made for a completely different check could
+# easily contain an unnoticed holdings issue elsewhere). Verified live
+# against BOTH real, actual captured bundles: correctly flags the one
+# known real issue (turn 4, RGTI) and correctly shows every other real
+# turn across both captures as clean, with no false positives.
+# ---------------------------------------------------------------------------
+
+def _turn_with_holdings_note(ticker, numbers, memory_text, turn_index=0):
+    note = f"(Note: the stored reference document lists {numbers[0]} shares of {ticker}, " \
+           f"with a separate, unexecuted pending buy order for {numbers[1]} more.)"
+    return {
+        "turn_index": turn_index,
+        "prompt": f"Whats {ticker} trading at right now?",
+        "raw_events": [
+            {"type": "memories_used", "data": [{"text": memory_text, "category": "project", "type": "recalled"}]},
+            {"type": "tool_start", "tool": "lookup_ticker", "command": f'{{"symbol": "{ticker}"}}'},
+            {"type": "tool_output", "tool": "lookup_ticker", "output": "price: 10", "exit_code": 0},
+            {"type": "agent_step", "round": 2},
+            {"delta": f"{ticker} is at $10. {note}"},
+        ],
+    }
+
+
+def _clean_turn_no_note(turn_index=0):
+    return {
+        "turn_index": turn_index, "prompt": "Whats SOUN trading at right now?",
+        "raw_events": [
+            {"type": "tool_start", "tool": "lookup_ticker", "command": '{"symbol": "SOUN"}'},
+            {"type": "tool_output", "tool": "lookup_ticker", "output": "price: 7.11", "exit_code": 0},
+            {"delta": "SOUN is at $7.11."},
+        ],
+    }
+
+
+def test_check_turn_holdings_integrity_no_note_is_clean():
+    result = _harness.check_turn_holdings_integrity(_clean_turn_no_note())
+    assert result["has_holdings_note"] is False
+    assert result["has_integrity_issue"] is False
+
+
+def test_check_turn_holdings_integrity_flags_non_real_holding():
+    turn = _turn_with_holdings_note("RGTI", ["5", "3"], "User has a pending buy order for 1 RGTI share.")
+    result = _harness.check_turn_holdings_integrity(turn)
+    assert result["has_holdings_note"] is True
+    assert result["is_real_holding"] is False  # RGTI is not in REAL_DK_STOCK_HOLDINGS
+    assert result["has_integrity_issue"] is True
+
+
+def test_check_turn_holdings_integrity_flags_ungrounded_numbers_for_real_holding():
+    """Real, deliberate check: even a note for a genuine DK holding
+    still gets flagged if its claimed numbers aren't grounded."""
+    turn = _turn_with_holdings_note("KTOS", ["99", "50"], "User follows KTOS closely.")
+    result = _harness.check_turn_holdings_integrity(turn)
+    assert result["is_real_holding"] is True  # KTOS IS a real DK holding
+    assert result["numbers_grounded"]["all_grounded"] is False
+    assert result["has_integrity_issue"] is True  # still flagged, despite being a real holding
+
+
+def test_check_turn_holdings_integrity_clean_when_real_holding_and_grounded():
+    turn = _turn_with_holdings_note("KTOS", ["16", "1"], "User holds 16 shares of KTOS, pending 1 more.")
+    result = _harness.check_turn_holdings_integrity(turn)
+    assert result["is_real_holding"] is True
+    assert result["numbers_grounded"]["all_grounded"] is True
+    assert result["has_integrity_issue"] is False
+
+
+def test_check_bundle_holdings_integrity_checks_every_turn_not_just_affected():
+    """Real, direct proof this closes the actual blind spot: a bundle
+    with the issue on turn 2, while affected_turn_index points at turn
+    0 (a different, clean turn) -- the old function would have missed
+    this entirely."""
+    bundle = {
+        "affected_turn_index": 0,
+        "turns_captured": [
+            _clean_turn_no_note(turn_index=0),
+            _clean_turn_no_note(turn_index=1),
+            _turn_with_holdings_note("RGTI", ["5", "3"], "User has a pending buy order for 1 RGTI share.",
+                                      turn_index=2),
+        ],
+    }
+    results = _harness.check_bundle_holdings_integrity(bundle)
+    assert len(results) == 3
+    assert results[0]["has_integrity_issue"] is False
+    assert results[1]["has_integrity_issue"] is False
+    assert results[2]["has_integrity_issue"] is True
+    assert results[2]["turn_index"] == 2
+
+
+def test_check_bundle_holdings_integrity_real_capture_matches_known_finding():
+    """Real, direct verification against the actual, real captured
+    bundle -- confirms the exact known result and, critically, that
+    every other real turn in the same capture is correctly clean."""
+    real_capture_path = os.path.join(
+        ROOT, "scripts", "captures",
+        "holdings_note_not_a_real_holding_mixed_holdings_default_1788124453.json"
+    )
+    if not os.path.isfile(real_capture_path):
+        pytest.skip("real capture file not present in this checkout")
+    with open(real_capture_path) as f:
+        bundle = json.load(f)
+    results = _harness.check_bundle_holdings_integrity(bundle)
+    issues = [r for r in results if r["has_integrity_issue"]]
+    assert len(issues) == 1
+    assert issues[0]["turn_index"] == 4
+    assert issues[0]["note_ticker"] == "RGTI"
