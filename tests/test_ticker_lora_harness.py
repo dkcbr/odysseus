@@ -2718,3 +2718,86 @@ def test_extract_echo_features_threads_malformed_lines_through():
     features = _harness.extract_echo_features(bundle)
     assert features["malformed_event_detail"]["unparseable_sse_line_count"] == 1
     assert features["has_malformed_event_pattern"] is True
+
+
+# ---------------------------------------------------------------------------
+# extract_holdings_fabrication_features (added 2026-08-30, a fresh
+# investigation thread -- shifted here per explicit choice after the
+# malformed-SSE-line capture-layer work completed). Discovered by
+# applying this harness's already-general-purpose toolkit
+# (capture_raw_events_for_check(), render_replay_transcript(),
+# check_for_malformed_event_patterns() -- ALL reused completely
+# unchanged, zero modification needed) to a real check
+# (holdings_note_not_a_real_holding) that had never been deeply
+# investigated. Real, captured, and more concerning than
+# tool_argument_echo: the model's holdings note claimed specific
+# financial numbers ("5 shares... pending buy order for 3 more") with
+# ZERO grounding in the real, injected memory ("a pending buy order
+# for 1 RGTI share") -- confirmed programmatically, not just by eye.
+# ---------------------------------------------------------------------------
+
+def _real_holdings_fabrication_bundle(grounded_numbers=False):
+    memory_text = "User has a pending buy order for 5 RGTI shares." if grounded_numbers \
+        else "User has a pending buy order for 1 RGTI share."
+    return {
+        "affected_turn_index": 0,
+        "turns_captured": [{
+            "turn_index": 0,
+            "prompt": "Whats RGTI trading at right now?",
+            "raw_events": [
+                {"type": "memories_used", "data": [{"text": memory_text, "category": "project", "type": "recalled"}]},
+                {"type": "tool_start", "tool": "lookup_ticker", "command": '{"symbol": "RGTI"}'},
+                {"type": "tool_output", "tool": "lookup_ticker", "output": "price: 15.59", "exit_code": 0},
+                {"type": "agent_step", "round": 2},
+                {"delta": "RGTI is at $15.59. (Note: the stored reference document lists 5 shares "
+                          "of RGTI, with a separate, unexecuted pending buy order for 3 more.)"},
+            ],
+            "classification": {},
+        }],
+    }
+
+
+def test_extract_holdings_fabrication_features_detects_ungrounded_numbers():
+    bundle = _real_holdings_fabrication_bundle(grounded_numbers=False)
+    features = _harness.extract_holdings_fabrication_features(bundle)
+    assert features["note_ticker"] == "RGTI"
+    assert set(features["note_numbers"]) == {"5", "3"}
+    assert features["note_numbers_grounded_in_memory"] is False
+    assert features["any_note_number_grounded"] is False
+
+
+def test_extract_holdings_fabrication_features_detects_partially_grounded_numbers():
+    """Real, deliberate check: one of the note's two numbers (5)
+    genuinely appears in real memory text this time, distinguishing
+    'partially real' from 'totally fabricated'."""
+    bundle = _real_holdings_fabrication_bundle(grounded_numbers=True)
+    features = _harness.extract_holdings_fabrication_features(bundle)
+    assert features["any_note_number_grounded"] is True
+    assert features["note_numbers_grounded_in_memory"] is False  # "3" still isn't grounded
+
+
+def test_extract_holdings_fabrication_features_extracts_note_text():
+    bundle = _real_holdings_fabrication_bundle()
+    features = _harness.extract_holdings_fabrication_features(bundle)
+    assert features["note_text"].startswith("(Note:")
+    assert "5 shares" in features["note_text"]
+
+
+def test_extract_holdings_fabrication_features_real_capture_confirms_total_fabrication():
+    """Real, direct verification against the actual, real captured
+    bundle from this fresh investigation thread -- not synthetic
+    data. Programmatically confirms what was found by direct
+    inspection: zero grounding for either number in the note."""
+    real_capture_path = os.path.join(
+        ROOT, "scripts", "captures",
+        "holdings_note_not_a_real_holding_mixed_holdings_default_1788124453.json"
+    )
+    if not os.path.isfile(real_capture_path):
+        pytest.skip("real capture file not present in this checkout")
+    with open(real_capture_path) as f:
+        bundle = json.load(f)
+    features = _harness.extract_holdings_fabrication_features(bundle)
+    assert features["note_ticker"] == "RGTI"
+    assert set(features["note_numbers"]) == {"5", "3"}
+    assert features["note_numbers_grounded_in_memory"] is False
+    assert features["any_note_number_grounded"] is False
