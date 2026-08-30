@@ -1615,6 +1615,122 @@ def check_bundle_holdings_integrity(bundle: dict) -> list:
     return results
 
 
+def generate_holdings_integrity_report(bundle: dict, output_path: str = None) -> str:
+    """Real, added 2026-08-30 (Per-Turn Integrity Dashboard): renders
+    check_bundle_holdings_integrity()'s real, per-turn results as a
+    self-contained HTML report -- genuinely new territory, not a
+    duplicate of anything already built: the existing health/dashboard
+    reports show real flag_counts (how many turns showed a given
+    real flag) but never render the SPECIFIC, structured detail a
+    holdings-integrity check produces per turn (which ticker, which
+    numbers, grounded vs not, real holding vs not).
+
+    Reuses the exact same dark-terminal CSS palette and card layout
+    established across every other report in this harness, for
+    visual consistency, and check_bundle_holdings_integrity()
+    completely unchanged for the real data -- this function only
+    renders it.
+
+    Real, deliberate: a turn with no holdings note renders as a
+    neutral, dim "no note" row, not hidden entirely -- a per-turn
+    timeline should show what was actually checked, not just the
+    turns with something to flag, so a reader can see the real, full
+    picture (matching the same "include everything, not just
+    issues" design already used in check_bundle_holdings_integrity()
+    itself).
+    """
+    import html as _html
+
+    def esc(s):
+        return _html.escape(str(s)) if s is not None else ""
+
+    results = check_bundle_holdings_integrity(bundle)
+
+    rows = ""
+    for r in results:
+        if not r["has_holdings_note"]:
+            rows += (
+                f'<tr class="no-note"><td>{r["turn_index"]}</td>'
+                f'<td class="dim">no holdings note</td><td class="dim">—</td>'
+                f'<td class="dim">—</td><td class="dim">—</td></tr>'
+            )
+            continue
+        real_holding_badge = (
+            '<span class="badge badge-ok">real holding</span>' if r["is_real_holding"]
+            else '<span class="badge badge-bad">NOT a real holding</span>'
+        )
+        grounded = r["numbers_grounded"]
+        if grounded["all_grounded"]:
+            numbers_badge = '<span class="badge badge-ok">all grounded</span>'
+        elif grounded["any_grounded"]:
+            numbers_badge = '<span class="badge badge-warn">partially grounded</span>'
+        else:
+            numbers_badge = '<span class="badge badge-bad">fabricated</span>'
+        row_class = "issue-row" if r["has_integrity_issue"] else "clean-row"
+        rows += (
+            f'<tr class="{row_class}"><td>{r["turn_index"]}</td>'
+            f'<td class="mono">{esc(r["note_ticker"])}</td>'
+            f'<td>{real_holding_badge}</td>'
+            f'<td>{numbers_badge}</td>'
+            f'<td class="mono note-cell">{esc(r["note_text"])}</td></tr>'
+        )
+
+    issue_count = sum(1 for r in results if r["has_integrity_issue"])
+    note_count = sum(1 for r in results if r["has_holdings_note"])
+
+    style_block = """
+  :root { --bg: #0D1117; --panel: #161B22; --border: #30363D; --text: #E6EDF3; --dim: #8B949E; --accent: #58A6FF; --ok: #3FB950; --bad: #F85149; --warn: #D29922; }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font-family: -apple-system, "Segoe UI", Helvetica, Arial, sans-serif; padding: 32px 24px 64px; }
+  .mono { font-family: "SF Mono", "JetBrains Mono", ui-monospace, Menlo, Consolas, monospace; }
+  .dim { color: var(--dim); }
+  header { max-width: 1000px; margin: 0 auto 24px; }
+  h1 { font-size: 22px; margin: 0 0 4px; letter-spacing: -0.02em; }
+  h2 { font-size: 13px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--dim); margin: 0 0 12px; }
+  .subtitle { color: var(--dim); font-size: 13px; }
+  .stats { display: flex; gap: 14px; max-width: 1000px; margin: 0 auto 20px; }
+  .stat-card { flex: 1; background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 14px 16px; }
+  .stat-value { font-size: 24px; font-weight: 600; }
+  .table-card { max-width: 1000px; margin: 0 auto; background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 20px; overflow-x: auto; }
+  table { width: 100%; border-collapse: collapse; font-size: 12px; }
+  th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--border); vertical-align: top; }
+  th { color: var(--dim); text-transform: uppercase; font-size: 10px; letter-spacing: 0.05em; }
+  .note-cell { max-width: 400px; white-space: normal; color: var(--dim); font-size: 11px; }
+  .issue-row { background: rgba(248, 81, 73, 0.08); }
+  .badge { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 11px; font-weight: 500; }
+  .badge-ok { background: rgba(63, 185, 80, 0.15); color: var(--ok); }
+  .badge-bad { background: rgba(248, 81, 73, 0.15); color: var(--bad); }
+  .badge-warn { background: rgba(210, 153, 34, 0.15); color: var(--warn); }
+"""
+
+    html_doc = (
+        '<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">'
+        '<title>Holdings Integrity Report</title><style>' + style_block + '</style></head><body>'
+        '<header><h1>Per-Turn Holdings Integrity</h1>'
+        f'<div class="subtitle">{esc(bundle.get("scenario_name", "?"))} / {esc(bundle.get("model", "?"))}'
+        f' &middot; {len(results)} turn(s) checked</div></header>'
+        '<div class="stats">'
+        f'<div class="stat-card"><div class="stat-value">{len(results)}</div><div class="dim">turns checked</div></div>'
+        f'<div class="stat-card"><div class="stat-value">{note_count}</div><div class="dim">holdings notes seen</div></div>'
+        f'<div class="stat-card" style="border-color:{"var(--bad)" if issue_count else "var(--border)"}">'
+        f'<div class="stat-value" style="color:{"var(--bad)" if issue_count else "var(--text)"}">{issue_count}</div>'
+        f'<div class="dim">integrity issue(s)</div></div>'
+        '</div>'
+        '<div class="table-card"><h2>Per-turn detail</h2>'
+        '<table><thead><tr><th>Turn</th><th>Ticker</th><th>Real Holding?</th>'
+        '<th>Numbers</th><th>Note Text</th></tr></thead>'
+        f'<tbody>{rows}</tbody></table></div>'
+        '</body></html>'
+    )
+
+    if output_path:
+        with open(output_path, "w") as f:
+            f.write(html_doc)
+    return html_doc
+
+
+
+
 
 
 
@@ -4300,6 +4416,20 @@ def main():
                               "scripts/captures/) -- reconstructs and "
                               "prints a clear, round-by-round transcript "
                               "from the real, raw saved event data.")
+    parser.add_argument("--holdings-integrity-report", metavar="PATH",
+                         help="Real, saved capture bundle -- renders a "
+                              "real, self-contained HTML report of "
+                              "check_bundle_holdings_integrity()'s own "
+                              "per-turn detail (grounded vs fabricated "
+                              "numbers, real vs non-real holdings) for "
+                              "every turn in that capture, regardless "
+                              "of which check the capture was "
+                              "originally made for. Requires "
+                              "--output-html.")
+    parser.add_argument("--output-html", metavar="PATH",
+                         help="With --holdings-integrity-report, real "
+                              "file path to write the generated HTML "
+                              "report to.")
     parser.add_argument("--capture-check", metavar="FLAG_NAME",
                          help="Real, live debugging tool: repeatedly "
                               "runs --scenario-file (or the default "
@@ -4615,6 +4745,16 @@ def main():
         with open(args.replay) as f:
             bundle = json.load(f)
         print(render_replay_transcript(bundle))
+        return
+
+    if args.holdings_integrity_report:
+        with open(args.holdings_integrity_report) as f:
+            bundle = json.load(f)
+        if not args.output_html:
+            print("--holdings-integrity-report requires --output-html PATH.")
+            return
+        generate_holdings_integrity_report(bundle, output_path=args.output_html)
+        print(f"Holdings integrity report written to {args.output_html}")
         return
 
     if args.analyze_captures:
