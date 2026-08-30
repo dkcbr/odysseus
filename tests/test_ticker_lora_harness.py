@@ -2801,3 +2801,60 @@ def test_extract_holdings_fabrication_features_real_capture_confirms_total_fabri
     assert set(features["note_numbers"]) == {"5", "3"}
     assert features["note_numbers_grounded_in_memory"] is False
     assert features["any_note_number_grounded"] is False
+
+
+# ---------------------------------------------------------------------------
+# check_numeric_grounding (added 2026-08-30, Design_holdings_safety_
+# checks). Real, general-purpose, hardened version of the grounding
+# logic extract_holdings_fabrication_features() used inline -- built
+# after directly confirming a real correctness bug in the original,
+# naive substring-based check (a claimed "15" would incorrectly
+# register as grounded if the known facts contained "$115.00" anywhere,
+# since "15" is a real substring of "115"). extract_holdings_
+# fabrication_features() now calls this hardened function instead of
+# duplicating the logic; verified the real captured finding is
+# unchanged after this refactor (the collision case didn't happen to
+# occur in that specific real capture, but the check is now reliable
+# rather than coincidentally correct).
+# ---------------------------------------------------------------------------
+
+def test_check_numeric_grounding_rejects_substring_false_positive():
+    """The real bug this function was built to fix, tested directly."""
+    result = _harness.check_numeric_grounding(["15"], "SOUN is trading at 115.00 today")
+    assert result["ungrounded"] == ["15"]
+    assert result["any_grounded"] is False
+
+
+def test_check_numeric_grounding_detects_genuine_grounding():
+    result = _harness.check_numeric_grounding(["15"], "The price is 15 dollars")
+    assert result["grounded"] == ["15"]
+    assert result["all_grounded"] is True
+
+
+def test_check_numeric_grounding_mixed_grounded_and_ungrounded():
+    result = _harness.check_numeric_grounding(["5", "99"], "User has 5 shares total")
+    assert result["grounded"] == ["5"]
+    assert result["ungrounded"] == ["99"]
+    assert result["all_grounded"] is False
+    assert result["any_grounded"] is True
+
+
+def test_check_numeric_grounding_empty_claim_numbers():
+    result = _harness.check_numeric_grounding([], "some real facts text")
+    assert result["all_grounded"] is False  # honest: no claim to ground at all
+    assert result["any_grounded"] is False
+
+
+def test_check_numeric_grounding_all_grounded():
+    result = _harness.check_numeric_grounding(["1", "2"], "quantities are 1 and 2")
+    assert result["all_grounded"] is True
+
+
+def test_extract_holdings_fabrication_features_still_correct_after_refactor():
+    """Real, direct regression check: the refactor to reuse
+    check_numeric_grounding() must not change extract_holdings_
+    fabrication_features()'s own real, already-tested behavior."""
+    bundle = _real_holdings_fabrication_bundle(grounded_numbers=False)
+    features = _harness.extract_holdings_fabrication_features(bundle)
+    assert features["note_numbers_grounded_in_memory"] is False
+    assert features["any_note_number_grounded"] is False
