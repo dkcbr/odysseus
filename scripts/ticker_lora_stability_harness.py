@@ -1021,6 +1021,87 @@ def compare_check_across_models(endpoint_id: str, models: list, scenario: dict,
     return results
 
 
+# Real, deliberate, honest scope note (Investigate_malformed_event_paths):
+# send_message() -- the real function every capture in this harness goes
+# through -- silently discards any real SSE line that fails JSON parsing
+# (see its own "except json.JSONDecodeError: continue"). This means no
+# capture made with the harness as it currently stands can ever answer
+# "did a truly unparseable SSE line occur" -- that information is gone
+# before check_trial()/extract_echo_features() ever see it. What CAN be
+# checked, honestly, from real, already-captured data: whether events
+# that DID parse successfully are structurally anomalous in some other
+# real, observable way (a tool_output with no matching tool_start, a
+# tool_start whose own command field isn't valid JSON, a tool_output
+# missing its real output field, or a real event type never otherwise
+# seen in this harness's own investigation tonight). This is a real,
+# narrower question than "were there malformed SSE lines" -- and this
+# scope limitation is stated directly rather than silently answered as
+# if it were the same question.
+_KNOWN_EVENT_TYPES = {
+    "memories_used", "model_info", "tool_start", "tool_output",
+    "agent_step", "metrics", "message_saved", "tool_calls",
+}
+
+
+def check_for_malformed_event_patterns(raw_events: list) -> dict:
+    """Real, added 2026-08-28 (Investigate_malformed_event_paths):
+    scans a turn's real, already-parsed raw_events for structural
+    anomalies -- see the real, honest scope note above for exactly
+    what this can and cannot detect. Returns a real, structured dict:
+      - "orphaned_tool_outputs": count of real tool_output events with
+        no matching, real, prior tool_start for the same tool
+      - "malformed_tool_commands": count of real tool_start events
+        whose own command field isn't valid JSON
+      - "tool_outputs_missing_output_field": count of real tool_output
+        events with no real "output" key at all
+      - "unexpected_event_types": real, sorted list of any event type
+        seen that isn't in the real, known set this harness has
+        actually observed across tonight's whole investigation
+      - "has_any_anomaly": real, convenience boolean -- True if any of
+        the above counts/lists is non-empty
+    """
+    started_tools = []  # real tools with a tool_start seen, in order,
+                          # consumed left-to-right as matching outputs arrive
+    orphaned_outputs = 0
+    malformed_commands = 0
+    missing_output_field = 0
+    unexpected_types = set()
+
+    for event in raw_events:
+        etype = event.get("type")
+        if etype == "tool_start":
+            started_tools.append(event.get("tool"))
+            command = event.get("command")
+            if command is not None:
+                try:
+                    json.loads(command)
+                except (json.JSONDecodeError, TypeError):
+                    malformed_commands += 1
+        elif etype == "tool_output":
+            tool = event.get("tool")
+            if tool in started_tools:
+                started_tools.remove(tool)
+            else:
+                orphaned_outputs += 1
+            if "output" not in event:
+                missing_output_field += 1
+        elif etype is not None and etype not in _KNOWN_EVENT_TYPES:
+            unexpected_types.add(etype)
+        # "delta" events genuinely have no "type" field at all in this
+        # real protocol -- not anomalous, the expected real shape.
+
+    unexpected_types_list = sorted(unexpected_types)
+    return {
+        "orphaned_tool_outputs": orphaned_outputs,
+        "malformed_tool_commands": malformed_commands,
+        "tool_outputs_missing_output_field": missing_output_field,
+        "unexpected_event_types": unexpected_types_list,
+        "has_any_anomaly": bool(
+            orphaned_outputs or malformed_commands or missing_output_field or unexpected_types_list
+        ),
+    }
+
+
 def extract_echo_features(bundle: dict) -> dict:
     """Real, added 2026-08-28 (Design_cluster_root_cause_analysis),
     deepened 2026-08-28 (Analyze_captured_echoes): extracts real,
@@ -1155,6 +1236,17 @@ def extract_echo_features(bundle: dict) -> dict:
     memories_mention_correct_symbol = bool(correct_symbol) and correct_symbol.lower() in memories_text
     memories_mention_stale_symbol = bool(stale_symbol) and stale_symbol.lower() in memories_text
 
+    # Real, added 2026-08-28 (Investigate_malformed_event_paths): checks
+    # the affected turn's own real events for structural anomalies
+    # among those that DID parse successfully -- see
+    # check_for_malformed_event_patterns()'s own docstring for the
+    # real, honest scope note on what this can and cannot detect
+    # (truly unparseable raw SSE lines are invisible to any capture
+    # made with this harness as it currently stands, since
+    # send_message() silently discards them before this code ever
+    # sees them).
+    malformed_check = check_for_malformed_event_patterns(affected_turn["raw_events"])
+
     return {
         "affected_turn_prompt": affected_turn["prompt"],
         "has_custom_message": has_custom_message,
@@ -1171,6 +1263,8 @@ def extract_echo_features(bundle: dict) -> dict:
         "memories_mention_correct_symbol": memories_mention_correct_symbol,
         "memories_mention_stale_symbol": memories_mention_stale_symbol,
         "preceding_turn_content_preview": preceding_turn_content_preview,
+        "has_malformed_event_pattern": malformed_check["has_any_anomaly"],
+        "malformed_event_detail": malformed_check,
     }
 
 
@@ -1216,12 +1310,22 @@ def analyze_captured_echoes(captures_dir: str = None, target_check: str = "tool_
             1 for f in features
             if f["memories_mention_correct_symbol"] and f["memories_mention_stale_symbol"]
         )
+        # Real, added 2026-08-28 (Investigate_malformed_event_paths): a
+        # third, real, distinct signal -- how many real occurrences
+        # showed a structural event anomaly (see
+        # check_for_malformed_event_patterns()'s own honest scope note
+        # for exactly what this can and cannot detect).
+        malformed_count = sum(1 for f in features if f["has_malformed_event_pattern"])
         note = (
             f"Real sample size is {n} -- too few for real statistical confidence. "
             f"Observed pattern so far: {matching}/{n} real occurrence(s) had a stale argument "
             f"matching the immediately preceding turn's own real symbol; {both_mentioned}/{n} "
-            f"had real, injected memories mentioning BOTH the correct and stale symbol together. "
-            f"Worth watching as more real captures accumulate, not yet a confirmed pattern."
+            f"had real, injected memories mentioning BOTH the correct and stale symbol together; "
+            f"{malformed_count}/{n} showed a structural event anomaly (of the kind detectable "
+            f"from already-parsed events -- see check_for_malformed_event_patterns()'s own "
+            f"scope note; truly unparseable raw SSE lines are invisible to this harness as it "
+            f"currently stands). Worth watching as more real captures accumulate, not yet a "
+            f"confirmed pattern."
         )
     else:
         matching = sum(1 for f in features if f["stale_argument_matches_preceding_turn"])

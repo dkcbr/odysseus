@@ -2480,3 +2480,108 @@ def test_analyze_captured_echoes_note_includes_memory_overlap_signal(tmp_path):
     path.write_text(json.dumps(bundle))
     result = _harness.analyze_captured_echoes(str(tmp_path))
     assert "1/1 had real, injected memories mentioning BOTH" in result["note"]
+
+
+# ---------------------------------------------------------------------------
+# check_for_malformed_event_patterns (added 2026-08-28,
+# Investigate_malformed_event_paths). Real, honest scope note carried
+# into these tests: send_message() silently discards any raw SSE line
+# that fails JSON parsing before this harness ever sees it -- no capture
+# made with this harness can detect truly unparseable SSE lines, only
+# structural anomalies among events that DID parse successfully.
+# Verified live against the REAL, actual captured bundle -- confirmed a
+# genuinely clean, honest negative result: no structural anomalies in
+# any turn, including the affected one, ruling out (at this level of
+# observation) any correlation between malformed event delivery and the
+# real tool_argument_echo occurrence.
+# ---------------------------------------------------------------------------
+
+def test_check_for_malformed_event_patterns_clean_events():
+    events = [
+        {"type": "tool_start", "tool": "lookup_ticker", "command": '{"symbol": "KTOS"}'},
+        {"type": "tool_output", "tool": "lookup_ticker", "output": "price: 52", "exit_code": 0},
+        {"delta": "KTOS is at $52."},
+    ]
+    result = _harness.check_for_malformed_event_patterns(events)
+    assert result["has_any_anomaly"] is False
+    assert result["orphaned_tool_outputs"] == 0
+    assert result["malformed_tool_commands"] == 0
+    assert result["tool_outputs_missing_output_field"] == 0
+    assert result["unexpected_event_types"] == []
+
+
+def test_check_for_malformed_event_patterns_detects_orphaned_tool_output():
+    events = [
+        {"type": "tool_output", "tool": "lookup_ticker", "output": "price: 52", "exit_code": 0},
+    ]
+    result = _harness.check_for_malformed_event_patterns(events)
+    assert result["orphaned_tool_outputs"] == 1
+    assert result["has_any_anomaly"] is True
+
+
+def test_check_for_malformed_event_patterns_detects_malformed_command():
+    events = [
+        {"type": "tool_start", "tool": "lookup_ticker", "command": "{not valid json"},
+    ]
+    result = _harness.check_for_malformed_event_patterns(events)
+    assert result["malformed_tool_commands"] == 1
+    assert result["has_any_anomaly"] is True
+
+
+def test_check_for_malformed_event_patterns_detects_missing_output_field():
+    events = [
+        {"type": "tool_start", "tool": "lookup_ticker", "command": '{"symbol": "KTOS"}'},
+        {"type": "tool_output", "tool": "lookup_ticker", "exit_code": 0},  # no "output" key
+    ]
+    result = _harness.check_for_malformed_event_patterns(events)
+    assert result["tool_outputs_missing_output_field"] == 1
+    assert result["has_any_anomaly"] is True
+
+
+def test_check_for_malformed_event_patterns_detects_unexpected_event_type():
+    events = [{"type": "some_never_before_seen_event_type"}]
+    result = _harness.check_for_malformed_event_patterns(events)
+    assert result["unexpected_event_types"] == ["some_never_before_seen_event_type"]
+    assert result["has_any_anomaly"] is True
+
+
+def test_check_for_malformed_event_patterns_matches_tool_start_and_output_correctly():
+    """Real, deliberate design: a real tool_output correctly consumes
+    its matching real tool_start, even with multiple real calls to the
+    same tool in one turn -- must not falsely flag the second, real,
+    correctly-paired output as orphaned."""
+    events = [
+        {"type": "tool_start", "tool": "lookup_ticker", "command": '{"symbol": "A"}'},
+        {"type": "tool_output", "tool": "lookup_ticker", "output": "a", "exit_code": 0},
+        {"type": "tool_start", "tool": "lookup_ticker", "command": '{"symbol": "B"}'},
+        {"type": "tool_output", "tool": "lookup_ticker", "output": "b", "exit_code": 0},
+    ]
+    result = _harness.check_for_malformed_event_patterns(events)
+    assert result["orphaned_tool_outputs"] == 0
+
+
+def test_check_for_malformed_event_patterns_empty_events():
+    result = _harness.check_for_malformed_event_patterns([])
+    assert result["has_any_anomaly"] is False
+
+
+def test_extract_echo_features_includes_malformed_event_check():
+    bundle = _real_bundle_for_deepened_features()
+    features = _harness.extract_echo_features(bundle)
+    assert "has_malformed_event_pattern" in features
+    assert "malformed_event_detail" in features
+
+
+def test_extract_echo_features_real_capture_shows_no_malformed_events():
+    """Real, direct verification against the actual, real captured
+    bundle -- confirms the real, honest negative finding: no
+    structural event anomalies correlate with the real
+    tool_argument_echo occurrence."""
+    real_capture_path = os.path.join(ROOT, "scripts", "captures",
+                                      "tool_argument_echo_prompt_shape_variety_1788042034.json")
+    if not os.path.isfile(real_capture_path):
+        pytest.skip("real capture file not present in this checkout")
+    with open(real_capture_path) as f:
+        bundle = json.load(f)
+    features = _harness.extract_echo_features(bundle)
+    assert features["has_malformed_event_pattern"] is False
