@@ -23,6 +23,21 @@
 
 ---
 
+## Diagnostics
+
+Container logs are ephemeral (lost on restart/rebuild). Persistent,
+queryable evidence lives elsewhere:
+
+- **Chat/session data, tool events**: `data/app.db` (SQLite) --
+  `chat_messages.metadata` JSON has a `tool_events` key, scoped by
+  `msg_id` and `session_id`.
+- **Risk Engine output** (`risk_surface` MCP server): real files under
+  the mounted `risk_engine_data/` volume -- `regime.json`,
+  `risk_events.json`, `factors.json`, `suggestions.json`. Query
+  freshness directly via the `get_risk_surface_health` tool, or check
+  `~/jarvis-scripts/risk_surface_staleness_baseline.json` on the host
+  for the real, current per-subsystem staleness/escalation state.
+
 ## Quick Start
 
 > `dev` is the default branch and gets the newest changes first. Use [`main`](https://github.com/odysseus-dev/odysseus/tree/main) if you want the more curated branch.

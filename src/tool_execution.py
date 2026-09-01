@@ -31,6 +31,14 @@ from src.tool_policy import ToolPolicy
 from src.constants import MAX_OUTPUT_CHARS, MAX_READ_CHARS, MAX_DIFF_LINES, DATA_DIR
 from src.tool_utils import _truncate, get_mcp_manager
 
+# TODO(recovery): an uncommitted, 11-line delta touching this file and
+# src/tool_security.py was lost on 2026-08-13 via an accidental
+# `git checkout <branch> -- .`. Confirmed via full git history (all refs,
+# entire file history back to v1.0) that it was never committed anywhere
+# and is not recoverable. No currently-failing test depends on it. If/when
+# reconstruction is needed, implement only what a concrete failing test or
+# spec requires -- do not guess at dispatch/security behavior here.
+
 # Persistent working directory for agent subprocesses.
 # Resolves to <repo_root>/data, which is the bind-mounted volume in Docker
 # (/app/data) and the local data directory for manual installs.
@@ -549,6 +557,307 @@ async def _direct_fallback(
     return None
 
 
+# Real, the index was built by vault_ingest.py running on the HOST, where
+# the vault lives at /home/dk/gdrive/Obsidian. Inside this container, the
+# same content is mounted at /app/vault_data instead -- confirmed directly
+# (2026-08-23) that body_path values from the index do not exist as-is
+# inside the container without this translation.
+_VAULT_INDEX_HOST_ROOT = "/home/dk/gdrive/Obsidian"
+_VAULT_INDEX_CONTAINER_ROOT = "/app/vault_data"
+
+
+def _load_vault_index():
+    """Real, loads the structured vault index built on the host by
+    vault_ingest.py, mounted read-only at /app/vault_index.jsonl (added
+    2026-08-23). Returns an empty list, not an error, if the index isn't
+    present -- callers fall back to the pre-2026-08-23 three-folder scan
+    so this never becomes a hard dependency.
+
+    Translates each record's body_path from the host path (where
+    vault_ingest.py actually ran) to this container's own mount point,
+    since the two are different paths to the same underlying content."""
+    index_path = "/app/vault_index.jsonl"
+    if not os.path.isfile(index_path):
+        return []
+    records = []
+    try:
+        with open(index_path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                bp = record.get("body_path", "")
+                if bp.startswith(_VAULT_INDEX_HOST_ROOT):
+                    record["body_path"] = bp.replace(
+                        _VAULT_INDEX_HOST_ROOT, _VAULT_INDEX_CONTAINER_ROOT, 1
+                    )
+                records.append(record)
+    except OSError:
+        return []
+    return records
+
+
+def search_vault_impl(query: str) -> str:
+    """Real, in-process vault search. No search tool existed for this
+    deployment before 2026-08-19 (confirmed directly, GitHub issue #14,
+    and two real live tests) -- the container had no filesystem access
+    to the real, host Obsidian vault at all.
+
+    Extracted 2026-08-19 into a standalone function so both the real
+    tool dispatch (below) and the deterministic trigger
+    (detect_vault_search_trigger + its real caller in
+    routes/chat_routes.py) share the same real logic, rather than
+    duplicating it.
+
+    Backend swapped 2026-08-23 to use the structured index built by
+    vault_ingest.py/vault_search.py (see
+    knowledge/infrastructure-constraints/operations/never-ingest-generated-directories.md
+    for why a denylist-based ingestion pipeline was built separately from
+    this tool's own, pre-existing allowlist-based scope). The external
+    interface (single query string in, formatted snippet string out) is
+    deliberately unchanged -- this is a backend swap, not a new tool, so
+    existing trigger wiring, schema, and UI expectations keep working
+    without modification.
+    """
+    vault_root = "/app/vault_data"
+    index_records = _load_vault_index()
+    effective_query = query  # real, safe default; only overridden below when a category is actually detected
+
+    if index_records:
+        # Real, structured path: use the index to find candidate files,
+        # optionally narrowed if the query text names one of the real,
+        # actual top-level vault categories directly (e.g. "search my
+        # Portfolio notes for X"). Falls through to a full-index scan if
+        # no category name appears in the query.
+        query_lower = query.lower()
+        known_categories = {r["category"].lower() for r in index_records}
+        matched_category = next(
+            (c for c in known_categories if c != "root" and c in query_lower),
+            None,
+        )
+        # Real, when a category name is detected, strip it (and common
+        # framing words around it) out of the actual search text -- the
+        # raw query otherwise never matches any real file verbatim (e.g.
+        # "search my Portfolio notes for rung" is not a real substring
+        # anywhere, even though "rung" alone genuinely is). Confirmed
+        # directly this was needed: the unmodified query returned zero
+        # matches for a real, valid category-scoped search.
+        effective_query = query
+        if matched_category:
+            for framing_word in (matched_category, "notes", "note", "search", "my", "for", "in"):
+                pattern = re.compile(re.escape(framing_word), re.IGNORECASE)
+                effective_query = pattern.sub(" ", effective_query)
+            effective_query = " ".join(effective_query.split()) or query
+        # Real, preserves the original function's own deliberate choice to
+        # never scan the vault root (confirmed directly: 40+ unrelated
+        # files there would slow every search on an already I/O-slow
+        # mount). Root-level records are only included if the query
+        # explicitly names "root" as a category -- never by default.
+        candidates = [
+            r for r in index_records
+            if r["category"].lower() != "root"
+            and (matched_category is None or r["category"].lower() == matched_category)
+        ]
+        search_dirs = None  # not used on this path
+        all_files = []
+        seen_paths = set()
+        for r in candidates:
+            fpath = r.get("body_path")
+            if not fpath or fpath in seen_paths or not os.path.isfile(fpath):
+                continue
+            seen_paths.add(fpath)
+            try:
+                with open(fpath, "r", encoding="utf-8") as f:
+                    all_files.append((fpath, f.read()))
+            except Exception:
+                continue
+    else:
+        # Real, pre-2026-08-23 fallback: the original three-folder scan,
+        # kept so this tool degrades gracefully rather than breaking if
+        # the index mount or the index file itself is ever unavailable.
+        search_dirs = []
+        for sub in ("Portfolio", "Thesis", "Watchlist"):
+            sub_path = os.path.join(vault_root, sub)
+            if os.path.isdir(sub_path):
+                search_dirs.append(sub_path)
+        all_files = []
+        seen_paths = set()
+        for d in search_dirs:
+            for fname in os.listdir(d):
+                if not fname.endswith(".md"):
+                    continue
+                fpath = os.path.join(d, fname)
+                if fpath in seen_paths or not os.path.isfile(fpath):
+                    continue
+                seen_paths.add(fpath)
+                try:
+                    with open(fpath, "r", encoding="utf-8") as f:
+                        all_files.append((fpath, f.read()))
+                except Exception:
+                    continue
+
+    # Real, added 2026-08-19 after a live test caught this directly:
+    # a natural, verbose query like "the 'Man in the Car Paradox'
+    # chapter from The Psychology of Money" doesn't appear as one
+    # exact, contiguous substring anywhere -- the file has "Man in the
+    # Car Paradox" and "Psychology of Money" as separate phrases. If
+    # the query contains an explicit quoted portion, search for that
+    # first (the real, most likely intended search term); only fall
+    # back to the full, literal query string if no quotes are present
+    # or the quoted portion itself doesn't match anything.
+    quoted = re.findall(r"['\u2018\u2019\"]([^'\u2018\u2019\"]{3,})['\u2018\u2019\"]", query)
+    search_terms = quoted + [effective_query] if quoted else [effective_query]
+
+    for term in search_terms:
+        term_lower = term.lower()
+        matches = []
+        for fpath, text in all_files:
+            if term_lower in text.lower():
+                idx = text.lower().find(term_lower)
+                # Real, widened from the original 200 chars (which cut
+                # snippets off mid-word/mid-sentence, confirmed directly
+                # by a real, live "onlookers picture themse..." example)
+                # to 400, and snapped to real word boundaries rather than
+                # an arbitrary character count, so snippets read cleanly.
+                raw_start = max(0, idx - 400)
+                raw_end = min(len(text), idx + len(term) + 400)
+
+                start = raw_start
+                if raw_start > 0:
+                    space_idx = text.find(" ", raw_start)
+                    if 0 <= space_idx < raw_start + 40:
+                        start = space_idx + 1
+
+                end = raw_end
+                if raw_end < len(text):
+                    space_idx = text.rfind(" ", max(raw_start, raw_end - 40), raw_end)
+                    if space_idx != -1:
+                        end = space_idx
+
+                snippet = text[start:end].strip()
+                prefix = "..." if start > 0 else ""
+                suffix = "..." if end < len(text) else ""
+                rel_path = os.path.relpath(fpath, vault_root)
+                matches.append(f"### {rel_path}\n{prefix}{snippet}{suffix}")
+        if matches:
+            return f"Found {len(matches)} matching file(s) for query '{term}':\n\n" + "\n\n".join(matches[:5])
+
+    return f"No matches found in the vault for '{query}'."
+
+
+# Real, deliberately narrow, conservative trigger set -- added 2026-08-19
+# after confirming directly (live test) that models don't reliably choose
+# to call search_vault on their own, matching the same tool-invocation
+# reliability limitation found repeatedly elsewhere in this engagement.
+# Matches process_correction_command's own pattern in src/memory.py:
+# bypass the model entirely for genuinely unambiguous phrasing, rather
+# than trying to nudge the model into calling the tool more often.
+# Deliberately conservative -- false negatives (missing a real vault
+# query) are far safer than false positives (silently intercepting an
+# unrelated message and answering only from vault content).
+VAULT_SEARCH_TRIGGERS = [
+    re.compile(r"^search (?:my )?(?:vault|notes|obsidian) for (.+)$", re.IGNORECASE),
+    re.compile(r"^what does (?:my )?(?:vault|notes|obsidian) say about (.+?)\??$", re.IGNORECASE),
+    re.compile(r"^find (?:in|from) (?:my )?(?:vault|notes|obsidian)[:,]? (.+)$", re.IGNORECASE),
+]
+
+
+def detect_vault_search_trigger(message: str) -> Optional[str]:
+    """Real, direct, deterministic check: does this message explicitly,
+    unambiguously ask to search the vault? Returns the extracted query
+    string if so, else None. Only matches an explicit vault/notes/
+    Obsidian reference -- does not try to infer general "does the user
+    want vault content" intent from phrasing alone, since that's exactly
+    the kind of judgment call that's proven unreliable to leave to the
+    model tonight, and a wrong guess here would silently intercept an
+    unrelated message."""
+    stripped = message.strip()
+    for pattern in VAULT_SEARCH_TRIGGERS:
+        m = pattern.match(stripped)
+        if m:
+            query = m.group(1).strip().rstrip("?.")
+            if len(query) >= 3:  # real, minimal sanity floor, matches process_correction_command's own length-floor pattern
+                return query
+    return None
+
+
+# Real, deliberately narrow, conservative trigger for the "how many
+# shares of X do I own" class of question -- added 2026-08-19 after
+# confirming directly (repeated live tests) that models frequently
+# either call the wrong real tool (qwen2.5:7b -> lookup_ticker instead
+# of get_portfolio_context) or correctly call the right tool but then
+# mis-synthesize the raw document (the real, earlier "17 shares" bug).
+# This goes one step further than a tool-selection trigger: it answers
+# directly from the already-parsed, confirmed holdings data
+# (src/portfolio_parser.py), bypassing the model's synthesis step
+# entirely for this narrow, high-value, unambiguous case -- not just
+# forcing the right tool call and hoping the model reads the result
+# correctly.
+HOLDINGS_QUERY_TRIGGER = re.compile(
+    r"how many shares (?:of|in) ([a-zA-Z][a-zA-Z0-9.\-]{0,9}) do i (?:own|have)\??$",
+    re.IGNORECASE,
+)
+
+
+def detect_holdings_query(message: str) -> Optional[str]:
+    """Real, direct, deterministic check: does this message
+    unambiguously ask for a specific ticker's share count? Returns the
+    extracted ticker symbol (uppercased) if so, else None. Deliberately
+    narrow -- only the single, canonical 'how many shares of X do I
+    own' phrasing, not general portfolio questions (balance, strategy,
+    trading rules), which still need the full document and remain the
+    model's responsibility via get_portfolio_context."""
+    m = HOLDINGS_QUERY_TRIGGER.search(message.strip())
+    if not m:
+        return None
+    return m.group(1).upper()
+
+
+def answer_holdings_query(ticker: str) -> str:
+    """Real, direct, deterministic answer for a holdings query --
+    reads and parses data/portfolio_context.md directly via the
+    already-built, already-tested src/portfolio_parser.py, and states
+    the confirmed share count (plus any pending order) without any
+    model synthesis step at all. This is the real, root-cause fix for
+    the "17 shares" class of bug (a confirmed holding summed with a
+    separate, unexecuted pending order): there is no synthesis step
+    here for a model to get wrong."""
+    import os
+    try:
+        from src.portfolio_parser import parse_portfolio_context
+        path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "portfolio_context.md")
+        with open(path, "r", encoding="utf-8") as f:
+            text = f.read()
+        parsed = parse_portfolio_context(text)
+    except Exception as e:
+        # Real, fixed 2026-08-28 (CodeQL, "Information exposure through an
+        # exception"): the raw exception message used to flow directly into
+        # this chat-facing string. Log the real detail server-side instead,
+        # return a generic message to the caller.
+        logger.exception(f"Failed to read/parse portfolio data for holdings query: {e}")
+        return "Could not read portfolio data to answer this request."
+
+    if ticker not in parsed.confirmed_holdings:
+        pending_buy = parsed.pending_qty_for(ticker, "BUY")
+        if pending_buy:
+            return f"You have no confirmed holding of {ticker}, but there is a separate, unexecuted pending buy order for {pending_buy:g} shares."
+        return f"You don't currently have a confirmed holding of {ticker} in the portfolio data."
+
+    confirmed = parsed.confirmed_holdings[ticker]
+    pending_buy = parsed.pending_qty_for(ticker, "BUY")
+    pending_sell = parsed.pending_qty_for(ticker, "SELL")
+    answer = f"You currently own {confirmed:g} shares of {ticker} (confirmed)."
+    if pending_buy:
+        answer += f" There is also a separate, unexecuted pending buy order for {pending_buy:g} more shares."
+    if pending_sell:
+        answer += f" There is also a separate, unexecuted pending sell order for {pending_sell:g} shares."
+    return answer
+
+
 async def _document_tool_dispatch(
     tool: str,
     content: str,
@@ -613,7 +922,7 @@ async def _execute_tool_block_impl(
     """
     from src.tool_implementations import (
         do_search_chats, do_manage_tasks,
-        do_manage_skills, do_api_call, do_manage_notes,
+        do_manage_skills, do_skill_introspect, do_api_call, do_manage_notes,
         do_manage_calendar,
         do_download_model, do_serve_model, do_list_served_models, do_stop_served_model,
         do_tail_serve_output,
@@ -790,12 +1099,101 @@ async def _execute_tool_block_impl(
         desc = f"{tool}: {first_line}" if first_line else tool
         result = await _document_tool_dispatch(tool, content, session_id, owner) \
             or {"error": f"{tool}: execution failed", "exit_code": 1}
+    elif tool == "create_document_office":
+        desc = "create_document_office"
+        try:
+            import json as _json
+            import os
+            import sys as _sys
+            _sys.path.insert(0, "/app/data/scripts")
+            from create_document import make_docx, make_xlsx, make_pptx, make_pdf
+
+            args = _json.loads(content) if content else {}
+            fmt = args.get("format")
+            filename = args.get("filename", f"document.{fmt}")
+            if not filename.endswith(f".{fmt}"):
+                filename = f"{filename}.{fmt}"
+            out_path = os.path.join("/app/data/uploads", filename)
+
+            if fmt == "docx":
+                path = make_docx(args.get("title", ""), args.get("sections", []), out_path)
+            elif fmt == "xlsx":
+                path = make_xlsx(args.get("rows", []), out_path)
+            elif fmt == "pptx":
+                path = make_pptx(args.get("slides", []), out_path)
+            elif fmt == "pdf":
+                path = make_pdf(args.get("title", ""), args.get("sections", []), out_path)
+            else:
+                raise ValueError(f"unsupported format: {fmt}")
+
+            size = os.path.getsize(path)
+            result = {"stdout": f"Created {path} ({size} bytes)", "stderr": "", "exit_code": 0}
+        except Exception as e:
+            result = {"error": f"create_document_office: {e}", "exit_code": 1}
+    elif tool == "get_portfolio_context":
+        desc = "get_portfolio_context"
+        try:
+            import os
+            path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "portfolio_context.md")
+            with open(path) as f:
+                text = f.read()
+            # Real, added 2026-08-17: a compact, explicit confirmed-vs-pending
+            # summary, prepended ahead of the full raw document. Added after
+            # confirming directly (repro_harness.py, 3 independent models,
+            # qwen3-14b-longctx / gemma4-e2b-longctx / nemotron) that models
+            # given the full, correct context were consistently summing a
+            # confirmed holding with a real, separate, still-unexecuted
+            # pending order into a premature total (KTOS: 16 confirmed + 1
+            # pending buy -> reported as "17 shares", confidently, every
+            # time). See src/portfolio_parser.py for the real parsing logic;
+            # this does not replace the full document below, just makes the
+            # confirmed/pending distinction explicit before the model has to
+            # infer it from table position alone.
+            try:
+                from src.portfolio_parser import parse_portfolio_context
+                parsed = parse_portfolio_context(text)
+                if parsed.confirmed_holdings:
+                    summary_lines = [
+                        "## CONFIRMED vs PENDING (computed, not manually maintained -- see full tables below for source)",
+                        "Do NOT add pending_buy to confirmed_shares -- pending orders have NOT executed.",
+                        "",
+                        "| Ticker | confirmed_shares | pending_buy | pending_sell |",
+                        "|--------|------------------|-------------|--------------|",
+                    ]
+                    for ticker in sorted(parsed.confirmed_holdings):
+                        confirmed = parsed.confirmed_holdings[ticker]
+                        pb = parsed.pending_qty_for(ticker, "BUY")
+                        ps = parsed.pending_qty_for(ticker, "SELL")
+                        if pb or ps:
+                            summary_lines.append(f"| {ticker} | {confirmed:g} | {pb:g} | {ps:g} |")
+                    if len(summary_lines) > 5:
+                        text = "\n".join(summary_lines) + "\n\n---\n\n" + text
+            except Exception:
+                pass  # real, deliberate: never let the summary computation break the underlying tool
+            result = {"stdout": text, "stderr": "", "exit_code": 0}
+        except Exception as e:
+            result = {"error": f"get_portfolio_context: {e}", "exit_code": 1}
+    elif tool == "search_vault":
+        desc = "search_vault"
+        try:
+            args = json.loads(content) if content else {}
+            query = (args.get("query") or "").strip()
+            if not query:
+                result = {"error": "search_vault requires a non-empty 'query' argument", "exit_code": 1}
+            else:
+                output = search_vault_impl(query)
+                result = {"stdout": output, "stderr": "", "exit_code": 0}
+        except Exception as e:
+            result = {"error": f"search_vault: {e}", "exit_code": 1}
     elif tool in ("pipeline", "manage_memory", "ui_control"):
         from src.ai_interaction import dispatch_ai_tool
         desc, result = await dispatch_ai_tool(tool, content, session_id, owner=owner)
     elif tool == "manage_tasks":
         desc = "manage_tasks"
         result = await do_manage_tasks(content, owner=owner)
+    elif tool == "skill_introspect":
+        desc = "skill_introspect"
+        result = await do_skill_introspect(content, owner=owner)
     elif tool == "manage_skills":
         desc = "manage_skills"
         result = await do_manage_skills(content, owner=owner)

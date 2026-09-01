@@ -1,0 +1,11 @@
+{
+  "name": "holdings_absence_verification",
+  "description": "Real, genuinely new dimension: every existing scenario that touches the holdings-correction path only checks tickers that ARE real DK holdings (SOUN, KTOS). This scenario explicitly checks the opposite, equally important case -- real, in-training tickers that are confirmed NOT among DK's real holdings (per REAL_DK_STOCK_HOLDINGS) -- and asserts the holdings-correction note should never appear for them at all (expect_holdings_note: false). If it does, that's either a real, distinct data-accuracy problem (the model claiming a holding that doesn't exist) or a real, distinct session-reuse contamination signal (the note bled in from an earlier, real-holding turn).",
+  "scenario_tags": ["holdings-correction", "data-accuracy"],
+  "turns": [
+    {"type": "ticker", "symbol": "IONQ", "expect_tool_call": true, "expect_tool": "lookup_ticker", "expect_holdings_note": false, "note": "real, in-training ticker, confirmed NOT a real DK holding"},
+    {"type": "ticker", "symbol": "RGTI", "expect_tool_call": true, "expect_tool": "lookup_ticker", "expect_holdings_note": false, "note": "real, in-training ticker, confirmed NOT a real DK holding"},
+    {"type": "ticker", "symbol": "NVDA", "expect_tool_call": true, "expect_tool": "lookup_ticker", "expect_holdings_note": false, "note": "real, in-training ticker, confirmed NOT a real DK holding (DK's real NVDA strategy is a separate, long-term accumulation target, not a current tracked holding in this tool's own reference document)"},
+    {"type": "ticker", "symbol": "KTOS", "expect_tool_call": true, "expect_tool": "lookup_ticker", "expect_holdings_note": true, "note": "real, control turn -- a genuine DK holding placed after 3 real non-holdings, confirming the note correctly DOES still appear when it should, not just that it's suppressed entirely"}
+  ]
+}

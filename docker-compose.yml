@@ -3,9 +3,95 @@ services:
     build: .
     ports:
       - "${APP_BIND:-127.0.0.1}:${APP_PORT:-7000}:7000"
+    # Real, added 2026-08-18: direct passthrough of the real host's
+    # /dev/uinput device, for jarvis_desktop's scroll() tool -- a real,
+    # separate python-evdev script that creates its own virtual input
+    # device to inject wheel events (ydotool 0.1.8 has no scroll
+    # support at all, confirmed directly; the newer ydotool that does
+    # has a real, unresolved absolute-positioning bug, not a safe
+    # trade -- see scroll()'s own docstring in jarvis_desktop_mcp.py
+    # for the full history).
+    devices:
+      - /dev/uinput:/dev/uinput
     volumes:
       - ${APP_DATA_DIR:-./data}:/app/data:z
       - ${APP_LOGS_DIR:-./logs}:/app/logs:z
+      # Real, added 2026-08-17: mount the real Risk Engine's real output
+      # directory read-only, so the risk_surface MCP server (which reads
+      # regime.json/risk_events.json/factors.json/suggestions.json) can
+      # actually see the real, host-side pipeline output. The Risk Engine
+      # itself (~/jarvis/risk_engine/) runs on the host via cron, not
+      # inside this container -- this mount is read-only since the
+      # container should never write into the pipeline's own output dir.
+      - /home/dk/jarvis/risk_engine:/app/risk_engine_data:ro
+      # Real, added 2026-08-17: mount the real, running XWayland X11 socket
+      # (confirmed live via `ps aux | grep Xwayland` -- "Xwayland :1") so
+      # jarvis_desktop's real wmctrl/xdotool window/mouse/keyboard tools can
+      # actually reach the real host display, not just report a missing
+      # socket. rw (not ro) since X11 clients need to write to the socket.
+      - /tmp/.X11-unix:/tmp/.X11-unix:rw
+      # Real, added 2026-08-19: mount the real Obsidian vault read-only.
+      # Confirmed directly (GitHub issue #14, and two live tests tonight)
+      # that no vault-search tool has ever worked, because the container
+      # had no filesystem access to this real, host-side directory at
+      # all -- every "I don't have this in my vault" answer tonight was
+      # honestly correct given the real, actual toolset, not a model
+      # failure. Read-only: this tool should never write into DK's own,
+      # hand-maintained vault.
+      - /home/dk/gdrive/Obsidian:/app/vault_data:ro
+      # Real, added 2026-08-26: mount DK's real screenshot folder for the
+      # new read_screenshot tool. Read-only -- this tool only reads
+      # existing screenshots, never writes/deletes anything here.
+      - /home/dk/Pictures/Screenshots:/app/screenshots_data:ro
+      # Real, added 2026-08-27: a real, dedicated, SEPARATE mount for the
+      # new gdrive_backup_manager MCP server, deliberately NOT the same
+      # /app/vault_data mount above -- that one is read-only on purpose
+      # (search_vault should never write into DK's hand-maintained
+      # vault), and widening it to rw would have silently removed that
+      # protection for every consumer of that mount, not just this new
+      # tool. Scoped narrowly to just the real backup destination
+      # subdirectory, read-write, so this new server can actually write
+      # new backup archives without touching the broader vault's own
+      # write protection at all.
+      - /home/dk/gdrive/Obsidian/backups/nightly backups:/app/gdrive_backups_data:rw
+      # Real, added 2026-08-23: mount the real vault_index.jsonl (built by
+      # vault_ingest.py on the host, via cron/manual run, not inside this
+      # container) so search_vault's backend can use structured
+      # category/tag/title metadata instead of only a raw substring scan.
+      # Read-only: this container should never write the index itself.
+      - /home/dk/jarvis/data/vault_index.jsonl:/app/vault_index.jsonl:ro
+      # Real, added 2026-08-17: mount the real ydotool socket. xdotool's
+      # mouse/keyboard control was confirmed NOT visually working (real,
+      # repeated testing) -- XWayland rootless mode appears to isolate
+      # X11-level input injection from COSMIC's native Wayland input.
+      # ydotool injects real events at the kernel level (via /dev/uinput
+      # on the host, through the real ydotoold daemon DK started), which
+      # should bypass XWayland's isolation entirely.
+      # Real, added 2026-08-17: mount the real ydotool socket. xdotool's
+      # mouse/keyboard control was confirmed NOT visually working (real,
+      # repeated testing) -- XWayland rootless mode appears to isolate
+      # X11-level input injection from COSMIC's native Wayland input.
+      # ydotool injects real events at the kernel level (via /dev/uinput
+      # on the host, through the real ydotoold daemon DK started), which
+      # should bypass XWayland's isolation entirely.
+      # Real, temporarily disabled 2026-08-19 after a stale, root-owned
+      # directory at this path (left behind by a prior crashed/killed
+      # daemon) blocked the container from starting entirely (exit 127).
+      # Re-enabled after DK confirmed, running as root:
+      #   sudo rm -rf /tmp/.ydotool_socket && sudo ydotoold
+      # -- confirmed directly the path is now a real socket file
+      # (srw-------, root-owned) before re-enabling this line.
+      - /tmp/.ydotool_socket:/tmp/.ydotool_socket:rw
+      # Real, added 2026-08-20: mount the real host's already-populated
+      # ms-playwright browser cache. Confirmed directly: wigolo's live
+      # fetch calls hang in this container because the chromium binary
+      # download times out (real, restricted-bandwidth network from
+      # inside the container). DK confirmed the exact version wigolo
+      # needs (chromium-1223) already exists on the real host, from an
+      # earlier local install. rw (not ro): this is a live cache
+      # directory these tools may legitimately add new browser versions
+      # to over time, not a static resource.
+      - /home/dk/.cache/ms-playwright:/ms-playwright:rw
       # Cookbook remote-server SSH identity. Odysseus can generate a key here;
       # add the shown public key to each remote server's authorized_keys.
       - ${APP_DATA_DIR:-./data}/ssh:/app/.ssh:z
@@ -47,6 +133,13 @@ services:
       # Ollama at http://host.docker.internal:11434.
       - "host.docker.internal:host-gateway"
     environment:
+      # Real, added 2026-08-17: points jarvis_desktop's wmctrl/xdotool at the
+      # real, running XWayland instance (confirmed live: "Xwayland :1"),
+      # via the X11 socket mounted above.
+      - DISPLAY=:1
+      # Real, added 2026-08-17: tells ydotool client where the real,
+      # mounted socket is (see the volume mount above).
+      - YDOTOOL_SOCKET=/tmp/.ydotool_socket
       - LLM_HOST=${LLM_HOST:-localhost}
       - LLM_HOSTS=${LLM_HOSTS:-}
       - OPENAI_API_KEY=${OPENAI_API_KEY:-}
@@ -63,6 +156,32 @@ services:
       - LOCALHOST_BYPASS=${LOCALHOST_BYPASS:-false}
       - ODYSSEUS_ADMIN_USER=${ODYSSEUS_ADMIN_USER:-admin}
       - ODYSSEUS_ADMIN_PASSWORD=${ODYSSEUS_ADMIN_PASSWORD:-}
+      # Real, added 2026-08-27: was previously unset, meaning
+      # core/middleware.py's own INTERNAL_TOOL_TOKEN fell back to a
+      # fresh secrets.token_hex(32) generated independently by every
+      # separate Python process -- confirmed directly this made the
+      # value genuinely unknowable/unusable for legitimate host-side
+      # scripts wanting to call admin-gated internal routes (e.g.
+      # reconnecting a newly-registered MCP server) without an
+      # interactive browser login. Fixed, stable value now, so this
+      # loopback auth path is actually usable, not just theoretical.
+      #
+      # Real fix, 2026-09-01: no hardcoded fallback value here anymore.
+      # gitleaks correctly, repeatedly flagged this line as a committed
+      # secret -- putting a real value in the `:-default` just re-exposed
+      # whatever the token was rotated to. The real value now lives only
+      # in .env (git-ignored) -- this line is a real, required prerequisite,
+      # not optional, so an unset var surfaces as an empty/obviously-wrong
+      # token rather than silently reusing a stale, exposed default.
+      - ODYSSEUS_INTERNAL_TOKEN=${ODYSSEUS_INTERNAL_TOKEN}
+      # Real, added 2026-08-31: which Odysseus user's data the new MCP
+      # HTTP server (routes/mcp_http_server.py) operates on for
+      # owner-scoped tools (manage_email, manage_notes, etc.) -- needed
+      # because .env alone isn't enough; docker-compose only passes
+      # through variables explicitly listed here, confirmed directly
+      # after ODYSSEUS_MCP_OWNER stayed empty inside the container even
+      # after a full --force-recreate.
+      - ODYSSEUS_MCP_OWNER=${ODYSSEUS_MCP_OWNER:-admin}
       - ALLOWED_ORIGINS=${ALLOWED_ORIGINS:-http://localhost,http://127.0.0.1}
       - SECURE_COOKIES=${SECURE_COOKIES:-false}
       - EMBEDDING_URL=${EMBEDDING_URL:-}
@@ -181,6 +300,53 @@ services:
       - ntfy-cache:/var/cache/ntfy
     environment:
       - NTFY_BASE_URL=${NTFY_BASE_URL:-http://localhost:8091}
+    restart: unless-stopped
+
+  # Real, added 2026-08-23 (first real step of closing the Bytebot-inspired
+  # capability gap): a genuinely isolated, disposable full desktop, not
+  # jarvis_browser's shared-host approach. Using accetto/ubuntu-vnc-xfce-
+  # firefox-g3 -- a real, actively maintained, well-established image
+  # (Ubuntu 24.04, TigerVNC, noVNC, Firefox), not building XFCE/VNC from
+  # scratch. Deliberately isolated in this first step: no agent-control
+  # wiring yet, no shared network with odysseus -- just confirming the
+  # base desktop container itself boots and is reachable before building
+  # anything on top of it.
+  desktop-sandbox:
+    image: accetto/ubuntu-vnc-xfce-firefox-g3
+    ports:
+      - "127.0.0.1:6081:6901"
+      # Real, added 2026-08-23: the raw VNC port (5901), separate from
+      # noVNC's websocket port (6901) above. vncdotool (the real client
+      # library used for actual agent control -- screenshots, mouse,
+      # keyboard) speaks the raw RFB/VNC protocol directly, not
+      # websockets, so it needs this port specifically, not 6901.
+      - "127.0.0.1:5901:5901"
+    environment:
+      - VNC_PW=${DESKTOP_SANDBOX_VNC_PW:-changeme}
+    restart: unless-stopped
+
+  # Real, added 2026-08-24: restricted Docker API access for per-task
+  # disposable desktop containers, so nothing else in this codebase ever
+  # needs a raw /var/run/docker.sock mount (root-equivalent to the host).
+  # Uses Tecnativa/docker-socket-proxy (real, established, ~2.5k stars),
+  # an HAProxy-based filter in front of the real socket. Only container
+  # lifecycle operations are granted (CONTAINERS, ALLOW_START, ALLOW_STOP,
+  # and the global POST gate they need) -- everything else stays at its
+  # real, secure default (off), most importantly EXEC (arbitrary code
+  # execution inside any container -- the single most dangerous endpoint)
+  # and NETWORKS/VOLUMES/SYSTEM/SWARM/AUTH/SECRETS. Bound to the internal
+  # Docker network only, never published to the host, matching the
+  # project's own documented security recommendation.
+  docker-socket-proxy:
+    image: tecnativa/docker-socket-proxy
+    privileged: true  # required to bind-mount and speak to the real socket
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    environment:
+      - CONTAINERS=1
+      - POST=1
+      - ALLOW_START=1
+      - ALLOW_STOP=1
     restart: unless-stopped
 
 volumes:

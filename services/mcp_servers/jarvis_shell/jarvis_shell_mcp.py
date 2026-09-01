@@ -39,10 +39,38 @@ Registration:
 
 import asyncio
 import os
+import re
 import tempfile
 
 import httpx
 from mcp.server.fastmcp import FastMCP
+
+# Real, module-level so this can be imported and tested directly (pure
+# regex matching, no shell execution at all) without ever calling
+# run_command -- see tests/test_jarvis_shell_destructive_guard.py.
+# Deliberately narrow scope: only broad/wildcard/root-ish destructive
+# targets are matched (e.g. `rm -rf .`, `rm -rf *`) -- a genuinely
+# scoped, specific deletion (`rm -rf /tmp/some_real_subdir`) is not
+# flagged, since that's legitimate, ordinary cleanup work. This is an
+# accident guard, not a security boundary.
+DESTRUCTIVE_COMMAND_PATTERNS = [
+    (re.compile(r"\brm\s+-[a-z]*r[a-z]*f[a-z]*\s+(\.|\*|~|/|\.\.)(\s|$)", re.IGNORECASE),
+     "a broad, wildcard/root-ish recursive delete (rm -rf on '.', '*', '~', or '/')"),
+    (re.compile(r"\bgit\s+clean\s+-[a-z]*[xfd]{2,}[a-z]*\b", re.IGNORECASE),
+     "git clean with force+untracked+ignored flags (wipes all untracked/ignored files)"),
+    (re.compile(r"\bfind\s+.*-delete\b", re.IGNORECASE),
+     "find ... -delete"),
+    (re.compile(r"\bshred\b", re.IGNORECASE),
+     "shred (secure, unrecoverable file deletion)"),
+    (re.compile(r"\bdd\s+if=/dev/(zero|random|urandom)\b", re.IGNORECASE),
+     "dd overwriting a file/device with zeros or random data"),
+    (re.compile(r"\bchmod\s+-R\s+000\b"),
+     "chmod -R 000 (recursively removes all access)"),
+    (re.compile(r"\btruncate\s+-s\s*0\s+\*", re.IGNORECASE),
+     "truncate -s 0 against a wildcard (wipes contents of every matching file)"),
+    (re.compile(r"\bmv\s+\S+\s+/dev/null\b"),
+     "mv ... /dev/null (effectively deletes the source)"),
+]
 
 mcp = FastMCP(
     name="JARVIS Shell",
@@ -59,11 +87,79 @@ DEFAULT_TIMEOUT = 60
 
 
 @mcp.tool()
-async def run_command(command: str, cwd: str = "", timeout: int = DEFAULT_TIMEOUT) -> str:
+async def run_command(command: str, cwd: str = "", timeout: int = DEFAULT_TIMEOUT,
+                       jarvis_sandbox: dict = None) -> str:
     """Run a real shell command. Returns combined stdout/stderr and the
     real exit code. cwd defaults to this server's own working directory
-    if not given. timeout is in seconds (default 60); the process is
-    killed if it exceeds this."""
+    if not given -- unless a real, per-agent sandbox is present (see
+    docs/sandbox_contract.md), in which case it defaults to that agent's
+    own tmp_dir instead, giving each agent's shell commands a real,
+    isolated default working directory without requiring the caller to
+    specify one explicitly. An explicit cwd argument always wins over
+    the sandbox default.
+
+    Real, honest note on this specific choice, added 2026-08-23 (first
+    real tool-level adoption of the sandbox contract). Discovered
+    directly, not assumed from the contract doc alone, that FastMCP's
+    own signature validation rejects any parameter name starting with
+    '_' at decoration time (a real server crash on startup, caught and
+    fixed same session) -- so this parameter is named jarvis_sandbox
+    here, without the leading underscore. Confirmed empirically
+    afterward (a real, direct test showed the sandbox value silently
+    failing to arrive) that the wire key itself also needed renaming to
+    match -- _do_call() originally injected "_jarvis_sandbox" (with
+    underscore); both the injector and docs/sandbox_contract.md were
+    corrected to jarvis_sandbox, without it, in the same fix."""
+    if not cwd and jarvis_sandbox:
+        cwd = jarvis_sandbox.get("tmp_dir", "")
+    # Real, deliberate guard against genuinely catastrophic, destructive
+    # command patterns, added 2026-08-21. Confirmed directly beforehand:
+    # this tool has zero path restrictions (unlike jarvis_desktop's
+    # read_file/find_file/etc.) and its own documented, intended
+    # mitigation (approval_required_tools staging every call for human
+    # review) is not actually configured. This is explicitly an accident
+    # guard, not a security boundary -- it catches broad, common,
+    # devastating patterns before they run; it is not designed to resist
+    # something deliberately trying to construct a bypass. Real,
+    # deliberately narrow scope: only broad/wildcard/root-ish destructive
+    # targets are blocked (e.g. `rm -rf .`, `rm -rf *`) -- a genuinely
+    # scoped, specific deletion (`rm -rf /tmp/some_real_subdir`) is not
+    # flagged, since that's legitimate, ordinary cleanup work.
+    for _pattern, _description in DESTRUCTIVE_COMMAND_PATTERNS:
+        if _pattern.search(command):
+            return (
+                f"REFUSED: this command matches a known, broad, destructive "
+                f"pattern ({_description}) and was not executed. This is an "
+                f"accident guard, not a security boundary -- if this is "
+                f"genuinely intended, a more specific, narrowly-scoped "
+                f"version of the same command (a real, named path rather "
+                f"than a wildcard or root-ish target) will not be blocked."
+            )
+
+    # Real safety net, added 2026-08-13: models kept defaulting to this
+    # generic tool to "create" .docx/.pptx/.xlsx/.pdf files via echo/cat
+    # redirection, producing invalid files with the right extension but
+    # plain-text content -- they silently fail to open, and the model
+    # confidently reported false success on them (confirmed via a real,
+    # direct test tonight). This can't literally redirect to
+    # create_document_office (a different tool in a different process's
+    # own registry) -- the achievable fix is to detect the pattern and
+    # refuse, telling the model to call the correct tool instead. Only
+    # matches a real write (>/>>), not a read+pipe like `cat x.docx | grep`.
+    _office_write_pattern = re.compile(
+        r">{1,2}\s*[\w./-]*\.(docx|pptx|xlsx|pdf)\b", re.IGNORECASE
+    )
+    if _office_write_pattern.search(command):
+        return (
+            "REFUSED: this command appears to write a .docx/.pptx/.xlsx/.pdf "
+            "file directly via shell redirection. That produces an invalid, "
+            "corrupt file that has the right extension but cannot actually be "
+            "opened by Word/PowerPoint/Excel/a PDF reader -- do NOT retry this "
+            "with a different shell command. Call the create_document_office "
+            "tool instead (format, filename, title, sections/slides/rows) -- "
+            "it uses real document libraries and produces a genuinely valid file."
+        )
+
     proc = await asyncio.create_subprocess_shell(
         command,
         stdout=asyncio.subprocess.PIPE,

@@ -376,6 +376,11 @@ def setup_mcp_routes(mcp_manager: McpManager):
                 raise HTTPException(404, "Server not found")
 
             await mcp_manager.disconnect_server(server_id)
+            # Real, added 2026-08-24: unlike a routine disconnect/reconnect,
+            # this server is being permanently removed -- clean up its
+            # dedicated stdio actor task too, so it doesn't linger for a
+            # server_id that no longer exists at all.
+            await mcp_manager.cleanup_connection_actor(server_id)
 
             db.delete(srv)
             db.commit()
@@ -615,7 +620,7 @@ def setup_mcp_routes(mcp_manager: McpManager):
 
         qualified_name = f"mcp__{resolved_id}__{body.tool}"
         _start = time.monotonic()
-        result = await mcp_manager.call_tool(qualified_name, body.arguments)
+        result = await mcp_manager.call_tool(qualified_name, body.arguments, agent_name=body.agent)
         _duration_ms = (time.monotonic() - _start) * 1000
         record_agent_call(resolved_name, body.tool, body.arguments, result, _duration_ms)
         return result

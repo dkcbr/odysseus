@@ -81,7 +81,7 @@ PYTHON_TIMEOUT = 30
 
 # Tool types that trigger execution
 TOOL_TAGS = {"bash", "python", "web_search", "web_fetch", "lookup_ticker", "read_file", "write_file", "edit_file",
-             "apply_patch", "todowrite",
+             "apply_patch", "todowrite", "get_portfolio_context", "create_document_office",
              "grep", "glob", "ls", "get_workspace", "manage_bg_jobs",
              "create_document", "update_document", "edit_document",
              "search_chats",
@@ -90,7 +90,7 @@ TOOL_TAGS = {"bash", "python", "web_search", "web_fetch", "lookup_ticker", "read
              "pipeline",
              "manage_session", "manage_memory", "list_models",
              "ui_control", "generate_image", "ask_user", "update_plan",
-             "manage_tasks", "api_call", "ask_teacher", "manage_skills",
+             "manage_tasks", "api_call", "ask_teacher", "manage_skills", "skill_introspect",
              "suggest_document",
              "manage_endpoints", "manage_mcp", "manage_webhooks",
              "manage_tokens", "manage_documents", "manage_settings",

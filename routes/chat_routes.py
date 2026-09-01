@@ -1863,6 +1863,91 @@ def setup_chat_routes(
         # buffered output + live); dropping the SSE only removes a subscriber —
         # the run keeps going and saves the assistant message on completion
         # regardless. Reconnect via /api/chat/resume.
+        # Real, added 2026-08-17: deterministic correction capture for the
+        # actual, real streaming path (mode=agent), the one genuinely used
+        # in practice -- confirmed directly that this same check, already
+        # wired into handle_memory_command() for the non-streaming route,
+        # was never reached here (a real, pre-existing gap, confirmed to
+        # also affect the original "remember: X" command, not something
+        # introduced tonight). Checked here, before the real agent/model
+        # pipeline starts, so a correction never triggers a real, wasted
+        # model call.
+        if isinstance(message, str) and not incognito and not tool_policy.blocks("manage_memory"):
+            _is_correction, _correction_text = memory_manager.process_correction_command(message)
+            if _is_correction and _correction_text:
+                _mem = memory_manager.load()
+                if not memory_manager.find_duplicates(_correction_text, _mem):
+                    _new_entry = memory_manager.add_entry(_correction_text, category="correction")
+                    _mem.append(_new_entry)
+                    memory_manager.save(_mem)
+                _confirmation = f"Saved as a correction (always included in future context): {_correction_text}"
+                sess.add_message(ChatMessage("user", message))
+                sess.add_message(ChatMessage("assistant", _confirmation))
+                session_manager.save_sessions()
+
+                async def _correction_confirmation_stream():
+                    yield f"data: {json.dumps({'delta': _confirmation})}\n\n"
+                    yield f"data: {json.dumps({'type': 'message_saved'})}\n\n"
+                    yield "data: [DONE]\n\n"
+
+                return StreamingResponse(_correction_confirmation_stream(), media_type="text/event-stream")
+
+        # Real, added 2026-08-19: deterministic vault-search trigger,
+        # checked here rather than in the non-streaming route (matches
+        # the same real placement decision made for the correction
+        # check above, since this is the real, actual endpoint used by
+        # every live mode=agent request). Confirmed directly (live test)
+        # that models don't reliably choose to call search_vault on
+        # their own -- 0 tool calls on an unambiguous query. Only
+        # triggers on genuinely explicit, unambiguous phrasing (see
+        # detect_vault_search_trigger's own docstring); does not try to
+        # replace the real search_vault tool for the model's own,
+        # ordinary use -- that remains available for any request this
+        # narrow trigger doesn't match.
+        # Real, added 2026-08-19: deterministic trigger for the narrow
+        # "how many shares of X do I own" question. Goes one step
+        # further than a tool-selection trigger (like the vault one
+        # just below) -- answers directly from the already-parsed
+        # portfolio data, bypassing the model's synthesis step
+        # entirely, not just its tool choice. Confirmed necessary via
+        # two real, distinct failures tonight: qwen2.5:7b calling the
+        # wrong tool (lookup_ticker), and separately, models that
+        # called the RIGHT tool still mis-synthesizing the raw
+        # document into a wrong number (the real "17 shares" bug --
+        # confirmed/pending summed together). Checked before the vault
+        # trigger since this is the more specific, narrower match.
+        if isinstance(message, str) and not incognito:
+            from src.tool_execution import detect_holdings_query, answer_holdings_query
+            _holdings_ticker = detect_holdings_query(message)
+            if _holdings_ticker:
+                _holdings_answer = answer_holdings_query(_holdings_ticker)
+                sess.add_message(ChatMessage("user", message))
+                sess.add_message(ChatMessage("assistant", _holdings_answer))
+                session_manager.save_sessions()
+
+                async def _holdings_query_stream():
+                    yield f"data: {json.dumps({'delta': _holdings_answer})}\n\n"
+                    yield f"data: {json.dumps({'type': 'message_saved'})}\n\n"
+                    yield "data: [DONE]\n\n"
+
+                return StreamingResponse(_holdings_query_stream(), media_type="text/event-stream")
+
+        if isinstance(message, str) and not incognito:
+            from src.tool_execution import detect_vault_search_trigger, search_vault_impl
+            _vault_query = detect_vault_search_trigger(message)
+            if _vault_query:
+                _vault_output = search_vault_impl(_vault_query)
+                sess.add_message(ChatMessage("user", message))
+                sess.add_message(ChatMessage("assistant", _vault_output))
+                session_manager.save_sessions()
+
+                async def _vault_search_stream():
+                    yield f"data: {json.dumps({'delta': _vault_output})}\n\n"
+                    yield f"data: {json.dumps({'type': 'message_saved'})}\n\n"
+                    yield "data: [DONE]\n\n"
+
+                return StreamingResponse(_vault_search_stream(), media_type="text/event-stream")
+
         if compare_mode:
             return StreamingResponse(_safe_stream(), media_type="text/event-stream")
 

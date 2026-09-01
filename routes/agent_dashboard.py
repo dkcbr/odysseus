@@ -10,6 +10,8 @@ call record_agent_call(...) after each invocation (see the companion edit
 to mcp_routes.py).
 """
 
+import json
+import logging
 import time
 from collections import deque
 from typing import Any
@@ -119,3 +121,26 @@ async def get_agent_history(server_name: str, request: Request, limit: int = 50)
         "failures": len(matching) - successes,
         "calls": matching,
     }
+
+
+@router.get("/status")
+async def get_agent_status(request: Request):
+    """Real, read-only passthrough of the supervisor's live health state
+    (written every 5s by agent_supervisor.py on the host, visible here via
+    the existing ./data:/app/data mount -- no new plumbing required).
+    Restored 2026-08-23 -- genuinely lost in 99f7fe2f, per a direct,
+    confirmed check against that commit's actual diff (not assumed)."""
+    require_admin(request)
+    state_file = "/app/data/supervisor_state.json"
+    try:
+        with open(state_file, "r") as f:
+            return json.load(f)
+    except FileNotFoundError:
+        return {"error": "agent_state_unavailable", "detail": "supervisor_state.json not found"}
+    except json.JSONDecodeError as e:
+        # Real, fixed 2026-08-28 (CodeQL, "Information exposure through an
+        # exception"): the raw parse-error message used to flow directly
+        # into this response. Log the real detail server-side instead,
+        # return a generic message to the caller.
+        logging.getLogger(__name__).exception(f"Malformed supervisor_state.json: {e}")
+        return {"error": "agent_state_unavailable", "detail": "malformed JSON in supervisor state file"}

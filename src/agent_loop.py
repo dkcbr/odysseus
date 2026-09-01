@@ -23,6 +23,7 @@ from src.llm_core import (
 from src.model_context import estimate_tokens
 from src.settings import get_setting
 from src.prompt_security import untrusted_context_message
+from src.text_helpers import ReasoningGate
 from src.tool_security import blocked_tools_for_owner, plan_mode_disabled_tools
 from src.tool_policy import GUIDE_ONLY_DIRECTIVE, WEB_TOOL_NAMES, ToolPolicy
 from src.tool_utils import _truncate, get_mcp_manager
@@ -668,6 +669,10 @@ Generate an image. Line 1 = description, line 2 = model name, line 3 = WxH (e.g.
     "list_models": "- ```list_models``` — Show all available AI models across all endpoints. Use when user asks what models are available.",
     "manage_session": "- ```manage_session``` — Rename, archive, delete, fork, switch, or `list` chats (the UI calls them 'chats'; 'session' is internal). Line 1 = action (list/switch/rename/archive/unarchive/delete/important/unimportant/truncate/fork), Line 2 = exact chat id from `list_sessions` (or `current` where supported). For delete/archive/truncate, always list first and reuse the exact id; never invent placeholder ids. `switch`/`open` returns a clickable anchor link the user can tap to open the chat — use for \"open my X chat\".",
     "manage_memory": "- ```manage_memory``` — Manage the user's persistent memory (facts about the USER themselves, their preferences, context that persists across chats). Line 1 = action (list/add/edit/delete/search), rest = content. Use when user says 'remember this' about themselves, states identity facts like 'my name is <name>' / 'call me <name>' / 'I live in <place>', or asks about stored memories. DO NOT use for info about another person (their address, phone, email, birthday) — that goes in `manage_contact`. If the user pastes an address/phone with a name and says 'save this for <person>', use `manage_contact add` with the address arg, NOT manage_memory.",
+    "get_portfolio_context": "- ```get_portfolio_context``` — Fetch DK's real, current portfolio context (holdings, strategy, rules, thesis notes) from data/portfolio_context.md. No arguments. ALWAYS call this for any question about a specific position, balance, holding, or stored trading rule — even if you think you already know the answer, since this data updates over time and you do not have it pre-loaded. A ticker's absence from your own knowledge does NOT mean the position doesn't exist — check here first. This returns a large, complete reference document — after calling it, find and state the SPECIFIC fact the user actually asked about, not a general summary of everything in the document.",
+    "search_vault": "- ```search_vault``` — Search DK's real Obsidian vault (personal notes and reference material) for a query string. Argument: query (string, required). ALWAYS call this for any question about what the vault or a specific note/document says — never assume you lack access or answer from your own training knowledge. Returns matching file names and snippets, or an honest 'no matches' if nothing is found.",
+    "create_document_office": "- ```create_document_office``` — Create a real Word (.docx), PowerPoint (.pptx), Excel (.xlsx), or PDF file on disk. Args: format (docx/pptx/xlsx/pdf, required), filename (required), title, sections (list of {heading, text} for docx/pdf), slides (list of {title, text} for pptx), rows (list of lists for xlsx). ALWAYS use this instead of create_document when the user specifically asks for a Word doc, PowerPoint, spreadsheet, or PDF — create_document only makes a plain-text/code editor panel, not a real Office/PDF file. NEVER use bash/run_command/python/echo/redirection to write these files directly — that produces an invalid file with the right extension but corrupt content, which will appear to succeed but cannot actually be opened in Word/PowerPoint/Excel/a PDF reader.",
+    "skill_introspect": "- ```skill_introspect``` — Read-only lookup of the user's skill library. Args: action (list/view/view_ref/search, required), name (for view/view_ref), path (for view_ref), query (for search). ALWAYS available regardless of domain (trading, email, browser, etc), unlike manage_skills which only appears for workspace/file-related requests. If a relevant published skill might exist for the current task, check here BEFORE saying you don't know how to do something or lack a procedure — do not assume a skill is unavailable just because you don't see it in your current tool list. To create, edit, publish, or delete a skill, use manage_skills instead.",
     "manage_skills": "- ```manage_skills``` — Skill registry (SKILL.md format). Args (JSON): {\"action\": \"list|view|view_ref|search|add|edit|patch|publish|delete\", ...}. `list` returns the index of available skills (published + teacher-escalation drafts); `view name=foo` fetches the full SKILL.md; `view_ref name=foo path=...` loads a reference file under the skill directory. For `add`, provide an explicit kebab-case `name` and only report the exact returned name, because storage may normalize or dedupe it. Use this BEFORE doing domain work — there may already be a procedure (published or draft) that prescribes the correct steps. Drafts written by the teacher loop are authoritative guidance even though they're not yet published.",
     "manage_tasks": "- ```manage_tasks``` — Create and manage scheduled background tasks (recurring AI jobs). Args (JSON): {\"action\": \"list|create|edit|delete|pause|resume|run\", ...}",
     "manage_endpoints": "- ```manage_endpoints``` — Add, remove, or configure AI model API endpoints. Args (JSON): {\"action\": \"list|add|delete|enable|disable\", ...}. Use when user wants to add a new AI provider.",
@@ -1884,6 +1889,30 @@ def _normalize_ody_qwen_text_artifacts(text: str) -> str:
             continue
         fixed = pattern.sub(replacement, fixed)
     return fixed
+
+
+def _dedupe_full_text(text: str) -> str:
+    """Detect and remove an exact, immediate self-repeat (the model
+    repeating its own just-generated answer verbatim, with nothing in
+    between) from a complete, accumulated response.
+
+    Real, added 2026-08-28, designed and unit-tested before integration:
+    checks split points from the middle of the text outward (so a
+    full-answer repeat is preferred over a shorter, coincidental phrase
+    match), and -- critically -- keeps the first occurrence PLUS any real,
+    legitimate content that follows the duplicate (e.g. a real trailing
+    note), rather than discarding everything after the detected repeat.
+    Requires a minimum length before checking, to avoid false-positiving
+    on short, legitimately-repeated phrases ("the the cat...").
+    """
+    n = len(text)
+    if n < 40:
+        return text
+    for half in range(n // 2, 19, -1):
+        first, second = text[:half], text[half:half * 2]
+        if first.strip() and first == second:
+            return first + text[half * 2:]
+    return text
 
 
 def _ody_qwen_terminal_tool_summary(tool_event: dict[str, Any]) -> str:
@@ -3178,6 +3207,20 @@ async def stream_agent_loop(
     _needs_admin = _detect_admin_intent(messages)
     _last_user = _extract_last_user_message(messages)
     _ody_qwen_finetune_model = (model or "").lower().startswith("odysseus-qwen3")
+    # Real, added 2026-08-28: confirmed live, across multiple independent
+    # real agent trials, that this specific ticker-lookup LoRA sometimes
+    # repeats its own final answer sentence verbatim, immediately, with no
+    # separator. Confirmed this is a single-generation-round quirk (one
+    # real tool call, one real synthesis round each time), and confirmed
+    # via direct, careful reasoning before implementation that a
+    # stream-live-then-fix approach is fundamentally impossible: by the
+    # time enough content has accumulated to detect a duplicate, it has
+    # already been streamed to the user, and already-sent SSE tokens
+    # cannot be un-sent. Deliberately scoped to this model's own real,
+    # current name (not the odysseus-qwen3 prefix above, confirmed that
+    # no longer matches this model following an earlier, separate rename
+    # fix for a different bug).
+    _ody_ticker_model = "ticker" in (model or "").lower()
     if _ody_qwen_finetune_model:
         try:
             temperature = min(float(temperature if temperature is not None else 0.2), 0.2)
@@ -3463,8 +3506,23 @@ async def stream_agent_loop(
             and not _active_document_relevant
             and not active_email
         ):
-            _relevant_tools = set(_WORKSPACE_TERMINUS_TOOLS)
-            logger.info("[tool-rag] Workspace file/terminal request; using Odysseus Terminus toolset")
+            _relevant_tools |= set(_WORKSPACE_TERMINUS_TOOLS)
+            logger.info("[tool-rag] Workspace file/terminal request; adding Odysseus Terminus toolset")
+            # Real, low-volume monitoring window (added 2026-08-14, remove
+            # after ~48h once confirmed no edge cases): this is exactly the
+            # site of the real bug fixed tonight (a destructive replacement
+            # that silently dropped ALWAYS_AVAILABLE tools). Only logs -- at
+            # WARNING, not INFO -- if the invariant this fix relies on ever
+            # doesn't hold, so it stays silent (and low-volume) on every
+            # normal request and only fires on a genuine edge case.
+            from src.tool_index import ALWAYS_AVAILABLE as _AA_CHECK
+            _missing_always_available = _AA_CHECK - _relevant_tools
+            if _missing_always_available:
+                logger.warning(
+                    f"[tool-rag] MONITORING: ALWAYS_AVAILABLE tools missing after "
+                    f"workspace-terminal override despite the union fix: "
+                    f"{sorted(_missing_always_available)}"
+                )
 
     # If this turn targets the open document, keep editing tools available
     # regardless of which selection path (RAG, keyword, caller-provided) ran.
@@ -3913,6 +3971,17 @@ async def stream_agent_loop(
     for round_num in range(1, max_rounds + 1):
         round_response = ""
         round_reasoning = ""  # reasoning_content deltas (DeepSeek-thinking, vLLM --reasoning-parser)
+        # Real, added 2026-08-28: holds this round's content for the ticker
+        # LoRA specifically (see _ody_ticker_model's own comment above) --
+        # not yielded live, not added to round_response/full_response until
+        # the round's natural end, where it's deduplicated and flushed once.
+        _dedup_buf = ""
+        # Catches untagged chain-of-thought that a model emits as plain
+        # content instead of a proper thinking delta or <think> block --
+        # buffers only the still-unclassified leading portion of the round
+        # (see ReasoningGate docstring); everything after it opens streams
+        # through with zero added overhead.
+        _reasoning_gate = ReasoningGate()
         native_tool_calls = []  # populated if model uses function calling
         # Reset doc streaming state per round
         _doc_acc = ""
@@ -4131,6 +4200,7 @@ async def stream_agent_loop(
                         # next request (DeepSeek requires this; harmless for
                         # other vendors). Regular content still flows into
                         # round_response unchanged.
+                        _gate_buffered = False
                         if data.get("thinking"):
                             round_reasoning += data["delta"]
                         else:
@@ -4141,10 +4211,42 @@ async def stream_agent_loop(
                             )
                             if _ody_qwen_finetune_model:
                                 _delta_text = _normalize_ody_qwen_text_artifacts(_delta_text)
-                            round_response += _delta_text
-                            full_response += _delta_text
-                            data["delta"] = _delta_text
-                        if not _ody_qwen_finetune_model or data.get("thinking"):
+                                # This model's content path is handled entirely
+                                # through the doc-streaming fence protocol below
+                                # (it never reaches the plain yield at the end of
+                                # this block anyway) -- leave it untouched by the
+                                # reasoning gate rather than mix two special cases.
+                                _safe_text = _delta_text
+                            else:
+                                # Buffers untagged chain-of-thought that a model
+                                # emits as plain content instead of a thinking
+                                # delta or <think> block. See ReasoningGate's
+                                # docstring in text_helpers.py for the design;
+                                # this only adds latency to the still-buffered
+                                # leading portion of a round, never the whole
+                                # response.
+                                _safe_text = _reasoning_gate.feed(_delta_text)
+                                _gate_buffered = not _safe_text
+                            if _ody_ticker_model:
+                                # Real, added 2026-08-28: hold this model's
+                                # content back entirely rather than add to
+                                # round_response/full_response or yield it
+                                # here -- both happen once, together, at the
+                                # round's natural end (after deduplication),
+                                # so the user never sees a duplicate and
+                                # conversation history never records one
+                                # either. See _dedup_buf's own comment above.
+                                _dedup_buf += _safe_text
+                                data["delta"] = _safe_text
+                            else:
+                                round_response += _safe_text
+                                full_response += _safe_text
+                                data["delta"] = _safe_text
+                        # Real, added 2026-08-28: this model's content is
+                        # suppressed here entirely -- see the comment on
+                        # _dedup_buf above -- and flushed once, deduplicated,
+                        # at the round's natural end instead.
+                        if not _ody_ticker_model and (not _ody_qwen_finetune_model or data.get("thinking")) and not _gate_buffered:
                             yield f"data: {json.dumps(data)}\n\n"
                         # Detect text-fence doc streaming. Normal agent prompts
                         # use ```create_document; the doc LoRA streaming path
@@ -4215,6 +4317,34 @@ async def stream_agent_loop(
                 # Forward error events to frontend as visible text
                 yield chunk
             # Intercept [DONE] — don't forward until all rounds finish
+
+        # End of this round's stream: release whatever the reasoning gate
+        # was still holding (its own flush() rule: never swallow content it
+        # was never certain about, e.g. a long final paragraph with no
+        # blank-line boundary -- see ReasoningGate.flush() docstring).
+        _gate_tail = _reasoning_gate.flush()
+        if _gate_tail and _ody_ticker_model:
+            # Real, added 2026-08-28: this model's content still goes
+            # through the same reasoning gate above -- whatever it was
+            # still holding also needs to join the dedup buffer, not be
+            # added to round_response/yielded directly the normal way.
+            _dedup_buf += _gate_tail
+        elif _gate_tail:
+            round_response += _gate_tail
+            full_response += _gate_tail
+            yield f"data: {json.dumps({'delta': _gate_tail})}\n\n"
+
+        # Real, added 2026-08-28: flush this model's buffered content now,
+        # once, deduplicated -- see _dedup_buf's own comment near its
+        # initialization above for the full design and why full buffering
+        # (rather than live streaming) is the only way to guarantee a
+        # duplicate never reaches the user. Designed and unit-tested before
+        # integration against the real, actual observed failure shape.
+        if _ody_ticker_model and _dedup_buf:
+            _deduped = _dedupe_full_text(_dedup_buf)
+            round_response += _deduped
+            full_response += _deduped
+            yield f"data: {json.dumps({'delta': _deduped})}\n\n"
 
         logger.info(
             "[agent-timing] round_stream_done round=%s elapsed=%.3fs text_chars=%s tool_calls=%s first_event=%s first_token=%s",
@@ -5252,14 +5382,136 @@ async def stream_agent_loop(
                     full_response = _email_summary
                 break
 
+    # Real, added 2026-08-17: holdings-claim verification. Checks the
+    # model's OWN final text for a specific-ticker share-count claim and
+    # compares it against src/portfolio_parser.py's real, direct parse of
+    # data/portfolio_context.md. Runs regardless of whether a tool was
+    # called -- added specifically because the confirmed failure case
+    # (qwen3-14b-longctx, "17 shares" for KTOS) never called a tool at
+    # all, so any check gated on tool_events would never fire for it.
+    #
+    # Honest, deliberate design choice: this APPENDS a correction rather
+    # than replacing the claim. Confirmed directly earlier tonight (the
+    # reminder-message experiment) that this streaming architecture can
+    # only add to what's already been shown to the user, not erase it --
+    # attempting a silent replacement here would repeat that same,
+    # already-documented failure.
+    # Real, honest status 2026-08-17: attempted a live-brokerage-data
+    # version of this check (calling public_com directly before trusting
+    # the static document), after confirming the document-only version
+    # below can "correct" a genuinely right answer into a wrong one
+    # (real case: MP, model said 20 correctly, document said stale 11).
+    # Reverted that attempt: it caused a real, structural async crash
+    # (RuntimeError: "Attempted to exit cancel scope in a different task
+    # than it was entered in", confirmed via live container logs) when
+    # calling mcp.call_tool() from this specific streaming-generator
+    # context. Not safely fixable with confidence tonight. Back to the
+    # simpler, document-only version below -- known-imperfect (can be
+    # wrong if the document itself is stale) but at least reliably does
+    # something rather than silently failing.
+    # Real, updated 2026-08-17: now consults get_freshness_recommendation()
+    # -- a fast, real, SYNCHRONOUS lookup against data/holdings_freshness.json
+    # (no network call, safe here) -- to decide between three real, distinct
+    # correction qualities rather than always using the same generic,
+    # hedged language regardless of what's actually known:
+    #   - "trust_document": a recent, real live check confirms the document
+    #     is accurate -- use confident, non-hedged language.
+    #   - "append_note" (freshness data says stale): a recent, real live
+    #     check found the document itself is wrong -- cite the REAL, live
+    #     number from the freshness record, not the known-stale document.
+    #   - "needs_live_check": no recent freshness data -- fall back to the
+    #     original, generic hedged language (unchanged from before).
+    _holdings_correction = None
+    try:
+        import re as _hc_re
+        _candidates = _hc_re.findall(r"\b[A-Z]{2,5}\b", full_response or "")
+        if _candidates:
+            from src.portfolio_parser import parse_portfolio_context, get_freshness_recommendation
+            with open("data/portfolio_context.md", "r", encoding="utf-8") as _hc_f:
+                _hc_parsed = parse_portfolio_context(_hc_f.read())
+            for _ticker in _candidates:
+                if _ticker not in _hc_parsed.confirmed_holdings:
+                    continue
+                _real_shares = _hc_parsed.confirmed_holdings[_ticker]
+                _real_str = f"{_real_shares:g}"
+                for _m in _hc_re.finditer(_hc_re.escape(_ticker), full_response):
+                    _window = full_response[max(0, _m.start() - 40):_m.end() + 40]
+                    _num_matches = _hc_re.findall(r"\b(\d+(?:\.\d+)?)\b", _window)
+                    for _claimed in _num_matches:
+                        if _claimed == _real_str:
+                            break
+                    else:
+                        if _num_matches:
+                            _fresh = get_freshness_recommendation(_ticker, _real_shares)
+                            _pending_buy = _hc_parsed.pending_qty_for(_ticker, "BUY")
+                            if _fresh["recommendation"] == "trust_document":
+                                _holdings_correction = (
+                                    f"\n\n(Note: confirmed {_real_str} shares of {_ticker}, "
+                                    f"verified against live brokerage data as of "
+                                    f"{_fresh['last_checked'][:10]}.)"
+                                )
+                            elif _fresh["recommendation"] == "append_note" and _fresh.get("last_checked"):
+                                # Real, live-verified data exists and disagrees with the
+                                # document too -- read the actual live qty from the
+                                # freshness record itself, don't just re-cite the
+                                # document we now know is stale.
+                                import json as _hc_json
+                                try:
+                                    with open("data/holdings_freshness.json") as _hc_ff:
+                                        _live_qty = _hc_json.load(_hc_ff)[_ticker]["qty_at_check"]
+                                    _holdings_correction = (
+                                        f"\n\n(Note: live brokerage data as of "
+                                        f"{_fresh['last_checked'][:10]} showed {_live_qty:g} "
+                                        f"shares of {_ticker} -- the stored reference document "
+                                        f"({_real_str} shares) is confirmed out of date.)"
+                                    )
+                                except Exception:
+                                    _fresh["recommendation"] = "needs_live_check"  # real, honest fallback if the file read fails here
+                            if _fresh["recommendation"] == "needs_live_check":
+                                _holdings_correction = (
+                                    f"\n\n(Note: the stored reference document lists {_real_str} "
+                                    f"shares of {_ticker}"
+                                    + (f", with a separate, unexecuted pending buy order for {_pending_buy:g} more" if _pending_buy else "")
+                                    + ". This document may not reflect the most recent trades -- "
+                                    "ask for live verification if this matters for a real decision.)"
+                                )
+                    break
+                if _holdings_correction:
+                    break
+    except Exception:
+        pass  # real, deliberate: never let verification break the real response
+
+    if _holdings_correction:
+        full_response = full_response + _holdings_correction
+
     if (
-        tool_events
-        and full_response.strip()
-        and full_response.strip() != (_response_before_tool_summary or "").strip()
-        and full_response.strip() not in (_response_before_tool_summary or "")
+        full_response.strip()
+        and (
+            (tool_events and full_response.strip() != (_response_before_tool_summary or "").strip()
+             and full_response.strip() not in (_response_before_tool_summary or ""))
+            or _holdings_correction
+        )
     ):
-        _final_delta = full_response.strip()
-        yield f"data: {json.dumps({'delta': _final_delta})}\n\n"
+        # Real, fixed 2026-08-28: for the ticker LoRA specifically, the main
+        # answer was already streamed once by the dedup-buffer fix earlier
+        # in this same function (see _ody_ticker_model/_dedup_buf) -- this
+        # pre-existing block previously re-yielded the ENTIRE full_response
+        # whenever tool_events were present, which for this model meant
+        # the already-shown answer appeared a second time, immediately
+        # followed by the real holdings correction note, looking exactly
+        # like the verbatim-repeat bug already fixed elsewhere. Confirmed
+        # this precisely via a temporary, reverted debug log tracing
+        # _dedup_buf's own clean, single-copy state at flush time against
+        # the corrupted final content -- the duplicate was introduced here,
+        # not in the dedup fix itself. For this model, yield only the new
+        # holdings-correction text (the genuinely new content), never the
+        # whole response again.
+        if _ody_ticker_model and tool_events:
+            _final_delta = _holdings_correction or ""
+        else:
+            _final_delta = _holdings_correction if (_holdings_correction and not tool_events) else full_response.strip()
+        if _final_delta:
+            yield f"data: {json.dumps({'delta': _final_delta})}\n\n"
 
     # --- Final metrics ---
     total_duration = time.time() - total_start

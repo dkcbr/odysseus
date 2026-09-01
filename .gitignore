@@ -89,6 +89,9 @@ output.txt.txt
 reports/
 tasks/
 scripts/compound/*.json
+scripts/results/*.json
+scripts/summaries/*.json
+scripts/captures/*.json
 research_data/
 **/search_analytics.json
 
@@ -102,3 +105,6 @@ compound.config.json
 *.error.log
 _scratch/
 /odysseus/
+
+# Repro harness output (real test runs, not source -- see repro_harness.py)
+repro_runs/

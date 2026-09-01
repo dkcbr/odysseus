@@ -43,6 +43,17 @@ STALE_AFTER_SECONDS = 10
 DESIRED_AGENTS: dict[str, dict] = {
     "browser_agent": {"enabled": True, "description": "Controls Playwright browser automation"},
     "filesystem_agent": {"enabled": True, "description": "Handles filesystem operations"},
+    # Real, added 2026-08-24: wiring desktop_sandbox into the real task
+    # queue. Real, honest note found while doing this: system_agent,
+    # market_agent, and memory_agent all exist in the real capability
+    # registry (data/agent_capabilities.json) but are genuinely missing
+    # from this dict -- confirmed directly that a task for any agent not
+    # in DESIRED_AGENTS (or not enabled here) gets rejected outright at
+    # claim time ("Agent disabled or not registered"), so those 3 agents'
+    # tasks are likely currently broken through the real queue. Flagged
+    # separately on the todo list; deliberately not fixed here to keep
+    # this change scoped to desktop_agent specifically.
+    "desktop_agent": {"enabled": True, "description": "Controls the isolated desktop-sandbox container (screenshot, mouse, keyboard)"},
 }
 
 # Real, restored 2026-08-09 -- matches the host-side path (data/agent_worker_logs)
@@ -58,6 +69,13 @@ class TaskCreate(BaseModel):
     priority: int = 5
     max_retries: int = 3
     schedule_at: float | None = None
+    # Real, added 2026-08-26: optional, real grouping key for a
+    # multi-step workflow (e.g. several related tasks created by the
+    # same real plan/agent run). Purely additive -- omitting it (the
+    # real, existing default) behaves exactly as before. See
+    # agent_worker.py's own real workflow-budget logic for how this
+    # gets used.
+    workflow_id: str | None = None
 
 
 class TaskResult(BaseModel):
@@ -80,18 +98,20 @@ def create_task_db_native(body: TaskCreate) -> dict:
         "result": None,
         "created_at": now,
         "updated_at": now,
+        "workflow_id": body.workflow_id,
     }
     conn = sqlite3.connect(DB_PATH)
     try:
         conn.execute(
             """INSERT INTO tasks
                (id, created_at, updated_at, agent, server, tool, arguments,
-                priority, retry_count, max_retries, schedule_at, status, result)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                priority, retry_count, max_retries, schedule_at, status, result,
+                workflow_id)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (task["id"], task["created_at"], task["updated_at"], task["agent"],
              task["server"], task["tool"], json.dumps(task["arguments"]),
              task["priority"], task["retry_count"], task["max_retries"],
-             task["schedule_at"], task["status"], None),
+             task["schedule_at"], task["status"], None, task["workflow_id"]),
         )
         conn.commit()
     finally:
@@ -441,6 +461,93 @@ async def get_history_db_route(request: Request, limit: int = 200):
     """Real, DB-backed history for the Task History UI panel."""
     require_admin(request)
     return get_history_db(limit)
+
+
+@router.get("/tool-analytics")
+async def get_tool_analytics(request: Request):
+    """Real, aggregated tool usage stats -- computed from the same real
+    JSON-lines worker log files get_worker_logs() reads, across every real
+    agent in DESIRED_AGENTS, not just one. Aggregates: per-tool call count,
+    average/max duration, failure rate; and per-agent totals. No new data
+    source -- purely a server-side aggregation of what's already logged.
+
+    Restored 2026-08-23 -- genuinely lost in 99f7fe2f, per a direct,
+    confirmed check against that commit's actual diff. Its two sibling
+    routes from the same original diff hunk (/throughput,
+    /worker-logs/{agent}) were already restored, likely in a separate
+    session; only this one was still genuinely missing. Dependencies
+    verified first: DESIRED_AGENTS and WORKER_LOG_DIR both still exist,
+    and the real worker log files still contain real (though not
+    actively updating) tool_start/tool_end entries matching the expected
+    schema.
+    """
+    require_admin(request)
+
+    per_tool: dict[str, dict] = {}
+    per_agent: dict[str, dict] = {}
+
+    for agent in DESIRED_AGENTS:
+        log_path = WORKER_LOG_DIR / f"{agent}.jsonl"
+        if not log_path.exists():
+            continue
+
+        agent_stats = {"total_calls": 0, "failed_calls": 0}
+        # tool_end entries carry duration/outcome but not server/tool (only
+        # tool_start does) -- correlate by task_id in a first pass to get
+        # the real tool name for each completed call.
+        task_tool_map: dict[str, str] = {}
+        raw_lines = []
+        with open(log_path) as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    entry = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                raw_lines.append(entry)
+                if entry.get("phase") == "tool_start" and entry.get("tool"):
+                    task_tool_map[entry.get("task_id")] = f"{entry.get('server', '?')}.{entry.get('tool')}"
+
+        for entry in raw_lines:
+            if entry.get("phase") != "tool_end":
+                continue  # only completed calls carry duration/outcome
+
+            tool_key = task_tool_map.get(entry.get("task_id"), f"{agent} (unknown tool)")
+            if tool_key not in per_tool:
+                per_tool[tool_key] = {"calls": 0, "failures": 0, "total_duration_ms": 0.0, "max_duration_ms": 0.0, "min_duration_ms": None, "agents": set()}
+            pt = per_tool[tool_key]
+            pt["calls"] += 1
+            pt["agents"].add(agent)
+            outcome = entry.get("outcome")
+            if outcome and outcome != "success":
+                pt["failures"] += 1
+                agent_stats["failed_calls"] += 1
+            dur = entry.get("duration_ms")
+            if dur is not None:
+                pt["total_duration_ms"] += dur
+                pt["max_duration_ms"] = max(pt["max_duration_ms"], dur)
+                pt["min_duration_ms"] = dur if pt["min_duration_ms"] is None else min(pt["min_duration_ms"], dur)
+            agent_stats["total_calls"] += 1
+
+        per_agent[agent] = agent_stats
+
+    tools_out = []
+    for tool_key, pt in per_tool.items():
+        avg_duration = (pt["total_duration_ms"] / pt["calls"]) if pt["calls"] else 0
+        tools_out.append({
+            "tool": tool_key,
+            "calls": pt["calls"],
+            "failures": pt["failures"],
+            "failure_rate_pct": round((pt["failures"] / pt["calls"]) * 100, 1) if pt["calls"] else 0,
+            "avg_duration_ms": round(avg_duration, 1),
+            "max_duration_ms": round(pt["max_duration_ms"], 1),
+            "min_duration_ms": round(pt["min_duration_ms"], 1) if pt["min_duration_ms"] is not None else None,
+            "agents": sorted(pt["agents"]),
+        })
+
+    return {"tools": tools_out, "by_agent": per_agent}
 
 
 @router.get("/throughput")
