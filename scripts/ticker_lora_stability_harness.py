@@ -60,7 +60,7 @@ BASE_URL = "http://localhost:7000"
 # (set as a stable ODYSSEUS_INTERNAL_TOKEN env var, not regenerated
 # per-process) earlier this same night. Not a secret meant to be kept
 # out of this script -- it's a fixed, local, loopback-only value.
-INTERNAL_TOKEN = "aeca20c89153b050260dfc3341ee17cf20d21ed8bb1882088f9d844baa692b0a"
+INTERNAL_TOKEN = "1d1df9cf2e87016e4555c10d4bc1fb7cd524fc8c2902a39042a00e733b6d498e"
 
 DEFAULT_TICKERS = ["SOUN", "IONQ", "RGTI", "KTOS", "PL", "NVDA"]
 
