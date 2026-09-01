@@ -56,11 +56,16 @@ import concurrent.futures  # real, added 2026-08-28: stdlib-only,
                             # work, not multiprocessing
 
 BASE_URL = "http://localhost:7000"
-# Real, same internal-token pattern already established and fixed
-# (set as a stable ODYSSEUS_INTERNAL_TOKEN env var, not regenerated
-# per-process) earlier this same night. Not a secret meant to be kept
-# out of this script -- it's a fixed, local, loopback-only value.
-INTERNAL_TOKEN = "1d1df9cf2e87016e4555c10d4bc1fb7cd524fc8c2902a39042a00e733b6d498e"
+# Real fix, 2026-09-01: previously hardcoded here. gitleaks correctly kept
+# flagging this as a committed secret regardless of the earlier reasoning
+# that it was "a fixed, local, loopback-only value not worth protecting" --
+# rotating the value in place just repeated the same exposure with a new
+# secret. Reading from the real ODYSSEUS_INTERNAL_TOKEN env var (already
+# set in .env / docker-compose.yml) actually fixes the pattern. Falls back
+# to empty string (not a real value) if run outside that environment, so
+# this at least fails loudly downstream rather than silently using a
+# hardcoded, potentially-stale secret.
+INTERNAL_TOKEN = os.environ.get("ODYSSEUS_INTERNAL_TOKEN", "")
 
 DEFAULT_TICKERS = ["SOUN", "IONQ", "RGTI", "KTOS", "PL", "NVDA"]
 
