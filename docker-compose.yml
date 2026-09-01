@@ -165,7 +165,15 @@ services:
       # reconnecting a newly-registered MCP server) without an
       # interactive browser login. Fixed, stable value now, so this
       # loopback auth path is actually usable, not just theoretical.
-      - ODYSSEUS_INTERNAL_TOKEN=${ODYSSEUS_INTERNAL_TOKEN:-***REMOVED-LEAKED-INTERNAL-TOKEN***}
+      #
+      # Real fix, 2026-09-01: no hardcoded fallback value here anymore.
+      # gitleaks correctly, repeatedly flagged this line as a committed
+      # secret -- putting a real value in the `:-default` just re-exposed
+      # whatever the token was rotated to. The real value now lives only
+      # in .env (git-ignored) -- this line is a real, required prerequisite,
+      # not optional, so an unset var surfaces as an empty/obviously-wrong
+      # token rather than silently reusing a stale, exposed default.
+      - ODYSSEUS_INTERNAL_TOKEN=${ODYSSEUS_INTERNAL_TOKEN}
       # Real, added 2026-08-31: which Odysseus user's data the new MCP
       # HTTP server (routes/mcp_http_server.py) operates on for
       # owner-scoped tools (manage_email, manage_notes, etc.) -- needed
