@@ -45,6 +45,13 @@ jobs:
         uses: hadolint/hadolint-action@2332a7b74a6de0dda2e2221d575162eba76ba5e5  # v3.3.0
         with:
           dockerfile: Dockerfile
+          # Real fix, 2026-09-01: without this, hadolint fails the job on
+          # ANY finding, including info/style-level ones -- confirmed
+          # directly via a real failed run whose only finding was DL3059
+          # (info: "multiple consecutive RUN instructions"), a harmless
+          # style suggestion. warning+ still fails the job; info/style
+          # still get reported in output, just don't block.
+          failure-threshold: warning
           # DL3008: pinning apt package versions is impractical on a -slim base
           # image. Debian purges old package versions from its repos, so a
           # pinned version breaks future rebuilds. The base image itself is
