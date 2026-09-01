@@ -39,6 +39,21 @@ services:
       # failure. Read-only: this tool should never write into DK's own,
       # hand-maintained vault.
       - /home/dk/gdrive/Obsidian:/app/vault_data:ro
+      # Real, added 2026-08-26: mount DK's real screenshot folder for the
+      # new read_screenshot tool. Read-only -- this tool only reads
+      # existing screenshots, never writes/deletes anything here.
+      - /home/dk/Pictures/Screenshots:/app/screenshots_data:ro
+      # Real, added 2026-08-27: a real, dedicated, SEPARATE mount for the
+      # new gdrive_backup_manager MCP server, deliberately NOT the same
+      # /app/vault_data mount above -- that one is read-only on purpose
+      # (search_vault should never write into DK's hand-maintained
+      # vault), and widening it to rw would have silently removed that
+      # protection for every consumer of that mount, not just this new
+      # tool. Scoped narrowly to just the real backup destination
+      # subdirectory, read-write, so this new server can actually write
+      # new backup archives without touching the broader vault's own
+      # write protection at all.
+      - /home/dk/gdrive/Obsidian/backups/nightly backups:/app/gdrive_backups_data:rw
       # Real, added 2026-08-23: mount the real vault_index.jsonl (built by
       # vault_ingest.py on the host, via cron/manual run, not inside this
       # container) so search_vault's backend can use structured
@@ -141,6 +156,24 @@ services:
       - LOCALHOST_BYPASS=${LOCALHOST_BYPASS:-false}
       - ODYSSEUS_ADMIN_USER=${ODYSSEUS_ADMIN_USER:-admin}
       - ODYSSEUS_ADMIN_PASSWORD=${ODYSSEUS_ADMIN_PASSWORD:-}
+      # Real, added 2026-08-27: was previously unset, meaning
+      # core/middleware.py's own INTERNAL_TOOL_TOKEN fell back to a
+      # fresh secrets.token_hex(32) generated independently by every
+      # separate Python process -- confirmed directly this made the
+      # value genuinely unknowable/unusable for legitimate host-side
+      # scripts wanting to call admin-gated internal routes (e.g.
+      # reconnecting a newly-registered MCP server) without an
+      # interactive browser login. Fixed, stable value now, so this
+      # loopback auth path is actually usable, not just theoretical.
+      - ODYSSEUS_INTERNAL_TOKEN=${ODYSSEUS_INTERNAL_TOKEN:-***REMOVED-LEAKED-INTERNAL-TOKEN***}
+      # Real, added 2026-08-31: which Odysseus user's data the new MCP
+      # HTTP server (routes/mcp_http_server.py) operates on for
+      # owner-scoped tools (manage_email, manage_notes, etc.) -- needed
+      # because .env alone isn't enough; docker-compose only passes
+      # through variables explicitly listed here, confirmed directly
+      # after ODYSSEUS_MCP_OWNER stayed empty inside the container even
+      # after a full --force-recreate.
+      - ODYSSEUS_MCP_OWNER=${ODYSSEUS_MCP_OWNER:-admin}
       - ALLOWED_ORIGINS=${ALLOWED_ORIGINS:-http://localhost,http://127.0.0.1}
       - SECURE_COOKIES=${SECURE_COOKIES:-false}
       - EMBEDDING_URL=${EMBEDDING_URL:-}
