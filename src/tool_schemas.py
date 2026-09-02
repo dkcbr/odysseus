@@ -93,6 +93,20 @@ FUNCTION_TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
+            "name": "lookup_ticker",
+            "description": "Look up REAL, VERIFIED company identity and quote data for a stock/crypto ticker symbol via Financial Modeling Prep. MANDATORY: call this before stating what company a ticker represents, its price, or any other fact about it - never answer from memory. Small and mid-cap tickers are frequently confused with unrelated companies when answered from memory (e.g. TMC has been misidentified as an unrelated medical-communications company when it is actually a deep-sea mining company; MP has been misidentified as an oil refiner when it is a rare-earth miner) - this tool exists specifically to prevent that. If the tool errors (no API key configured, ticker not found), tell the user real data isn't available rather than guessing.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "symbol": {"type": "string", "description": "The ticker symbol to look up, e.g. KTOS"}
+                },
+                "required": ["symbol"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "read_file",
             "description": "Read a file from disk. Optionally read a line range with offset/limit for large files.",
             "parameters": {
@@ -173,6 +187,37 @@ FUNCTION_TOOL_SCHEMAS = [
                     "content": {"type": "string", "description": "File content to write"}
                 },
                 "required": ["path", "content"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "propose_write",
+            "description": "Preview a file write as a diff WITHOUT writing to disk. Returns a commit_token \u2014 pass it to commit_write to actually apply the change.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "File path to write to"},
+                    "content": {"type": "string", "description": "Proposed file content"}
+                },
+                "required": ["path", "content"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "commit_write",
+            "description": "Apply a write previously previewed with propose_write. Requires the exact path, content, and commit_token returned by propose_write \u2014 the token is one-time-use and expires after 5 minutes.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "File path to write to (must match the propose_write call)"},
+                    "content": {"type": "string", "description": "File content (must match the propose_write call)"},
+                    "commit_token": {"type": "string", "description": "Token returned by propose_write for this exact path+content"}
+                },
+                "required": ["path", "content", "commit_token"]
             }
         }
     },
@@ -435,6 +480,51 @@ FUNCTION_TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
+            "name": "get_portfolio_context",
+            "description": "Fetch DK's real, current portfolio context (holdings, strategy, rules, thesis notes) from data/portfolio_context.md. ALWAYS call this for any question about a specific position, balance, holding, or stored trading rule -- never assume you already know the answer, since this file updates over time and you do not have it pre-loaded. This returns a large, complete reference document -- after calling it, find and state the SPECIFIC fact the user actually asked about (e.g. one ticker's share count), not a general summary of everything in the document.",
+            "parameters": {
+                "type": "object",
+                "properties": {},
+                "required": []
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "search_vault",
+            "description": "Search DK's real Obsidian vault (personal notes and reference material, e.g. book summaries in Thesis/) for a query string. ALWAYS call this for any question about what the vault, notes, or a specific document says -- never assume you don't have access or answer from your own training knowledge, since this searches DK's own, real, current notes. Returns matching file names and snippets. If no matches are found, say so honestly rather than guessing at content.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "The search term or phrase to look for across the vault's markdown files."}
+                },
+                "required": ["query"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "create_document_office",
+            "description": "Create a real Word (.docx), PowerPoint (.pptx), Excel (.xlsx), or PDF file on disk, using real document-format libraries (python-docx/python-pptx/openpyxl/reportlab) -- not the generic create_document editor panel, which cannot produce real Office/PDF files. ALWAYS use this when the user asks for a Word document, PowerPoint, spreadsheet, or PDF specifically (as opposed to a plain-text or code document, which still uses create_document). NEVER use bash/run_command/python/echo/redirection to create these files directly -- writing plain text to a .docx/.pptx/.xlsx/.pdf-named file produces an invalid, corrupt file that appears to succeed but cannot actually be opened by Word/PowerPoint/Excel/a PDF reader. This tool is the only correct way to create these 4 formats.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "format": {"type": "string", "enum": ["docx", "pptx", "xlsx", "pdf"], "description": "Which real file format to create."},
+                    "filename": {"type": "string", "description": "Filename without a path, e.g. 'weekly_report.docx'. Will be saved under the user's uploads folder."},
+                    "title": {"type": "string", "description": "Document title (used by docx and pdf)."},
+                    "sections": {"type": "array", "description": "For docx/pdf: list of {heading, text} objects.", "items": {"type": "object", "properties": {"heading": {"type": "string"}, "text": {"type": "string"}}}},
+                    "slides": {"type": "array", "description": "For pptx: list of {title, text} objects, one per slide.", "items": {"type": "object", "properties": {"title": {"type": "string"}, "text": {"type": "string"}}}},
+                    "rows": {"type": "array", "description": "For xlsx: list of rows, each a list of cell values.", "items": {"type": "array"}}
+                },
+                "required": ["format", "filename"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "manage_memory",
             "description": "Manage the user's memory system: list, add, edit, delete, or search memories. Memories persist across sessions.",
             "parameters": {
@@ -444,8 +534,8 @@ FUNCTION_TOOL_SCHEMAS = [
                                "description": "The action to perform"},
                     "text": {"type": "string", "description": "Memory text (for add/edit) or search query (for search)"},
                     "memory_id": {"type": "string", "description": "Memory ID (for edit/delete)"},
-                    "category": {"type": "string", "enum": ["fact", "event", "contact", "preference"],
-                                 "description": "Memory category (for add/list filter)"}
+                    "category": {"type": "string", "enum": ["fact", "event", "contact", "preference", "correction"],
+                                 "description": "Memory category (for add/list filter). Use 'correction' when the user explicitly corrects a mistake or states a lasting behavioral preference for how you should act -- this category is always included in future context, unlike other categories which are only included when relevant to the current request."}
                 },
                 "required": ["action"]
             }
@@ -685,6 +775,34 @@ FUNCTION_TOOL_SCHEMAS = [
                     "problem": {"type": "string", "description": "Describe the problem or question you need help with"}
                 },
                 "required": ["problem"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "skill_introspect",
+            "description": (
+                "Read-only lookup of the user's skill library -- ALWAYS available, "
+                "regardless of domain (trading, email, browser, etc), unlike "
+                "manage_skills which only appears for workspace/file-related requests. "
+                "Use 'list' to see what skills exist, 'view' to load a specific skill's "
+                "full procedure, 'view_ref' for a sub-file, 'search' to find a relevant "
+                "skill by keyword. If a relevant published skill exists for the current "
+                "task, ALWAYS check it here before saying you don't know how to do something "
+                "or that you lack a procedure -- do not assume a skill is unavailable just "
+                "because you don't see it in your current tool list. To create, edit, "
+                "publish, or delete a skill, use manage_skills instead."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "action": {"type": "string", "enum": ["list", "view", "view_ref", "search"], "description": "list = name+description summary; view = full SKILL.md; view_ref = sub-file under the skill dir; search = relevance match on published skills."},
+                    "name": {"type": "string", "description": "Slug/name of the skill. Required for view/view_ref."},
+                    "path": {"type": "string", "description": "Sub-path under the skill directory for view_ref (e.g. 'references/example.md')."},
+                    "query": {"type": "string", "description": "Search text (for search)."}
+                },
+                "required": ["action"]
             }
         }
     },

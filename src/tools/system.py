@@ -21,6 +21,36 @@ logger = logging.getLogger(__name__)
 # Skills management tool
 # ---------------------------------------------------------------------------
 
+async def do_skill_introspect(content: str, owner: Optional[str] = None) -> Dict:
+    """Real, read-only skill introspection -- a thin, safety-gating wrapper
+    around do_manage_skills, added 2026-08-16 (see odysseus issue #11).
+
+    manage_skills is NOT read-only (it supports add/edit/patch/publish/
+    delete), so it's gated behind _WORKSPACE_TERMINUS_TOOLS. This tool
+    exposes ONLY the genuinely read-only actions (list/index/view/
+    view_ref/search) and is safe to place in ALWAYS_AVAILABLE -- it
+    delegates to the exact same, proven do_manage_skills logic rather
+    than duplicating it, but rejects any write action before that logic
+    ever runs.
+    """
+    try:
+        args = _parse_tool_args(content)
+    except ValueError:
+        return {"error": "Invalid JSON arguments", "exit_code": 1}
+    action = (args.get("action") or "").strip().lower()
+    _READ_ONLY_ACTIONS = {"list", "index", "view", "view_ref", "search"}
+    if action not in _READ_ONLY_ACTIONS:
+        return {
+            "error": (
+                f"skill_introspect is read-only and does not support action={action!r}. "
+                f"Allowed: {sorted(_READ_ONLY_ACTIONS)}. To create, edit, publish, or delete "
+                "a skill, use manage_skills instead (only available for workspace/file-related requests)."
+            ),
+            "exit_code": 1,
+        }
+    return await do_manage_skills(content, owner=owner)
+
+
 async def do_manage_skills(content: str, owner: Optional[str] = None) -> Dict:
     """Handle manage_skills tool calls.
 

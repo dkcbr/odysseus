@@ -61,12 +61,64 @@ async def list_tools() -> list[Tool]:
                 },
                 "required": ["action"],
             },
-        )
+        ),
+        Tool(
+            name="search_rag",
+            description=(
+                "Search indexed documentation, notes, and knowledge bases -- including "
+                "the Infinite Brain OS knowledge base -- by relevance. Use this whenever "
+                "a question references docs, a knowledge base, indexed files, or "
+                "something that sounds like it comes from written source material "
+                "rather than general knowledge. Returns matching chunks with their "
+                "real source file path, so results can be cited back to where they "
+                "came from."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "Search query"},
+                    "k": {"type": "integer", "description": "Number of results to return (default 5)"},
+                },
+                "required": ["query"],
+            },
+        ),
     ]
+
+
+async def _handle_search_rag(arguments: dict) -> list[TextContent]:
+    """Real, added 2026-08-09."""
+    _ensure_init()
+    if not _rag_manager:
+        return [TextContent(type="text", text="Error: RAG manager not available")]
+
+    query = arguments.get("query", "")
+    k = arguments.get("k", 5)
+    if not query:
+        return [TextContent(type="text", text="Error: search_rag needs a query")]
+
+    try:
+        results = _rag_manager.search(query, k=k)
+    except Exception as e:
+        return [TextContent(type="text", text=f"Error: search failed: {e}")]
+
+    if not results:
+        return [TextContent(type="text", text="No matching results found.")]
+
+    lines = []
+    for r in results:
+        meta = r.get("metadata", {}) if isinstance(r, dict) else {}
+        source = meta.get("source", "unknown source")
+        doc = r.get("document", "") if isinstance(r, dict) else str(r)
+        snippet = doc[:400] + ("..." if len(doc) > 400 else "")
+        lines.append(f"[{source}]\n{snippet}")
+
+    return [TextContent(type="text", text="\n\n---\n\n".join(lines))]
 
 
 @server.call_tool()
 async def call_tool(name: str, arguments: dict) -> list[TextContent]:
+    if name == "search_rag":
+        return await _handle_search_rag(arguments)
     if name != "manage_rag":
         return [TextContent(type="text", text=f"Unknown tool: {name}")]
 
@@ -147,8 +199,7 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         except Exception as e:
             return [TextContent(type="text", text=f"Error: Failed to remove directory: {e}")]
 
-    else:
-        return [TextContent(type="text", text=f"Error: Unknown action '{action}'. Use: list, add_directory, remove_directory")]
+    return [TextContent(type="text", text=f"Error: Unknown action '{action}'. Use: list, add_directory, remove_directory")]
 
 
 async def run():

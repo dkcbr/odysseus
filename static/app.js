@@ -10,14 +10,14 @@ import modelsModule from './js/models.js?v=20260715startupcalm2';
 import ragModule from './js/rag.js';
 import presetsModule from './js/presets.js';
 import searchModule from './js/search.js';
-import chatModule from './js/chat.js?v=20260722ctxheader4';
+import chatModule from './js/chat.js?v=20260801fix1';
 import compareModule from './js/compare/index.js?v=20260723compareicon2';
 import documentModule from './js/document.js?v=20260722emailfastindex1';
 import searchChatModule from './js/search-chat.js';
 import { makeWindowDraggable } from './js/windowDrag.js';
 import markdownModule from './js/markdown.js';
 import chatRenderer from './js/chatRenderer.js?v=20260722emailfastindex1';
-import sessionModule from './js/sessions.js?v=20260722ctxheader4';
+import sessionModule from './js/sessions.js';
 import memoryModule from './js/memory.js?v=20260722memoryloading1';
 import voiceRecorderModule from './js/voiceRecorder.js';
 import censorModule from './js/censor.js';
@@ -45,6 +45,12 @@ import spinnerModule from './js/spinner.js';
 import { initKeyboardShortcuts } from './js/keyboard-shortcuts.js';
 import { initSidebarLayout, syncRailSide } from './js/sidebar-layout.js?v=20260715startupclean';
 import { initSectionCollapse, initSectionDrag } from './js/section-management.js';
+import registryModule from './js/registry.js';
+import capabilitiesModule from './js/capabilities.js';
+import tradingviewModule from './js/tradingview.js';
+import pollerStatusModule from './js/poller_status.js';
+import pollerDashboardModule from './js/poller_dashboard.js';
+import taskHistoryModule from './js/task_history.js';
 
 const API_BASE = window.location.origin;
 window.themeModule = themeModule;
@@ -1689,11 +1695,19 @@ function initializeEventListeners() {
   
   const newMemoryInput = el('new-memory-input');
   if (newMemoryInput) {
-    newMemoryInput.addEventListener('keypress', (e) => {
-      if (e.key === 'Enter') {
+    // keydown, not the deprecated keypress: keypress is not guaranteed to
+    // fire for Enter everywhere, which left the Add Memory form with no
+    // working submit path (#5828).
+    newMemoryInput.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' && !e.isComposing) {
+        e.preventDefault();
         memoryModule.addNewMemory();
       }
     });
+  }
+  const newMemoryAddBtn = el('new-memory-add-btn');
+  if (newMemoryAddBtn) {
+    newMemoryAddBtn.addEventListener('click', () => memoryModule.addNewMemory());
   }
 
 // Voice recording is handled by the dual-purpose send/mic button (see below)
@@ -3752,6 +3766,36 @@ function startOdysseusApp() {
     searchChatModule.init(API_BASE);
   }
 
+  // Initialize agent registry module
+  if (registryModule) {
+    registryModule.init();
+  }
+
+  // Initialize capability inspector module
+  if (capabilitiesModule) {
+    capabilitiesModule.init();
+  }
+
+  // Initialize TradingView module
+  if (tradingviewModule) {
+    tradingviewModule.init();
+  }
+
+  // Initialize poller status module
+  if (pollerStatusModule) {
+    pollerStatusModule.init();
+  }
+
+  // Initialize poller dashboard module
+  if (pollerDashboardModule) {
+    pollerDashboardModule.init();
+  }
+
+  // Initialize task history module
+  if (taskHistoryModule) {
+    taskHistoryModule.init();
+  }
+
   // Search buttons — icon rail + sidebar
   const railSearchBtn = el('rail-search-btn');
   if (railSearchBtn) {
@@ -3908,85 +3952,10 @@ function startOdysseusApp() {
   const messageInput = el('message');
   const modelPickerWrap = document.getElementById('model-picker-wrap');
 
-  function _readComposerPromptHistory() {
-    const chatBox = document.getElementById('chat-history');
-    if (!chatBox) return [];
-    return Array.from(chatBox.querySelectorAll('.msg-user'))
-      .reverse()
-      .map(msg => {
-        const body = msg.querySelector('.body');
-        return msg.dataset?.raw || (body ? body.textContent : '') || '';
-      })
-      .filter(Boolean);
-  }
-
-  if (messageInput && !messageInput._odysseusPromptRecallCapture) {
-    messageInput._odysseusPromptRecallCapture = true;
-    let recallHistory = [];
-    let recallIndex = -1;
-    let lastRecalled = '';
-    const norm = (v) => String(v || '').replace(/\r\n/g, '\n').trimEnd();
-    messageInput.addEventListener('input', () => {
-      if (norm(messageInput.value) === norm(lastRecalled)) return;
-      recallHistory = [];
-      recallIndex = -1;
-      lastRecalled = '';
-      try { delete messageInput.dataset.odysseusRecallIndex; } catch {}
-    }, true);
-    messageInput.addEventListener('keydown', (e) => {
-      if (e.key !== 'ArrowUp' && e.key !== 'ArrowDown') return;
-      if (e.shiftKey || e.altKey || e.ctrlKey || e.metaKey || e.isComposing) return;
-      if (window._ghostAutocomplete?.isActive?.()) return;
-      const fresh = _readComposerPromptHistory();
-      const history = fresh.length ? fresh : recallHistory;
-      if (!history.length) return;
-      const current = norm(messageInput.value);
-      let currentIndex = current ? history.findIndex(item => norm(item) === current) : -1;
-      if (current && currentIndex < 0 && current === norm(lastRecalled)) currentIndex = recallIndex;
-      if (current && currentIndex < 0) {
-        const markedIndex = Number(messageInput.dataset.odysseusRecallIndex);
-        if (Number.isInteger(markedIndex) && markedIndex >= 0 && markedIndex < history.length) {
-          currentIndex = markedIndex;
-        }
-      }
-      e.preventDefault();
-      e.stopPropagation();
-      e.stopImmediatePropagation();
-      if (e.key === 'ArrowDown') {
-        if (currentIndex < 0) return;
-        const nextIndex = currentIndex - 1;
-        if (nextIndex < 0) {
-          recallHistory = history;
-          recallIndex = -1;
-          lastRecalled = '';
-          try { delete messageInput.dataset.odysseusRecallIndex; } catch {}
-          messageInput.value = '';
-          try { messageInput.selectionStart = messageInput.selectionEnd = 0; } catch {}
-          try { uiModule.autoResize(messageInput); } catch {}
-          return;
-        }
-        const recalled = history[nextIndex];
-        recallHistory = history;
-        recallIndex = nextIndex;
-        lastRecalled = recalled;
-        try { messageInput.dataset.odysseusRecallIndex = String(nextIndex); } catch {}
-        messageInput.value = recalled;
-        try { messageInput.selectionStart = messageInput.selectionEnd = recalled.length; } catch {}
-        try { uiModule.autoResize(messageInput); } catch {}
-        return;
-      }
-      const nextIndex = currentIndex >= 0 ? Math.min(currentIndex + 1, history.length - 1) : 0;
-      const recalled = history[nextIndex];
-      if (!recalled) return;
-      recallHistory = history;
-      recallIndex = nextIndex;
-      lastRecalled = recalled;
-      try { messageInput.dataset.odysseusRecallIndex = String(nextIndex); } catch {}
-      messageInput.value = recalled;
-      try { messageInput.selectionStart = messageInput.selectionEnd = recalled.length; } catch {}
-      try { uiModule.autoResize(messageInput); } catch {}
-    }, true);
-  }
+  // ArrowUp/ArrowDown prompt recall on #message lives in
+  // static/js/composerArrowUpRecall.js (wired from chat.js). Do not re-add a
+  // copy here: two capture-phase listeners on the same textarea meant the one
+  // without the draft guard won and ate unsent multi-line prompts (#5862).
 
   const _sendIcon = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg>';
   const _micIcon = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/></svg>';

@@ -51,3 +51,50 @@ pytest-asyncio
 # TestClient import when only classic httpx is present. Runtime code keeps
 # using `httpx` above; this is test-client only.
 httpx2
+
+# Added for jarvis_browser MCP server (data/mcp/jarvis_browser_mcp.py)
+playwright>=1.48.0
+
+# Public.com's own official, vendor-maintained MCP server -- real,
+# complete, correct implementation (37 tools) replacing the earlier
+# hand-built public_com_mcp.py, which is being removed. Confirmed
+# real: github.com/PublicDotCom/publicdotcom-mcp-server
+publicdotcom-mcp-server
+
+# Added for youtube_transcript MCP server (services/mcp_servers/youtube_transcript/)
+yt-dlp
+
+# Real document-creation libraries (docx/pptx/xlsx/pdf), added 2026-08-13
+# (re-added 2026-08-14 after the original addition was lost to a
+# concurrent uncommitted-edit git checkout, same class of incident as
+# the tool_index.py loss -- see 703c5b7c and the reconstruction commits)
+# to give the agent's existing python tool real Office/PDF file-creation
+# capability -- matches the same real, well-known Python packages Anthropic's
+# own official docx/pptx/xlsx/pdf skills use (github.com/anthropics/skills).
+python-docx
+python-pptx
+openpyxl
+reportlab
+
+# Real, added 2026-08-18: for jarvis_desktop's scroll_inject.py, which
+# creates a real virtual input device to inject wheel/scroll events
+# directly (ydotool has no working scroll support on this host -- see
+# scroll()'s own docstring for the full history).
+evdev
+
+# Real, added 2026-08-23: scriptable VNC control for desktop_sandbox_mcp.py
+# (screenshot/mouse/keyboard against the isolated desktop-sandbox container,
+# part of closing a real Bytebot-inspired capability gap -- full desktop
+# isolation, not just browser/host-shared control). MIT licensed, genuinely
+# lightweight -- not staged in requirements-optional.txt, unlike this
+# codebase's other optional deps, since none of the same licensing/weight
+# concerns apply here. Used via its own CLI (vncdo), spawned as a real,
+# separate subprocess -- NOT via vncdotool's own Python API imported
+# directly into this process. Confirmed directly: importing the API (which
+# manages its own internal Twisted reactor thread) into a FastMCP async
+# server hangs the whole server completely, even for tool calls unrelated
+# to any VNC operation -- a known, real category of Twisted/asyncio
+# incompatibility when mixed in one process. Running vncdo as a separate
+# subprocess sidesteps this entirely, since Twisted's reactor then lives in
+# its own, separate process, never touching this process's asyncio loop.
+vncdotool

@@ -273,6 +273,14 @@ _PER_USER_KEYS = {
     "default_endpoint_id", "default_model", "default_model_fallbacks",
     "utility_endpoint_id", "utility_model", "utility_model_fallbacks",
     "research_endpoint_id", "research_model",
+    # Real, added 2026-08-24: the voice pipeline (wake word -> Whisper ->
+    # LLM -> Piper TTS, being rebuilt to integrate with Odysseus) needs a
+    # genuinely fast, low-latency model for real-time conversation, kept
+    # deliberately independent of whatever default_model is set to for
+    # regular chat -- switching your default chat model should never
+    # change what the voice loop uses, and vice versa. Same real,
+    # established pattern as utility_model/research_model above.
+    "voice_endpoint_id", "voice_model", "voice_model_fallbacks",
 }
 
 

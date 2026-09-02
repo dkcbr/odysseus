@@ -1,0 +1,9 @@
+{
+  "name": "prompt_reliability",
+  "description": "Real suite covering tool-calling reliability under real, varied real-world conditions: the default, general-purpose mixed scenario, and prompt-shape variety (short/verbose/noisy/fragment phrasing for the same real, in-training tickers).",
+  "suite_tags": ["reliability", "prompt-shape"],
+  "scenarios": [
+    "scenarios/mixed_holdings_default.json",
+    "scenarios/prompt_shape_variety.json"
+  ]
+}

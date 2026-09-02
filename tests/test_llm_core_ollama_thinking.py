@@ -49,7 +49,7 @@ class _FakeClient:
         return _FakeStreamCtx(self.captured_payload)
 
 
-def _capture_payload(monkeypatch, url, model):
+def _capture_payload(monkeypatch, url, model, tools=None):
     """Run stream_llm, intercept the HTTP payload, and return it."""
     client = _FakeClient()
     monkeypatch.setattr(llm_core, "_get_http_client", lambda: client)
@@ -60,7 +60,7 @@ def _capture_payload(monkeypatch, url, model):
 
     async def run():
         return [c async for c in llm_core.stream_llm(
-            url, model, [{"role": "user", "content": "hi"}],
+            url, model, [{"role": "user", "content": "hi"}], tools=tools,
         )]
 
     asyncio.run(run())
@@ -163,3 +163,52 @@ class TestThinkSuppression:
             monkeypatch, "http://127.0.0.1:11435/v1/chat/completions", "qwen3:14b"
         )
         assert payload.get("think") is False
+
+
+# ---------------------------------------------------------------------------
+# Fence stop-sequence — ollama/ollama#14493 mitigation. Ollama's Qwen3
+# renderer doesn't reliably stop generation after a tool-call turn, letting
+# the model fabricate a fake continuation past the real tool call (observed
+# directly: a real tool call followed immediately by an invented company
+# name and price in the same generation). Scoped to tool-offering requests
+# only, same URL+model gate as think:false.
+# ---------------------------------------------------------------------------
+
+_A_TOOL = [{"type": "function", "function": {"name": "lookup_ticker", "parameters": {}}}]
+
+
+class TestFenceStopSequence:
+    def test_fence_stop_added_for_ollama_v1_thinking_model_with_tools(self, monkeypatch):
+        payload = _capture_payload(
+            monkeypatch, "http://127.0.0.1:11434/v1/chat/completions", "qwen3:14b",
+            tools=_A_TOOL,
+        )
+        assert payload.get("think") is False
+        assert "```\n" in (payload.get("stop") or [])
+
+    def test_no_fence_stop_without_tools(self, monkeypatch):
+        """Plain chat (no tools offered) must not get the fence stop - it
+        would truncate a legitimate answer containing a real code block."""
+        payload = _capture_payload(
+            monkeypatch, "http://127.0.0.1:11434/v1/chat/completions", "qwen3:14b",
+            tools=None,
+        )
+        assert payload.get("think") is False
+        assert "stop" not in payload
+
+    def test_no_fence_stop_for_non_thinking_model_even_with_tools(self, monkeypatch):
+        payload = _capture_payload(
+            monkeypatch, "http://127.0.0.1:11434/v1/chat/completions", "llama3.2:3b",
+            tools=_A_TOOL,
+        )
+        assert "think" not in payload
+        assert "stop" not in payload
+
+    def test_no_fence_stop_for_openai_endpoint_even_with_thinking_model_name(self, monkeypatch):
+        payload = _capture_payload(
+            monkeypatch, "https://api.openai.com/v1/chat/completions", "qwen3:14b",
+            tools=_A_TOOL,
+        )
+        assert "think" not in payload
+        assert "stop" not in payload
+
