@@ -100,8 +100,15 @@ You are updating an evolving research report.
 
 Integrate the new findings into the existing report. Produce an updated, well-organized \
 report that answers the original question as completely as possible given all evidence so far. \
-Remove redundancy, resolve contradictions, and maintain logical flow. \
-Keep source URLs as inline citations where relevant.
+Remove redundancy, resolve contradictions, and maintain logical flow.
+
+CITATION REQUIREMENT: every specific fact, claim, statistic, or quote you take from the \
+findings above must be followed immediately by an inline citation linking to that finding's \
+URL, in the form [short label](url) -- reuse the exact URL shown next to that finding, e.g. \
+finding "[Some Page Title](https://example.com/page)" backing a claim becomes \
+"...as reported by [Some Page Title](https://example.com/page)." A sentence stating a fact \
+from a finding with no citation attached is incomplete -- add the link, don't drop it, even \
+for facts that also sound like general knowledge.
 
 Write only the updated report — no preamble or meta-commentary.
 """
@@ -138,13 +145,19 @@ Write a **long, detailed, comprehensive** research report answering this questio
 **All collected evidence and analysis:**
 {report}
 
-Requirements:
+CITATION REQUIREMENT, non-negotiable: the evidence above already contains each source's URL \
+(as [title](url) links). Every specific fact, statistic, or claim you state in the report must \
+keep or add its inline citation in that same [title](url) form, right where the fact appears -- \
+not collected in a references list at the end. A sentence stating a specific fact with no link \
+attached is a defect in the report, not an acceptable simplification. If the evidence above has \
+no citation for something, don't state it as a sourced fact.
+
+Other requirements:
 - Write at MINIMUM 1500 words — this should be a thorough, magazine-quality article
 - Use clear ## headings and ### subheadings to organize into logical sections
 - Each section should have multiple detailed paragraphs, not just bullet points
 - Synthesize and analyze the information — explain WHY things matter, draw comparisons, provide context
 - Include specific data points, numbers, and statistics from the evidence
-- Include source URLs as inline citations [like this](url)
 - Note where sources agree and where they disagree
 - Add a brief executive summary at the top
 - End with a clear conclusion that directly answers the question
@@ -157,14 +170,18 @@ CATEGORY_PROMPTS = {
 - For EACH product include: name as ### heading, approximate price, 2-3 sentence summary, **Pros:** bullet list, **Cons:** bullet list, **Where to buy:** URLs as links
 - Start with a quick-compare markdown table of top picks (columns: Name, Price, Best For, Rating)
 - End with a ## Verdict section picking Best Overall and Best Value
-- Still include source citations inline""",
+- REMINDER: every fact above had a source link next to it -- keep those
+  [title](url) citations inline in this report, not just in the table""",
 
     "comparison": """IMPORTANT FORMAT OVERRIDE — this is a COMPARISON report:
 - Create a ## Comparison Table as a markdown table comparing ALL options across key criteria (rows = criteria, columns = options)
 - Use checkmarks, ratings, or short values in cells
 - Write a ## section per option with its strengths, weaknesses, and ideal use case
 - End with ## Best For verdicts (e.g., "**Best for small teams:** Option A because...")
-- Include a ## Shared Considerations section for things that apply to all options""",
+- Include a ## Shared Considerations section for things that apply to all options
+- REMINDER: every fact above had a source link next to it -- keep those
+  [title](url) citations inline as you write each strength/weakness, not
+  just in the table""",
 
     "howto": """IMPORTANT FORMAT OVERRIDE — this is a HOW-TO guide:
 - Start with ## Quick Guide — a super concise numbered list (one line per step, no details, just the action). Example: 1. Install X  2. Run Y  3. Configure Z
@@ -173,7 +190,9 @@ CATEGORY_PROMPTS = {
 - Each step should have a clear heading and detailed instructions
 - Use blockquotes (> ) for tips and warnings: > **Tip:** ... or > **Warning:** ...
 - End with ## Common Mistakes section
-- Add estimated time and difficulty level near the top""",
+- Add estimated time and difficulty level near the top
+- REMINDER: every fact above had a source link next to it -- keep those
+  [title](url) citations inline in the detailed steps""",
 
     "factcheck": """IMPORTANT FORMAT OVERRIDE — this is a FACT-CHECK report:
 - Start with ## The Claim restating what's being checked
@@ -181,7 +200,8 @@ CATEGORY_PROMPTS = {
 - Each piece of evidence should be a ### with source name, what it found, and how strong the evidence is
 - Include a ## Verdict section with one of: **Supported**, **Mixed Evidence**, or **Unsupported**
 - End with ## Nuance & Caveats for important context and limitations
-- Be balanced and cite sources for every claim""",
+- Be balanced and cite sources for every claim -- keep the [title](url)
+  links from the evidence above inline, not just named in prose""",
 }
 
 # ---------------------------------------------------------------------------
@@ -751,6 +771,22 @@ class DeepResearcher:
         cat_extra = CATEGORY_PROMPTS.get(self.category or "", "")
         if cat_extra:
             prompt += "\n\n" + cat_extra
+        # Real, live-caught bug, 2026-09-11: the CITATION REQUIREMENT earlier
+        # in FINAL_REPORT_PROMPT was not enough on its own -- confirmed
+        # directly, live: a synthesized report with real, correct inline
+        # citations went in, and the "polished" final report came out with
+        # every citation stripped, even though the CITATION REQUIREMENT
+        # paragraph was right there. Added this closing reminder (after
+        # everything else, including any category template -- the last
+        # thing the model reads before writing), unconditionally rather than
+        # just inside CATEGORY_PROMPTS, since self.category can be
+        # None/"general" and get no category template appended at all.
+        prompt += (
+            "\n\nOne last reminder before you write: keep every [title](url) "
+            "citation from the evidence above in your final report, right "
+            "next to the fact it supports. Do not write a polished version "
+            "that drops the links."
+        )
 
         try:
             result = await self._llm(
