@@ -138,12 +138,25 @@ Example: "NO — We still lack information about the economic impact."
 """
 
 FINAL_REPORT_PROMPT = """\
-Write a **long, detailed, comprehensive** research report answering this question:
+Write a research report answering this question:
 
 **Question:** {question}
 
 **All collected evidence and analysis:**
 {report}
+
+LENGTH: let the evidence above set the length, not a fixed target. If it's rich and \
+detailed, a long 1500+ word magazine-quality article is appropriate. If it's thin -- only \
+a few findings, or narrow in scope -- a shorter, honest report is correct. A concise report \
+that sticks to what the evidence actually supports is better than a long one padded with \
+invented detail to hit a word count.
+
+ANTI-FABRICATION, non-negotiable: every claim, criterion, statistic, or section in this \
+report must be directly supported by the evidence above. Do not introduce a topic, \
+comparison criterion, or section (e.g. hardware, performance, pricing) that the evidence \
+above does not actually discuss, even if it would make the report feel more complete. If \
+the evidence doesn't cover something, leave it out entirely rather than filling the gap \
+with plausible-sounding invented content.
 
 CITATION REQUIREMENT, non-negotiable: the evidence above already contains each source's URL \
 (as [title](url) links). Every specific fact, statistic, or claim you state in the report must \
@@ -153,14 +166,15 @@ attached is a defect in the report, not an acceptable simplification. If the evi
 no citation for something, don't state it as a sourced fact.
 
 Other requirements:
-- Write at MINIMUM 1500 words — this should be a thorough, magazine-quality article
 - Use clear ## headings and ### subheadings to organize into logical sections
-- Each section should have multiple detailed paragraphs, not just bullet points
-- Synthesize and analyze the information — explain WHY things matter, draw comparisons, provide context
+- Where the evidence supports it, use multiple detailed paragraphs, not just bullet points
+- Synthesize and analyze the information — explain WHY things matter, draw
+  comparisons, provide context, but only for what the evidence actually shows
 - Include specific data points, numbers, and statistics from the evidence
 - Note where sources agree and where they disagree
 - Add a brief executive summary at the top
-- End with a clear conclusion that directly answers the question
+- End with a clear conclusion that directly answers the question, scoped to
+  what the evidence actually supports
 - Write in an engaging, informative style — not dry or robotic
 """
 
@@ -792,7 +806,10 @@ class DeepResearcher:
             "\n\nOne last reminder before you write: keep every [title](url) "
             "citation from the evidence above in your final report, right "
             "next to the fact it supports. Do not write a polished version "
-            "that drops the links."
+            "that drops the links. Also: do not add sections, criteria, or "
+            "claims about topics the evidence above doesn't cover -- a "
+            "shorter, accurate report beats a longer one with invented "
+            "detail."
         )
 
         try:
@@ -803,7 +820,28 @@ class DeepResearcher:
                 timeout=180,
             )
 
-            # If report is too short, ask the LLM to expand it
+            # If the report is short, expanding it can genuinely help -- but
+            # only when there was enough real evidence to justify more words.
+            # Real, live-caught tension, 2026-09-11: the old expansion prompt
+            # below ("target at least 1000 words", "add specific data") is
+            # exactly the same length/detail pressure that caused the
+            # original fabricated-sections problem (Hardware, Performance)
+            # in a live test -- forcing it on genuinely thin evidence would
+            # just reintroduce that pressure through a second path. Skips
+            # the forced expansion below min_findings_for_expansion; accepts
+            # the shorter, evidence-faithful report instead. 4 findings is a
+            # real, chosen threshold: less than roughly one full round's
+            # worth of real results is treated as genuinely thin material.
+            min_findings_for_expansion = 4
+            if len(result.split()) < 400 and len(self.findings) < min_findings_for_expansion:
+                logger.info(
+                    f"Final report is short ({len(result.split())} words) but "
+                    f"only {len(self.findings)} finding(s) were gathered -- "
+                    f"accepting the shorter report rather than forcing an "
+                    f"expansion that would risk inventing content."
+                )
+                return result
+
             if len(result.split()) < 400:
                 logger.info(f"Final report too short ({len(result.split())} words), requesting expansion")
                 self._emit(phase="writing", message="Expanding report...")
