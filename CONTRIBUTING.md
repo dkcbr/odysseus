@@ -62,6 +62,31 @@ docker compose logs --tail=120 odysseus
 
 Mention what you ran in the pull request description. If you could not run a check, say so.
 
+## Avoiding accidental loss of uncommitted edits
+
+This repo has multiple people and agent sessions working on it at once. A
+plain `git checkout <branch> -- <path>` silently discards any uncommitted
+changes to the paths it touches, with no warning -- this has caused real,
+substantial work to be lost more than once (see
+[`docs/postmortem-uncommitted-edits-loss-2026-08-13.md`](docs/postmortem-uncommitted-edits-loss-2026-08-13.md)
+for the full account).
+
+- **Commit and push early and often.** Don't leave real work sitting as an
+  uncommitted edit for long -- push WIP branches to your fork rather than
+  batching changes up.
+- **Use `git safe-checkout` instead of plain `git checkout`** when you want
+  a guarded checkout that refuses to run if the working tree has
+  uncommitted changes:
+  ```bash
+  git safe-checkout -- path/to/file.py
+  # or, if you genuinely intend to discard local changes:
+  git safe-checkout --force -- path/to/file.py
+  ```
+  This is opt-in, not automatic -- git does not allow `checkout` itself to
+  be aliased or hooked before it runs, so `safe-checkout` (provided by
+  `scripts/safe-checkout.sh`) only helps when you actually use it instead
+  of the plain command.
+
 ## Pull Requests
 
 Good pull requests usually include:

@@ -257,6 +257,36 @@ def build_models_url(base: str) -> Optional[str]:
     their semantics).
     """
     base = _prepare_endpoint_base(base)
+
+    # Real, added 2026-09-06, checked BEFORE _detect_provider(): LM
+    # Studio's generic /v1/models response lacks the type/capabilities
+    # fields model_capability_readers.lmstudio needs (confirmed directly,
+    # live -- every model came back family=unknown). LM Studio's own
+    # /api/v0/models provides exactly the richer schema the reader
+    # expects (also confirmed directly, live). Detected by port 1234,
+    # mirroring model_capability_readers.base.detect_vendor()'s own
+    # already-proven heuristic, since _detect_provider() below has no
+    # "lmstudio" concept at all.
+    #
+    # Real, live-caught bug in an earlier version of this fix: placing
+    # this check AFTER the provider branches below meant a pathless
+    # ``http://localhost:1234`` never reached it at all --
+    # _is_ollama_native_url() (in llm_core.py, shared by _detect_provider
+    # and used by build_chat_url/build_headers too) treats *any* pathless
+    # localhost/loopback URL as "maybe Ollama" regardless of port, not
+    # just 11434, so _detect_provider() already returned "ollama" first.
+    # Caught by a real test (`test_lmstudio_pathless_base_uses_native_v0_models`)
+    # actually failing, not assumed correct. Fixed by checking the more
+    # specific port-1234 signal first, here, rather than editing that
+    # shared, broader Ollama heuristic (which build_chat_url/build_headers
+    # also depend on and which was out of scope to risk changing).
+    parsed_for_lmstudio = urlparse(base)
+    if parsed_for_lmstudio.port == 1234:
+        root = base
+        if root.endswith("/v1"):
+            root = root[: -len("/v1")]
+        return _append_endpoint_path(root, "/api/v0/models")
+
     provider = _detect_provider(base)
     if provider == "anthropic":
         return _append_endpoint_path(_anthropic_api_root(base), "/v1/models")

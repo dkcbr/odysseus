@@ -35,8 +35,32 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libglib2.0-0t64 \
     libxcb1 \
     libmagic1 \
+    wmctrl \
+    xdotool \
+    imagemagick \
     && rm -rf /var/lib/apt/lists/*
 
+# ydotool is real, added 2026-08-17: not available in the base trixie repos
+# (confirmed: "E: Unable to locate package ydotool"). Real, fixed: trixie-
+# backports has v1.0.4, but the REAL host daemon (installed by DK via
+# Pop!_OS/Ubuntu noble's own apt) is v0.1.8 -- ydotool had a complete
+# protocol rewrite at v1.0.0, so 1.0.4 client + 0.1.8 daemon genuinely
+# fails with "Protocol wrong type for socket" (confirmed directly). Using
+# Debian bookworm's repos instead, which has the matching 0.1.8-3.
+RUN echo "deb http://deb.debian.org/debian bookworm main" > /etc/apt/sources.list.d/bookworm.list \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends -t bookworm ydotool \
+    && rm -rf /var/lib/apt/lists/*
+
+# wmctrl/xdotool are real, added 2026-08-17 for jarvis_desktop's real window
+# and mouse/keyboard control tools -- require a mounted X11 socket and a
+# real DISPLAY env var pointed at the host's XWayland instance (see
+# docker-compose.yml) to actually reach the host's real display. imagemagick
+# (for the real `import` binary) is separately required by the same
+# server's screenshot() tool -- confirmed via a real, direct test that it
+# was the actual missing piece (wmctrl alone got window_list working, but
+# screenshot still failed on ImageMagick's `import` specifically).
+#
 # libgl1/libglib2.0-0t64/libxcb1 are runtime shared libs (libGL.so.1,
 # libglib-2.0/libgthread, libxcb.so.1) that opencv-python (cv2) loads. The
 # slim base omits them, so the Cookbook "install realesrgan" path imports cv2
@@ -77,6 +101,51 @@ ARG INSTALL_OPTIONAL=false
 COPY requirements.txt requirements-optional.txt ./
 RUN pip install --no-cache-dir -r requirements.txt \
     && if [ "$INSTALL_OPTIONAL" = "true" ]; then pip install --no-cache-dir -r requirements-optional.txt; fi
+
+# Real attempt, 2026-08-09: local Kokoro-82M TTS. PyTorch itself DOES
+# install correctly here (confirmed: cu132 index, matches this host's
+# real CUDA 13.2) -- but kokoro's own dependency chain (kokoro ->
+# misaki -> spacy -> blis) does not support Python 3.14 yet. blis fails
+# to compile (Cython error) regardless of index/version choice -- a
+# real, widely-documented ecosystem gap (confirmed via web search: e.g.
+# a Kokoro-TTS-Local project explicitly states "Python 3.13+ is not
+# supported" for this same dependency chain, and this image is on
+# 3.14). Not fixable with a version pin or different index; would need
+# a Python downgrade for the whole image, a real, separate, much bigger
+# decision. Left uninstalled -- real GPU passthrough (see
+# docker/gpu.nvidia.yml, scripts/check-docker-gpu.sh) is genuinely
+# configured and verified working on this host for whenever this
+# becomes viable, or for other GPU-dependent features.
+
+# Playwright's own bundled headless Chromium, for the jarvis_browser MCP
+# server when running headless in this container -- distinct from the
+# system `chromium` apt package installed above, which that script
+# doesn't reference. --with-deps installs any additional system
+# libraries Playwright's browser needs beyond what's already present.
+#
+# PLAYWRIGHT_BROWSERS_PATH is pinned to a fixed, non-HOME path
+# deliberately: this RUN executes as root (HOME=/root) since no USER
+# switch happens until the container's entrypoint, but the app itself
+# runs at container start as the unprivileged `odysseus` user
+# (HOME=/app). Without this, the browser installs under
+# /root/.cache/ms-playwright -- unreachable to `odysseus` at runtime
+# (confirmed: /root is mode 0700, root-only) -- so jarvis_browser's
+# `open` tool fails with "Executable doesn't exist" despite the MCP
+# server itself reporting connected (connecting/listing tools never
+# launches a browser; only an actual tool call does).
+ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
+RUN playwright install --with-deps chromium
+# Real, added 2026-08-20: this build step's own chromium install gets
+# overlaid at runtime by the host's bind-mounted, already-populated
+# browser cache (see docker-compose.yml -- /home/dk/.cache/ms-playwright
+# -> /ms-playwright), which is where wigolo/playwright-mcp actually find
+# their real, expected chromium version. Confirmed directly tonight:
+# this build-time install left a genuinely orphaned, unused
+# chromium-1234/chromium_headless_shell-1234 (651MB) sitting underneath
+# that mount, matching neither wigolo's expected version (1223) nor
+# playwright-mcp's own (1237). Removed here so future builds don't
+# carry this real, unused weight forward at all.
+RUN rm -rf /ms-playwright/chromium-1234 /ms-playwright/chromium_headless_shell-1234
 
 # python-magic powers content-based MIME sniffing in src/upload_handler.py.
 # Image-only (not in requirements.txt) because it needs the libmagic1 system

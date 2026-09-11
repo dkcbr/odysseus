@@ -193,9 +193,38 @@ _VISIBLE_CHAT_TEMPLATE_ARTIFACT_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Real, added 2026-08-28: a separate, real bug from the reasoning-field
+# tool-call misclassification fixed the same night (see the buffering logic
+# around _reasoning_gate_active) -- confirmed live, via a real, multi-round
+# agent conversation, that a stray, orphaned tool-call tag can also leak
+# through the *content* field directly (no `thinking` flag at all), not
+# just `reasoning`. That case isn't a genuine tool call to extract (the
+# real JSON body wasn't present in content, just a bare tag fragment), so
+# the correct, minimal fix here is simply to strip it before it reaches the
+# user, matching the same class of cosmetic-artifact cleanup already done
+# for the chat-template markers above. A separate pattern (not merged into
+# the regex above) since this one needs DOTALL to span a possible full
+# block across newlines; the existing regex above has no such need and is
+# left untouched.
+_ORPHANED_TOOL_CALL_TAG_RE = re.compile(
+    r"<tool_call>.*?</tool_call>"  # a complete block, defensive: shouldn't
+                                    # normally reach content at all (real
+                                    # tool calls are extracted from
+                                    # reasoning before this point), but
+                                    # stripped whole rather than left
+                                    # partially visible if it ever does.
+    r"|</?tool_call>",              # a lone, orphaned opening or closing
+                                    # tag with no matching pair in this
+                                    # same content chunk -- the actual,
+                                    # real, observed failure shape.
+    re.IGNORECASE | re.DOTALL,
+)
+
 
 def _strip_visible_chat_template_artifacts(text: str) -> str:
-    return _VISIBLE_CHAT_TEMPLATE_ARTIFACT_RE.sub("", text or "")
+    text = _VISIBLE_CHAT_TEMPLATE_ARTIFACT_RE.sub("", text or "")
+    text = _ORPHANED_TOOL_CALL_TAG_RE.sub("", text)
+    return text
 
 
 def _harmony_suffix_hold_len(text: str) -> int:
@@ -609,6 +638,16 @@ def _ollama_normalize_messages(messages: List[Dict]) -> List[Dict]:
 _ollama_normalize_tool_messages = _ollama_normalize_messages
 
 
+# Real, added 2026-08-10, raised same day: see the real, direct comment
+# at its use site below for why this exists. Raised from the initial,
+# conservative 8192 to 40960 -- qwen3:14b's real, confirmed native max
+# (see src/model_context.py's corrected known-models entry) -- after
+# directly, empirically confirming on the real, live hardware that the
+# true max fits with real headroom to spare (~14.6GB of 16.4GB VRAM,
+# ~1.7GB free).
+OLLAMA_MAX_PRACTICAL_CONTEXT = 40960
+
+
 def _build_ollama_payload(
     model: str,
     messages: List[Dict],
@@ -640,7 +679,16 @@ def _build_ollama_payload(
     if max_tokens and max_tokens > 0:
         options["num_predict"] = max_tokens
     if num_ctx is not None and num_ctx > 0 and num_ctx != DEFAULT_CONTEXT:
-        options["num_ctx"] = num_ctx
+        # Real, added 2026-08-10: cap what actually gets requested. A
+        # model's real, advertised max (e.g. qwen3's known 131072) can be
+        # far larger than what actually fits in real, available VRAM --
+        # confirmed directly: requesting the full advertised max caused
+        # Ollama to silently fall back to a much smaller serving context
+        # (4096) rather than negotiate a size that fits. 8192 was
+        # confirmed to load correctly with real headroom to spare
+        # (~1.5GB additional VRAM over the base model, on a 16GB card
+        # already using ~9GB for model weights).
+        options["num_ctx"] = min(num_ctx, OLLAMA_MAX_PRACTICAL_CONTEXT)
     if options:
         payload["options"] = options
     if tools:
@@ -1270,6 +1318,22 @@ _THINKING_MODEL_PATTERNS = (
     "qwen3", "qwq", "deepseek-r1", "deepseek-reasoner", "minimax",
     "m2-reap", "gemma", "stepfun", "step-3", "step3",
     "magistral", "mistral-small", "mistral-medium",
+    # Real, added 2026-08-28: ticker-lookup-lora is a real, custom LoRA
+    # fine-tune of a Qwen3 base model. Confirmed directly, via a real,
+    # live captured stability-harness run, that this exact real,
+    # documented "</think> without opening tag" failure mode occurs for
+    # it -- but its own distinct model name (renamed the same night from
+    # odysseus-qwen3-tickers-lora to fix an unrelated, real naming-
+    # collision tool-suppression bug) no longer contains "qwen3", so this
+    # check was silently returning False for it after that rename, an
+    # unintended, real side effect: the same substring the earlier fix
+    # correctly removed to solve tool suppression was also, coincidentally,
+    # the only thing making this separate, unrelated check pass. Registered
+    # explicitly here rather than re-adding a "qwen3" substring, since a
+    # custom LoRA's own name should be recognized on its own real, known
+    # identity, not by fragile inheritance from a base-model name it may
+    # or may not still contain.
+    "ticker-lookup-lora",
 )
 
 def _supports_thinking(model: str) -> bool:
@@ -2240,6 +2304,28 @@ async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperat
         # <think> blocks. Ollama /v1 accepts "think": false as a top-level param.
         if _is_ollama_openai_compat_url(url) and _supports_thinking(model):
             payload["think"] = False
+            # Known Ollama bug for this model class (ollama/ollama#14493,
+            # still open as of Apr 2026): the renderer doesn't reliably emit
+            # a generation prompt / EOS after a tool-call turn, so the model
+            # can keep generating past the closing fence and fabricate a
+            # fake continuation (observed directly: a real tool call
+            # followed immediately by an invented company name and price in
+            # the same generation, never having received the real tool
+            # result). Scoped to tool-offering requests only - an unscoped
+            # stop-on-fence would truncate legitimate answers that contain
+            # real code blocks. Known tradeoff: a genuine multi-fence answer
+            # to a tool-enabled prompt could still be cut early; accepted as
+            # strictly safer than the fabrication/hang failure mode.
+            if tools:
+                existing_stop = payload.get("stop")
+                fence_stop = "```\n"
+                if isinstance(existing_stop, list):
+                    if fence_stop not in existing_stop:
+                        payload["stop"] = existing_stop + [fence_stop]
+                elif isinstance(existing_stop, str):
+                    payload["stop"] = [existing_stop, fence_stop]
+                else:
+                    payload["stop"] = [fence_stop]
         _apply_local_cache_affinity(payload, url, session_id)
         _apply_local_generation_stability(payload, target_url, model)
         _scrub_openai_chat_tool_reasoning(payload, target_url, model)
@@ -2518,6 +2604,54 @@ async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperat
         calls = [_tc_acc[i] for i in sorted(_tc_acc)]
         return f'data: {json.dumps({"type": "tool_calls", "calls": calls})}\n\n'
 
+    # Real, added 2026-08-28: confirmed directly, via a controlled, isolated
+    # comparison the same night, that some providers (confirmed: Ollama's
+    # OpenAI-compat endpoint, for at least one real fine-tuned model) emit a
+    # genuine, correctly-formed <tool_call>{"name": ..., "arguments": ...}
+    # </tool_call> block entirely inside the reasoning/thinking field, never
+    # as a real, structured tool_calls delta -- meaning it was previously
+    # always shown to the user as raw thinking text (or silently lost) and
+    # never actually executed. Only buffer/inspect reasoning when tools were
+    # genuinely offered on this request (the only real condition under which
+    # this can happen) -- for tools=None requests, reasoning still streams
+    # immediately, unchanged, exactly as before.
+    _reasoning_tool_call_re = re.compile(r"<tool_call>\s*(\{.*?\})\s*</tool_call>", re.DOTALL)
+    _reasoning_gate_active = bool(tools)
+    _reasoning_buf = ""
+
+    def _try_extract_tool_call_from_reasoning():
+        """Check the buffered reasoning text for a complete, genuine
+        <tool_call> block. If found, parse it, add it to _tc_acc using the
+        exact same {id, name, arguments} shape real structured tool_calls
+        deltas use (arguments as a JSON-encoded string, matching how the
+        accumulator elsewhere in this function is consumed downstream), and
+        remove the matched text from the buffer. Returns True if a call was
+        extracted, so the caller knows not to also yield this text as
+        visible thinking content.
+        """
+        nonlocal _reasoning_buf
+        _m = _reasoning_tool_call_re.search(_reasoning_buf)
+        if not _m:
+            return False
+        try:
+            _tc_json = json.loads(_m.group(1))
+        except (json.JSONDecodeError, TypeError):
+            return False
+        _tc_name = _tc_json.get("name") if isinstance(_tc_json, dict) else None
+        if not _tc_name:
+            return False
+        _tc_args = _tc_json.get("arguments") if isinstance(_tc_json, dict) else None
+        _tc_args_str = _tc_args if isinstance(_tc_args, str) else json.dumps(_tc_args or {})
+        idx = max(_tc_acc, default=-1) + 1
+        _tc_last_idx[0] = idx
+        _tc_acc[idx] = {
+            "id": f"call_reasoning_{idx}",
+            "name": _tc_name,
+            "arguments": _tc_args_str,
+        }
+        _reasoning_buf = _reasoning_buf[:_m.start()] + _reasoning_buf[_m.end():]
+        return True
+
     def _format_routed_content(parts: List[Tuple[str, bool]]) -> List[str]:
         nonlocal _first_content_sent
         events = []
@@ -2557,6 +2691,9 @@ async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperat
                     if data == "[DONE]":
                         for event in _format_routed_content(_harmony_router.flush()):
                             yield event
+                        if _reasoning_gate_active and _reasoning_buf:
+                            yield _stream_delta_event(_reasoning_buf, thinking=True)
+                            _reasoning_buf = ""
                         tc_event = _emit_tool_calls()
                         if tc_event:
                             yield tc_event
@@ -2634,8 +2771,24 @@ async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperat
                                             if _degenerate:
                                                 yield _degenerate
                                                 return
-                                            yield _stream_delta_event(reasoning, thinking=True)
+                                            if _reasoning_gate_active:
+                                                # Buffer instead of streaming immediately -- see
+                                                # _try_extract_tool_call_from_reasoning's own
+                                                # docstring above for why: once real tokens are
+                                                # sent to the client as visible thinking text,
+                                                # they cannot be un-sent if it later turns out
+                                                # they were actually a tool call.
+                                                _reasoning_buf += reasoning
+                                                _try_extract_tool_call_from_reasoning()
+                                            else:
+                                                yield _stream_delta_event(reasoning, thinking=True)
                                         if content:
+                                            if _reasoning_gate_active and _reasoning_buf:
+                                                # Real content has started arriving, so whatever
+                                                # is left in the buffer was never a tool call --
+                                                # flush it now as genuine thinking, all at once.
+                                                yield _stream_delta_event(_reasoning_buf, thinking=True)
+                                                _reasoning_buf = ""
                                             content = _strip_visible_chat_template_artifacts(content)
                                             if not content:
                                                 continue
@@ -2766,6 +2919,9 @@ async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperat
             # End of stream (no explicit [DONE] received)
             for event in _format_routed_content(_harmony_router.flush()):
                 yield event
+            if _reasoning_gate_active and _reasoning_buf:
+                yield _stream_delta_event(_reasoning_buf, thinking=True)
+                _reasoning_buf = ""
             tc_event = _emit_tool_calls()
             if tc_event:
                 yield tc_event

@@ -77,6 +77,12 @@ You are a research assistant planning web searches.
 Generate {num_queries} focused search queries that will help answer the question.
 {round_instruction}
 
+Write each query as a short, concrete search-engine keyword phrase -- the way \
+a person would actually type it into a search box (e.g. "LM Studio local LLM \
+hardware requirements" or "cloud API LLM pricing 2026"), NOT a full \
+grammatical question. Avoid leading words like "What", "How", "Why", or \
+"Can you" -- extract the core concept and keywords instead.
+
 Return ONLY a JSON array of query strings, nothing else.
 Example: ["query one", "query two", "query three"]
 """
@@ -94,8 +100,15 @@ You are updating an evolving research report.
 
 Integrate the new findings into the existing report. Produce an updated, well-organized \
 report that answers the original question as completely as possible given all evidence so far. \
-Remove redundancy, resolve contradictions, and maintain logical flow. \
-Keep source URLs as inline citations where relevant.
+Remove redundancy, resolve contradictions, and maintain logical flow.
+
+CITATION REQUIREMENT: every specific fact, claim, statistic, or quote you take from the \
+findings above must be followed immediately by an inline citation linking to that finding's \
+URL, in the form [short label](url) -- reuse the exact URL shown next to that finding, e.g. \
+finding "[Some Page Title](https://example.com/page)" backing a claim becomes \
+"...as reported by [Some Page Title](https://example.com/page)." A sentence stating a fact \
+from a finding with no citation attached is incomplete -- add the link, don't drop it, even \
+for facts that also sound like general knowledge.
 
 Write only the updated report — no preamble or meta-commentary.
 """
@@ -125,23 +138,43 @@ Example: "NO — We still lack information about the economic impact."
 """
 
 FINAL_REPORT_PROMPT = """\
-Write a **long, detailed, comprehensive** research report answering this question:
+Write a research report answering this question:
 
 **Question:** {question}
 
 **All collected evidence and analysis:**
 {report}
 
-Requirements:
-- Write at MINIMUM 1500 words — this should be a thorough, magazine-quality article
+LENGTH: let the evidence above set the length, not a fixed target. If it's rich and \
+detailed, a long 1500+ word magazine-quality article is appropriate. If it's thin -- only \
+a few findings, or narrow in scope -- a shorter, honest report is correct. A concise report \
+that sticks to what the evidence actually supports is better than a long one padded with \
+invented detail to hit a word count.
+
+ANTI-FABRICATION, non-negotiable: every claim, criterion, statistic, or section in this \
+report must be directly supported by the evidence above. Do not introduce a topic, \
+comparison criterion, or section (e.g. hardware, performance, pricing) that the evidence \
+above does not actually discuss, even if it would make the report feel more complete. If \
+the evidence doesn't cover something, leave it out entirely rather than filling the gap \
+with plausible-sounding invented content.
+
+CITATION REQUIREMENT, non-negotiable: the evidence above already contains each source's URL \
+(as [title](url) links). Every specific fact, statistic, or claim you state in the report must \
+keep or add its inline citation in that same [title](url) form, right where the fact appears -- \
+not collected in a references list at the end. A sentence stating a specific fact with no link \
+attached is a defect in the report, not an acceptable simplification. If the evidence above has \
+no citation for something, don't state it as a sourced fact.
+
+Other requirements:
 - Use clear ## headings and ### subheadings to organize into logical sections
-- Each section should have multiple detailed paragraphs, not just bullet points
-- Synthesize and analyze the information — explain WHY things matter, draw comparisons, provide context
+- Where the evidence supports it, use multiple detailed paragraphs, not just bullet points
+- Synthesize and analyze the information — explain WHY things matter, draw
+  comparisons, provide context, but only for what the evidence actually shows
 - Include specific data points, numbers, and statistics from the evidence
-- Include source URLs as inline citations [like this](url)
 - Note where sources agree and where they disagree
 - Add a brief executive summary at the top
-- End with a clear conclusion that directly answers the question
+- End with a clear conclusion that directly answers the question, scoped to
+  what the evidence actually supports
 - Write in an engaging, informative style — not dry or robotic
 """
 
@@ -151,14 +184,18 @@ CATEGORY_PROMPTS = {
 - For EACH product include: name as ### heading, approximate price, 2-3 sentence summary, **Pros:** bullet list, **Cons:** bullet list, **Where to buy:** URLs as links
 - Start with a quick-compare markdown table of top picks (columns: Name, Price, Best For, Rating)
 - End with a ## Verdict section picking Best Overall and Best Value
-- Still include source citations inline""",
+- REMINDER: every fact above had a source link next to it -- keep those
+  [title](url) citations inline in this report, not just in the table""",
 
     "comparison": """IMPORTANT FORMAT OVERRIDE — this is a COMPARISON report:
 - Create a ## Comparison Table as a markdown table comparing ALL options across key criteria (rows = criteria, columns = options)
 - Use checkmarks, ratings, or short values in cells
 - Write a ## section per option with its strengths, weaknesses, and ideal use case
 - End with ## Best For verdicts (e.g., "**Best for small teams:** Option A because...")
-- Include a ## Shared Considerations section for things that apply to all options""",
+- Include a ## Shared Considerations section for things that apply to all options
+- REMINDER: every fact above had a source link next to it -- keep those
+  [title](url) citations inline as you write each strength/weakness, not
+  just in the table""",
 
     "howto": """IMPORTANT FORMAT OVERRIDE — this is a HOW-TO guide:
 - Start with ## Quick Guide — a super concise numbered list (one line per step, no details, just the action). Example: 1. Install X  2. Run Y  3. Configure Z
@@ -167,7 +204,9 @@ CATEGORY_PROMPTS = {
 - Each step should have a clear heading and detailed instructions
 - Use blockquotes (> ) for tips and warnings: > **Tip:** ... or > **Warning:** ...
 - End with ## Common Mistakes section
-- Add estimated time and difficulty level near the top""",
+- Add estimated time and difficulty level near the top
+- REMINDER: every fact above had a source link next to it -- keep those
+  [title](url) citations inline in the detailed steps""",
 
     "factcheck": """IMPORTANT FORMAT OVERRIDE — this is a FACT-CHECK report:
 - Start with ## The Claim restating what's being checked
@@ -175,7 +214,8 @@ CATEGORY_PROMPTS = {
 - Each piece of evidence should be a ### with source name, what it found, and how strong the evidence is
 - Include a ## Verdict section with one of: **Supported**, **Mixed Evidence**, or **Unsupported**
 - End with ## Nuance & Caveats for important context and limitations
-- Be balanced and cite sources for every claim""",
+- Be balanced and cite sources for every claim -- keep the [title](url)
+  links from the evidence above inline, not just named in prose""",
 }
 
 # ---------------------------------------------------------------------------
@@ -241,6 +281,12 @@ class DeepResearcher:
         self.findings: List[Dict] = []
         self.evolving_report: str = ""
         self.research_plan: str = ""
+        # Populated by _validate_citations() -- URLs the final report cited
+        # that were never actually fetched during this run. Real, live-caught
+        # failure mode: the model can fabricate a plausible-looking citation
+        # for a fact it invented, apparently to fill category-template
+        # sections the real evidence didn't cover.
+        self.fabricated_citations: List[str] = []
 
     def cancel(self):
         """Request cooperative cancellation of the research loop."""
@@ -367,6 +413,7 @@ class DeepResearcher:
 
         self.evolving_report = report  # preserve pre-synthesis report
         final = await self._final_report(question, report)
+        final = self._validate_citations(final)
         elapsed = time.time() - self._start_time
         logger.info(
             f"Research complete: {self.round_count} rounds, "
@@ -471,7 +518,9 @@ class DeepResearcher:
             round_instruction = (
                 "We already have partial findings.  Generate targeted follow-up "
                 "queries to fill gaps, verify claims, or explore specific aspects "
-                "that the report doesn't yet cover well."
+                "that the report doesn't yet cover well. Keep them as short "
+                "keyword phrases, not full questions -- e.g. turn 'what are the "
+                "maintenance tasks for X' into 'X maintenance tasks'."
             )
 
         prompt = current_date_context() + QUERY_GEN_PROMPT.format(
@@ -743,6 +792,25 @@ class DeepResearcher:
         cat_extra = CATEGORY_PROMPTS.get(self.category or "", "")
         if cat_extra:
             prompt += "\n\n" + cat_extra
+        # Real, live-caught bug, 2026-09-11: the CITATION REQUIREMENT earlier
+        # in FINAL_REPORT_PROMPT was not enough on its own -- confirmed
+        # directly, live: a synthesized report with real, correct inline
+        # citations went in, and the "polished" final report came out with
+        # every citation stripped, even though the CITATION REQUIREMENT
+        # paragraph was right there. Added this closing reminder (after
+        # everything else, including any category template -- the last
+        # thing the model reads before writing), unconditionally rather than
+        # just inside CATEGORY_PROMPTS, since self.category can be
+        # None/"general" and get no category template appended at all.
+        prompt += (
+            "\n\nOne last reminder before you write: keep every [title](url) "
+            "citation from the evidence above in your final report, right "
+            "next to the fact it supports. Do not write a polished version "
+            "that drops the links. Also: do not add sections, criteria, or "
+            "claims about topics the evidence above doesn't cover -- a "
+            "shorter, accurate report beats a longer one with invented "
+            "detail."
+        )
 
         try:
             result = await self._llm(
@@ -752,7 +820,28 @@ class DeepResearcher:
                 timeout=180,
             )
 
-            # If report is too short, ask the LLM to expand it
+            # If the report is short, expanding it can genuinely help -- but
+            # only when there was enough real evidence to justify more words.
+            # Real, live-caught tension, 2026-09-11: the old expansion prompt
+            # below ("target at least 1000 words", "add specific data") is
+            # exactly the same length/detail pressure that caused the
+            # original fabricated-sections problem (Hardware, Performance)
+            # in a live test -- forcing it on genuinely thin evidence would
+            # just reintroduce that pressure through a second path. Skips
+            # the forced expansion below min_findings_for_expansion; accepts
+            # the shorter, evidence-faithful report instead. 4 findings is a
+            # real, chosen threshold: less than roughly one full round's
+            # worth of real results is treated as genuinely thin material.
+            min_findings_for_expansion = 4
+            if len(result.split()) < 400 and len(self.findings) < min_findings_for_expansion:
+                logger.info(
+                    f"Final report is short ({len(result.split())} words) but "
+                    f"only {len(self.findings)} finding(s) were gathered -- "
+                    f"accepting the shorter report rather than forcing an "
+                    f"expansion that would risk inventing content."
+                )
+                return result
+
             if len(result.split()) < 400:
                 logger.info(f"Final report too short ({len(result.split())} words), requesting expansion")
                 self._emit(phase="writing", message="Expanding report...")
@@ -781,6 +870,60 @@ class DeepResearcher:
         except Exception as e:
             logger.error(f"Final report generation failed: {e}")
             return report  # return the evolving report as-is
+
+    # ------------------------------------------------------------------
+    # VALIDATE: strip citations to URLs that were never actually fetched
+    # ------------------------------------------------------------------
+    def _validate_citations(self, text: str) -> str:
+        """Strip citations whose URL was never actually fetched this run.
+
+        Real, live-caught failure mode, found while testing the citation
+        fix above: even with the CITATION REQUIREMENT in place, the model
+        can fabricate a plausible-looking citation for a fact it invented
+        itself -- confirmed directly, live: a specific NVIDIA A100 claim
+        and an OpenAI research claim, each with a real-looking URL, neither
+        present anywhere in the actual findings. Apparently filling out
+        category-template sections (e.g. Hardware, Performance) the real
+        evidence didn't cover.
+
+        A cited hallucination is worse than an uncited one -- the citation
+        falsely signals real grounding. This is a deterministic, mechanical
+        check (no LLM call): every [label](url) in the text is compared
+        against the real set of URLs in self.findings. A citation to a URL
+        outside that set has its link syntax stripped -- "as shown by
+        [Some Page](https://fake.example)" becomes "as shown by Some Page"
+        -- so the false claim of sourcing is gone without deleting the
+        sentence itself. Findings without a resolvable URL are excluded
+        from the report entirely; nothing to compare fabricated links to
+        would be worse than nothing.
+        """
+        valid_urls = {f.get("url", "") for f in self.findings if f.get("url")}
+        fabricated: List[str] = []
+
+        def _check(match: "re.Match") -> str:
+            label, url = match.group(1), match.group(2)
+            if url in valid_urls:
+                return match.group(0)
+            fabricated.append(url)
+            return label
+
+        # Matches [label](url), tolerating one level of parentheses inside
+        # the URL itself (e.g. Wikipedia's "...wiki/Foo_(bar)") so those
+        # real, legitimate citations aren't mistaken for malformed links
+        # and broken by a naive "stop at the first )" pattern.
+        cleaned = re.sub(
+            r'\[([^\]]*)\]\(([^()\s]*(?:\([^()]*\)[^()\s]*)*)\)',
+            _check,
+            text,
+        )
+        if fabricated:
+            logger.warning(
+                "Citation validator: stripped %d citation(s) linking to "
+                "URLs never actually fetched this run: %s",
+                len(fabricated), fabricated,
+            )
+            self.fabricated_citations = fabricated
+        return cleaned
 
     # ------------------------------------------------------------------
     # Helpers
@@ -926,4 +1069,6 @@ class DeepResearcher:
             stats["Search"] = ", ".join(self.providers_used)
         if self.category:
             stats["Category"] = self.category.capitalize()
+        if self.fabricated_citations:
+            stats["Fabricated citations removed"] = len(self.fabricated_citations)
         return stats

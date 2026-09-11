@@ -1,0 +1,10 @@
+{
+  "name": "holdings_correction",
+  "description": "Real suite covering the holdings-correction code path from every angle currently tested: the default mixed scenario (holdings appear alongside plain tickers), repeated/consecutive triggering, and explicit absence verification (the note should never appear for non-holdings, and should still appear for real holdings via the control turn).",
+  "suite_tags": ["holdings-correction", "data-accuracy"],
+  "scenarios": [
+    "scenarios/mixed_holdings_default.json",
+    "scenarios/rapid_holdings_stress.json",
+    "scenarios/holdings_absence_verification.json"
+  ]
+}

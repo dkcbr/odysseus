@@ -1,0 +1,9 @@
+{
+  "name": "generalization",
+  "description": "Real suite covering how the ticker LoRA handles tickers it wasn't trained on, from two genuinely different real angles: real, well-known companies simply absent from training data, and completely fabricated, non-existent ticker symbols (a harder question -- does it hallucinate or correctly defer to a real tool failure).",
+  "suite_tags": ["generalization", "hallucination-risk"],
+  "scenarios": [
+    "scenarios/held_out_generalization.json",
+    "scenarios/synthetic_ticker_generalization.json"
+  ]
+}

@@ -250,9 +250,9 @@
   </script>
   <link rel="stylesheet" href="/static/style.css?v=20260723tasksbulkfeedback1">
   <link rel="modulepreload" href="/static/app.js?v=20260723tasksbulkfeedback1">
-  <link rel="modulepreload" href="/static/js/chat.js?v=20260722ctxheader4">
+  <link rel="modulepreload" href="/static/js/chat.js?v=20260801fix1">
   <link rel="modulepreload" href="/static/js/ui.js">
-  <link rel="modulepreload" href="/static/js/sessions.js?v=20260722ctxheader4">
+  <link rel="modulepreload" href="/static/js/sessions.js">
   <link rel="modulepreload" href="/static/js/markdown.js">
 </head>
 <body>
@@ -365,6 +365,7 @@
                 <span class="skill-rich-ph"><span class="k">Add a memory</span> &mdash; e.g. 'I prefer concise replies' <svg class="k" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-left:4px;" aria-hidden="true"><polyline points="9 10 4 15 9 20"/><path d="M20 4v7a4 4 0 0 1-4 4H4"/></svg></span>
               </div>
               <select id="new-memory-category" class="memory-edit-cat-select" aria-label="Memory category"></select>
+              <button type="button" id="new-memory-add-btn" class="theme-io-btn" title="Save this memory" style="flex:none;height:28px;font-size:12px;"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:4px;" aria-hidden="true"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>Add</button>
             </div>
           </div>
           <div class="admin-card">
@@ -498,6 +499,193 @@
   </div>
 
   <!-- Theme Popup (floating panel) -->
+  <div id="jarvis-home-modal" class="modal hidden">
+  <div id="jarvis-home-popup" class="modal-content jarvis-home-modal-content" role="dialog" aria-label="Jarvis Home" style="background:var(--bg)">
+    <div class="modal-header" id="jarvis-home-popup-header">
+      <h4><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:6px"><path d="M3 12l9-9 9 9"/><path d="M5 10v10a1 1 0 0 0 1 1h4v-6h4v6h4a1 1 0 0 0 1-1V10"/></svg>Jarvis Home</h4>
+      <button class="close-btn" id="close-jarvis-home-modal" aria-label="Close Jarvis Home">&#x2716;</button>
+    </div>
+    <div id="jarvis-home-content"></div>
+  </div>
+  </div>
+
+<!-- Agent Registry Modal -->
+  <div id="registry-modal" class="modal hidden">
+    <div class="modal-content registry-modal-content" role="dialog" aria-label="Agent Registry" style="background:var(--bg)">
+      <div class="modal-header">
+        <h4><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:6px"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>Agent Registry</h4>
+        <button class="close-btn" id="close-registry-modal" aria-label="Close agent registry modal">✖</button>
+      </div>
+      <div class="modal-body registry-modal-body">
+        <div id="registry-content">Loading...</div>
+      </div>
+    </div>
+  </div>
+
+<!-- Capability Inspector Modal -->
+  <div id="capabilities-modal" class="modal hidden">
+    <div class="modal-content capabilities-modal-content" role="dialog" aria-label="Capability Inspector" style="background:var(--bg)">
+      <div class="modal-header">
+        <h4><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:6px"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>Capability Inspector</h4>
+        <button class="close-btn" id="close-capabilities-modal" aria-label="Close capability inspector modal">✖</button>
+      </div>
+      <div class="modal-body capabilities-modal-body">
+        <div id="capabilities-content">Loading...</div>
+      </div>
+    </div>
+  </div>
+
+<!-- TradingView Panel Modal -->
+  <!-- Market Dashboard Modal -->
+  <div id="market-dashboard-modal" class="modal hidden">
+    <div class="modal-content market-dashboard-modal-content" role="dialog" aria-label="Market Dashboard" style="background:var(--bg)">
+      <div class="modal-header">
+        <h4><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:6px"><path d="M3 3v18h18"/><path d="M18 17V9"/><path d="M13 17V5"/><path d="M8 17v-3"/></svg><span>Market Dashboard</span></h4>
+        <button class="close-btn" id="close-market-dashboard-modal" aria-label="Close market dashboard modal">✖</button>
+      </div>
+      <div class="modal-body market-dashboard-modal-body">
+        <div id="market-dashboard-content">Loading...</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Worker Log Panel Modal -->
+  <div id="worker-log-modal" class="modal hidden">
+    <div class="modal-content worker-log-modal-content" role="dialog" aria-label="Worker Logs" style="background:var(--bg)">
+      <div class="modal-header">
+        <h4><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:6px"><path d="M4 17l6-6-6-6"/><path d="M12 19h8"/></svg><span>Worker Logs</span></h4>
+        <button class="close-btn" id="close-worker-log-modal" aria-label="Close worker log modal">✖</button>
+      </div>
+      <div class="modal-body worker-log-modal-body">
+        <div style="display:flex;gap:8px;margin-bottom:8px;flex-wrap:wrap;">
+          <select id="worker-log-filter-agent" style="font-size:11px;">
+            <option value="filesystem_agent">filesystem_agent</option>
+            <option value="browser_agent">browser_agent</option>
+            <option value="market_agent">market_agent</option>
+          </select>
+          <select id="worker-log-filter-phase" style="font-size:11px;">
+            <option value="">All phases</option>
+            <option value="tool_start">tool_start</option>
+            <option value="tool_end">tool_end</option>
+          </select>
+          <select id="worker-log-filter-outcome" style="font-size:11px;">
+            <option value="">All outcomes</option>
+            <option value="success">success</option>
+            <option value="failed">failed</option>
+            <option value="blocked">blocked</option>
+            <option value="exception">exception</option>
+          </select>
+        </div>
+        <div id="worker-log-content">Loading...</div>
+      </div>
+    </div>
+  </div>
+  <!-- TradingView Panel Modal -->
+  <div id="tradingview-modal" class="modal hidden">
+    <div class="modal-content tradingview-modal-content" role="dialog" aria-label="TradingView" style="background:var(--bg)">
+      <div class="modal-header">
+        <h4><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:6px"><path d="M3 3v18h18"/><path d="M18.7 8 12 14.7l-3.3-3.3L4 16"/></svg><span>TradingView</span></h4>
+        <button class="close-btn" id="close-tradingview-modal" aria-label="Close TradingView modal">✖</button>
+      </div>
+      <div class="modal-body tradingview-modal-body">
+        <div id="tradingview-content">Loading...</div>
+      </div>
+    </div>
+  </div>
+
+<!-- Poller Status Modal -->
+  <div id="poller-status-modal" class="modal hidden">
+    <div class="modal-content poller-status-modal-content" role="dialog" aria-label="Poller Status" style="background:var(--bg)">
+      <div class="modal-header">
+        <h4><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:6px"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg><span>Poller Status</span></h4>
+        <button class="close-btn" id="close-poller-status-modal" aria-label="Close poller status modal">✖</button>
+      </div>
+      <div class="modal-body poller-status-modal-body">
+        <div id="poller-status-content">Loading...</div>
+      </div>
+    </div>
+  </div>
+
+<!-- Poller Dashboard Modal -->
+  <div id="poller-dashboard-modal" class="modal hidden">
+    <div class="modal-content poller-dashboard-modal-content" role="dialog" aria-label="Poller Dashboard" style="background:var(--bg)">
+      <div class="modal-header">
+        <h4><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:6px"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/></svg><span>Poller Dashboard</span></h4>
+        <button class="close-btn" id="close-poller-dashboard-modal" aria-label="Close poller dashboard modal">✖</button>
+      </div>
+      <div class="modal-body poller-dashboard-modal-body">
+        <div id="poller-dashboard-content">Loading...</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Process Table Modal -->
+  <div id="process-table-modal" class="modal hidden">
+    <div class="modal-content process-table-modal-content" role="dialog" aria-label="Process Table" style="background:var(--bg);position:relative;overflow:hidden;">
+      <div class="modal-header">
+        <h4><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:6px"><rect x="3" y="3" width="18" height="18" rx="2"/><line x1="3" y1="9" x2="21" y2="9"/><line x1="9" y1="9" x2="9" y2="21"/></svg><span>Process Table</span></h4>
+        <button class="close-btn" id="close-process-table-modal" aria-label="Close process table modal">✖</button>
+      </div>
+      <div class="modal-body process-table-modal-body">
+        <div style="display:flex;gap:8px;margin-bottom:8px;flex-wrap:wrap;">
+          <select id="process-table-filter-status" style="font-size:11px;">
+            <option value="">All statuses</option>
+            <option value="pending">pending</option>
+            <option value="running">running</option>
+            <option value="success">success</option>
+            <option value="failed">failed</option>
+          </select>
+          <select id="process-table-filter-agent" style="font-size:11px;">
+            <option value="">All agents</option>
+            <option value="browser_agent">browser_agent</option>
+            <option value="filesystem_agent">filesystem_agent</option>
+            <option value="system_agent">system_agent</option>
+            <option value="market_agent">market_agent</option>
+          </select>
+        </div>
+        <div id="process-table-content">Loading...</div>
+      </div>
+      <div id="process-table-drawer" class="hidden" style="position:absolute;top:0;right:0;bottom:0;width:340px;background:var(--bg);border-left:1px solid var(--border);overflow-y:auto;padding:10px;">
+        <div style="display:flex;justify-content:flex-end;margin-bottom:6px;">
+          <button class="close-btn" id="close-process-table-drawer" aria-label="Close process table drawer">✖</button>
+        </div>
+        <div id="process-table-drawer-body">Loading...</div>
+      </div>
+    </div>
+  </div>
+
+<!-- Task History Modal -->
+  <div id="task-history-modal" class="modal hidden">
+    <div class="modal-content task-history-modal-content" role="dialog" aria-label="Task History" style="background:var(--bg)">
+      <div class="modal-header">
+        <h4><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:6px"><path d="M12 8v4l3 3"/><circle cx="12" cy="12" r="9"/></svg><span>Task History</span></h4>
+        <button class="close-btn" id="close-task-history-modal" aria-label="Close task history modal">✖</button>
+      </div>
+      <div class="modal-body task-history-modal-body">
+        <div style="display:flex;gap:8px;margin-bottom:8px;flex-wrap:wrap;">
+          <select id="task-history-filter-status" style="font-size:11px;">
+            <option value="">All statuses</option>
+            <option value="pending">pending</option>
+            <option value="running">running</option>
+            <option value="success">success</option>
+            <option value="failed">failed</option>
+          </select>
+          <select id="task-history-filter-agent" style="font-size:11px;">
+            <option value="">All agents</option>
+            <option value="browser_agent">browser_agent</option>
+            <option value="filesystem_agent">filesystem_agent</option>
+          </select>
+          <input id="task-history-filter-server" placeholder="server contains..." style="font-size:11px;flex:1;min-width:100px;">
+          <input id="task-history-filter-tool" placeholder="tool contains..." style="font-size:11px;flex:1;min-width:100px;">
+        </div>
+        <div style="display:flex;gap:12px;">
+          <div id="task-history-list" style="flex:1;max-height:400px;overflow-y:auto;"></div>
+          <div id="task-history-timeline" style="flex:1;max-height:400px;overflow-y:auto;border-left:1px solid var(--border);padding-left:12px;">Select a task to see its timeline.</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <div id="theme-modal" class="modal hidden">
   <div id="theme-popup" class="modal-content admin-modal-content" role="dialog" aria-label="Theme" style="background:var(--bg)">
     <div class="modal-header theme-popup-header" id="theme-popup-header">
@@ -742,6 +930,15 @@
     <div style="flex:1"></div>
     <!-- Static: bottom -->
     <button class="icon-rail-btn" id="rail-settings" title="Settings"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg></button>
+    <button class="icon-rail-btn" id="rail-memory" title="Brain"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5a3 3 0 1 0-5.997.125 4 4 0 0 0-2.526 5.77 4 4 0 0 0 .556 6.588A4 4 0 1 0 12 18Z"/><path d="M12 5a3 3 0 1 1 5.997.125 4 4 0 0 1 2.526 5.77 4 4 0 0 1-.556 6.588A4 4 0 1 1 12 18Z"/><path d="M15 13a4.5 4.5 0 0 1-3-4 4.5 4.5 0 0 1-3 4"/></svg></button>
+    <button class="icon-rail-btn" id="rail-notes" title="Notes"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 3h10l4 4v14H5z"/><path d="M15 3v5h5"/><path d="M8 17.5 15.5 10l2.5 2.5L10.5 20H8z"/></svg></button>
+    <button class="icon-rail-btn" id="rail-registry" title="Agent Registry"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg></button>
+    <button class="icon-rail-btn" id="rail-capabilities" title="Capability Inspector"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg></button>
+    <button class="icon-rail-btn" id="rail-tradingview" title="TradingView"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3v18h18"/><path d="M18.7 8 12 14.7l-3.3-3.3L4 16"/></svg></button>
+    <button class="icon-rail-btn" id="rail-poller-status" title="Poller Status"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg></button>
+    <button class="icon-rail-btn" id="rail-poller-dashboard" title="Poller Dashboard"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/></svg></button>
+    <button class="icon-rail-btn" id="rail-task-history" title="Task History"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 8v4l3 3"/><circle cx="12" cy="12" r="9"/></svg></button>
+    <button class="icon-rail-btn" id="rail-tasks" title="Tasks"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/><path d="M9 16l2 2 4-4"/></svg></button>
   </div>
 
   <nav class="sidebar" id="sidebar" role="navigation" aria-label="Sidebar">
@@ -934,6 +1131,81 @@
           <span id="assistant-notif-dot" class="sidebar-notif-dot" style="display:none"></span>
         </div>
 
+                <div class="list-item" id="tool-registry-btn">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+            stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
+            style="flex-shrink:0;opacity:0.5;">
+            <circle cx="12" cy="12" r="3"/>
+            <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+          </svg>
+          <span class="grow">Agent Registry</span>
+        </div>
+        <div class="list-item" id="tool-capabilities-btn">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+            stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
+            style="flex-shrink:0;opacity:0.5;">
+            <path d="M9 11l3 3L22 4"/>
+            <path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/>
+          </svg>
+          <span class="grow">Capability Inspector</span>
+        </div>
+        <div class="list-item" id="tool-worker-log-btn" data-panel-btn>
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+            stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
+            style="flex-shrink:0;opacity:0.5;">
+            <path d="M4 17l6-6-6-6"/><path d="M12 19h8"/>
+          </svg>
+          <span class="grow">Worker Logs</span>
+        </div>
+        <div class="list-item" id="tool-market-dashboard-btn" data-panel-btn>
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+            stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
+            style="flex-shrink:0;opacity:0.5;">
+            <path d="M3 3v18h18"/><path d="M18 17V9"/><path d="M13 17V5"/><path d="M8 17v-3"/>
+          </svg>
+          <span class="grow">Market Dashboard</span>
+        </div>
+        <div class="list-item" id="tool-tradingview-btn">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+            stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
+            style="flex-shrink:0;opacity:0.5;">
+            <path d="M3 3v18h18"/>
+            <path d="M18.7 8 12 14.7l-3.3-3.3L4 16"/>
+          </svg>
+          <span class="grow">TradingView</span>
+        </div>
+        <div class="list-item" id="tool-poller-status-btn">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+            stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
+            style="flex-shrink:0;opacity:0.5;">
+            <path d="M22 12h-4l-3 9L9 3l-3 9H2"/>
+          </svg>
+          <span class="grow">Poller Status</span>
+        </div>
+        <div class="list-item" id="tool-poller-dashboard-btn">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+            stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
+            style="flex-shrink:0;opacity:0.5;">
+            <rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/>
+          </svg>
+          <span class="grow">Poller Dashboard</span>
+        </div>
+        <div class="list-item" id="tool-process-table-btn" data-panel-btn>
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+            stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
+            style="flex-shrink:0;opacity:0.5;">
+            <rect x="3" y="3" width="18" height="18" rx="2"/><line x1="3" y1="9" x2="21" y2="9"/><line x1="9" y1="9" x2="9" y2="21"/>
+          </svg>
+          <span class="grow">Process Table</span>
+        </div>
+        <div class="list-item" id="tool-task-history-btn">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+            stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
+            style="flex-shrink:0;opacity:0.5;">
+            <path d="M12 8v4l3 3"/><circle cx="12" cy="12" r="9"/>
+          </svg>
+          <span class="grow">Task History</span>
+        </div>
         <div class="list-item" id="tool-theme-btn">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
             stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
@@ -945,6 +1217,15 @@
             <circle cx="9" cy="15" r="1.5" fill="currentColor"/>
           </svg>
           <span class="grow">Theme</span>
+        </div>
+        <div class="list-item" id="tool-jarvis-home-btn">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+            stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
+            style="flex-shrink:0;opacity:0.5;">
+            <path d="M3 12l9-9 9 9"/>
+            <path d="M5 10v10a1 1 0 0 0 1 1h4v-6h4v6h4a1 1 0 0 0 1-1V10"/>
+          </svg>
+          <span class="grow">Jarvis Home</span>
         </div>
       </div>
     </div>
@@ -1005,7 +1286,7 @@
       var tips = mobile ? phone : desktop;
       var el = document.getElementById('welcome-tip');
       if (el) {
-        el.textContent = 'Pick a model if you want, or just type.';
+        el.textContent = tips[Math.floor(Math.random() * tips.length)];
       }
       fetch('/api/version').then(function(r){return r.json()}).then(function(d){
         if (d.version) window._appVersion = d.version;
@@ -1190,6 +1471,10 @@
             <button type="button" class="mode-toggle-btn active" id="mode-agent-btn" aria-pressed="true">Agent</button>
             <button type="button" class="mode-toggle-btn" id="mode-chat-btn" aria-pressed="false">Chat</button>
           </div>
+          <!-- Real, additive voice-conversation mode toggle, 2026-08-09 --
+               entirely separate feature from the existing per-message
+               "Read aloud" button (tts-ai.js), which is unaffected. -->
+          <button type="button" class="mode-toggle-btn" id="voice-mode-btn" aria-pressed="false" title="Voice mode: speak replies aloud as they stream in">🔊</button>
           <button type="submit" form="chat-form" class="send-btn newchat-mode" data-mode="newchat" aria-label="New chat">
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg><span class="send-btn-label">+ New</span>
           </button>
@@ -2504,7 +2789,7 @@
 <script type="module" src="/static/js/ui.js"></script>
 <script type="module" src="/static/js/markdown.js"></script>
 <script type="module" src="/static/js/dragSort.js"></script>
-<script type="module" src="/static/js/sessions.js?v=20260722ctxheader4"></script>
+<script type="module" src="/static/js/sessions.js"></script>
 <script type="module" src="/static/js/memory.js?v=20260722memoryloading1"></script>
 <script type="module" src="/static/js/skills.js"></script>
 <script type="module" src="/static/js/tourHints.js"></script>
@@ -2522,7 +2807,7 @@
 <script type="module" src="/static/js/chatRenderer.js?v=20260722emailfastindex1"></script>
 <script type="module" src="/static/js/codeRunner.js"></script>
 <script type="module" src="/static/js/chatStream.js?v=20260722emailfastindex1"></script>
-  <script type="module" src="/static/js/chat.js?v=20260722ctxheader4"></script>
+  <script type="module" src="/static/js/chat.js?v=20260801fix1"></script>
 <script type="module" src="/static/js/cookbook.js"></script>
 <script src="/static/js/cookbookSchedule.js"></script>
 <script type="module" src="/static/js/search-chat.js"></script>
@@ -2530,6 +2815,7 @@
 <script type="module" src="/static/js/censor.js"></script>
 <script type="module" src="/static/js/settings.js?v=20260723compareicon1"></script>
 <script type="module" src="/static/js/assistant.js"></script>
+<script type="module" src="/static/js/jarvis_home.js?v=20260811ticker3"></script>
 <script type="module" src="/static/app.js?v=20260723tasksbulkfeedback1"></script>  <!-- app.js must be LAST -->
   <script type="module" src="/static/js/init.js?v=20260715freshroot3"></script>
 <script type="module" src="/static/js/a11y.js"></script>

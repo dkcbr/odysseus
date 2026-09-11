@@ -236,3 +236,30 @@ def test_harmony_commentary_channel_no_marker_or_toolarg_leak(monkeypatch):
     assert "<|message|>" not in thinking + answer
     assert "commentary" not in answer
     assert "to=functions.web_search" not in thinking + answer
+
+
+def test_ticker_lookup_lora_stray_close_tag_repair(monkeypatch):
+    # Real regression, 2026-08-28: ticker-lookup-lora is a real, custom
+    # LoRA fine-tune of a Qwen3 base model, and was confirmed live (via a
+    # real, captured stability-harness run against the actual model) to
+    # exhibit the exact "</think> without opening tag" failure mode the
+    # repair above already exists to fix -- but its own distinct model
+    # name (renamed the same night from odysseus-qwen3-tickers-lora to
+    # fix an unrelated, real naming-collision tool-suppression bug) no
+    # longer contains "qwen3", so _supports_thinking() was silently
+    # returning False for it after that rename, an unintended, real side
+    # effect of an otherwise-correct earlier fix. Registered explicitly
+    # in _THINKING_MODEL_PATTERNS; this is the direct regression test for
+    # that registration, using the exact real content shape observed in
+    # the real, live capture (a bare closing tag, then the real answer).
+    deltas = _run_stream(
+        "ticker-lookup-lora",
+        [
+            'data: {"choices":[{"delta":{"content":"</think>\\n\\nKTOS is Kratos Defense & Security Solutions, Inc."}}]}',
+            "data: [DONE]",
+        ],
+        monkeypatch,
+    )
+    assert deltas, deltas
+    first = deltas[0]["delta"]
+    assert first.startswith("<think>"), f"expected repair prefix, got: {first!r}"

@@ -146,3 +146,33 @@ jobs:
         if: steps.docs-check.outputs.docs_only != 'true'
       - run: python -m pytest -q
         if: steps.docs-check.outputs.docs_only != 'true'
+
+  regression-guards:
+    name: Regression guards (blocking)
+    runs-on: ubuntu-latest
+    # Real, dedicated, BLOCKING job for specific, reliable regression tests --
+    # separate from the broader python-tests job above, which is deliberately
+    # continue-on-error due to known-flaky/environment-dependent tests
+    # elsewhere in the suite. These two tests guard the exact two failure
+    # modes fixed 2026-08-13/14 (a tool-selection bug that silently dropped
+    # ALWAYS_AVAILABLE tools, and a full data-loss incident where several
+    # tools' registry entries were wiped by a concurrent git checkout).
+    # Note: despite parsing real source text directly rather than importing
+    # app modules, these still need the full requirements.txt install --
+    # tests/conftest.py (loaded automatically for any test run in this
+    # directory) imports the full app stack (verified directly: a
+    # pytest-only venv fails on conftest's own sqlalchemy import before
+    # these tests even run). Confirmed this is fast and reliable regardless
+    # (no embedding/ChromaDB calls at runtime), so still worth a dedicated
+    # blocking job -- a real failure here should genuinely block merging.
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6.2.0
+        with:
+          python-version: "3.11"
+          cache: pip
+      - run: pip install -r requirements.txt
+      - run: mkdir -p data  # sqlite DB lives at ./data/app.db
+      - run: python -m pytest -q tests/test_agent_loop_workspace_override.py tests/test_recovered_tools_present.py tests/test_tool_index_schema_parity.py

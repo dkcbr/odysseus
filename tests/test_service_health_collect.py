@@ -39,10 +39,18 @@ def test_collect_service_health_shape(monkeypatch):
         "accounts": [],
         "endpoints": [],
     })
+    # Real, added 2026-08-23: default_model_config_health (restored the
+    # same day as this fix) makes a real settings/DB call -- mocked here
+    # too, matching the same pattern as the other subsystems, so this
+    # stays a clean, controlled unit test rather than depending on real
+    # database state.
+    monkeypatch.setattr(sh, "default_model_config_health",
+                         lambda *a, **k: {"name": "default_model_config", "status": sh.DISABLED,
+                                          "detail": "", "meta": {}})
     out = asyncio.run(sh.collect_service_health(_Store(True), _Store(True)))
     assert set(out) == {"overall", "services", "timestamp"}
     names = {s["name"] for s in out["services"]}
-    assert names == {"chromadb", "searxng", "ntfy", "email", "providers"}
+    assert names == {"chromadb", "searxng", "ntfy", "email", "providers", "default_model_config"}
     # Chroma healthy, everything else disabled → overall ok.
     assert out["overall"] == sh.OK
 
@@ -99,13 +107,19 @@ def test_collect_runs_subsystems_concurrently(monkeypatch):
     monkeypatch.setattr(sh, "ntfy_health", slow("ntfy"))
     monkeypatch.setattr(sh, "email_health", slow("email"))
     monkeypatch.setattr(sh, "providers_health", slow("providers"))
+    # Real, added 2026-08-23: mocked for the same reason as above -- keep
+    # this a controlled, deterministic unit test, not dependent on real
+    # settings/DB state.
+    monkeypatch.setattr(sh, "default_model_config_health",
+                         lambda *a, **k: {"name": "default_model_config", "status": sh.DISABLED,
+                                          "detail": "", "meta": {}})
 
     t0 = time.monotonic()
     out = asyncio.run(sh.collect_service_health(None, None))
     elapsed = time.monotonic() - t0
     assert elapsed < 1.5, f"subsystems not concurrent: took {elapsed:.1f}s"
     assert {s["name"] for s in out["services"]} == {
-        "chromadb", "searxng", "ntfy", "email", "providers"}
+        "chromadb", "searxng", "ntfy", "email", "providers", "default_model_config"}
 
 
 def test_collect_aggregate_deadline_yields_controlled_result(monkeypatch):

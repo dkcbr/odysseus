@@ -21,7 +21,8 @@ logger = logging.getLogger(__name__)
 
 from .subprocess_tools import BashTool, PythonTool
 from .web_tools import WebSearchTool, WebFetchTool
-from .filesystem_tools import ReadFileTool, WriteFileTool, EditFileTool, ApplyPatchTool, LsTool, GlobTool, GrepTool, GetWorkspaceTool
+from .finance_tools import TickerLookupTool
+from .filesystem_tools import ReadFileTool, WriteFileTool, EditFileTool, ApplyPatchTool, LsTool, GlobTool, GrepTool, GetWorkspaceTool, ProposeWriteTool, CommitWriteTool
 from .coding_tools import TodoWriteTool
 from .document_tools import CreateDocumentTool, UpdateDocumentTool, EditDocumentTool, SuggestDocumentTool, ManageDocumentTool
 from .interaction_tools import AskUserTool, UpdatePlanTool
@@ -39,9 +40,12 @@ TOOL_HANDLERS = {
     "python": PythonTool().execute,
     "web_search": WebSearchTool().execute,
     "web_fetch": WebFetchTool().execute,
+    "lookup_ticker": TickerLookupTool().execute,
     "read_file": ReadFileTool().execute,
     "write_file": WriteFileTool().execute,
     "edit_file": EditFileTool().execute,
+    "propose_write": ProposeWriteTool().execute,
+    "commit_write": CommitWriteTool().execute,
     "apply_patch": ApplyPatchTool().execute,
     "todowrite": TodoWriteTool().execute,
     "ls": LsTool().execute,
@@ -76,8 +80,8 @@ SHELL_TIMEOUT = 60
 PYTHON_TIMEOUT = 30
 
 # Tool types that trigger execution
-TOOL_TAGS = {"bash", "python", "web_search", "web_fetch", "read_file", "write_file", "edit_file",
-             "apply_patch", "todowrite",
+TOOL_TAGS = {"bash", "python", "web_search", "web_fetch", "lookup_ticker", "read_file", "write_file", "edit_file",
+             "apply_patch", "todowrite", "get_portfolio_context", "create_document_office",
              "grep", "glob", "ls", "get_workspace", "manage_bg_jobs",
              "create_document", "update_document", "edit_document",
              "search_chats",
@@ -86,7 +90,7 @@ TOOL_TAGS = {"bash", "python", "web_search", "web_fetch", "read_file", "write_fi
              "pipeline",
              "manage_session", "manage_memory", "list_models",
              "ui_control", "generate_image", "ask_user", "update_plan",
-             "manage_tasks", "api_call", "ask_teacher", "manage_skills",
+             "manage_tasks", "api_call", "ask_teacher", "manage_skills", "skill_introspect",
              "suggest_document",
              "manage_endpoints", "manage_mcp", "manage_webhooks",
              "manage_tokens", "manage_documents", "manage_settings",
