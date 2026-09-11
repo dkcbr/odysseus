@@ -267,6 +267,12 @@ class DeepResearcher:
         self.findings: List[Dict] = []
         self.evolving_report: str = ""
         self.research_plan: str = ""
+        # Populated by _validate_citations() -- URLs the final report cited
+        # that were never actually fetched during this run. Real, live-caught
+        # failure mode: the model can fabricate a plausible-looking citation
+        # for a fact it invented, apparently to fill category-template
+        # sections the real evidence didn't cover.
+        self.fabricated_citations: List[str] = []
 
     def cancel(self):
         """Request cooperative cancellation of the research loop."""
@@ -393,6 +399,7 @@ class DeepResearcher:
 
         self.evolving_report = report  # preserve pre-synthesis report
         final = await self._final_report(question, report)
+        final = self._validate_citations(final)
         elapsed = time.time() - self._start_time
         logger.info(
             f"Research complete: {self.round_count} rounds, "
@@ -827,6 +834,60 @@ class DeepResearcher:
             return report  # return the evolving report as-is
 
     # ------------------------------------------------------------------
+    # VALIDATE: strip citations to URLs that were never actually fetched
+    # ------------------------------------------------------------------
+    def _validate_citations(self, text: str) -> str:
+        """Strip citations whose URL was never actually fetched this run.
+
+        Real, live-caught failure mode, found while testing the citation
+        fix above: even with the CITATION REQUIREMENT in place, the model
+        can fabricate a plausible-looking citation for a fact it invented
+        itself -- confirmed directly, live: a specific NVIDIA A100 claim
+        and an OpenAI research claim, each with a real-looking URL, neither
+        present anywhere in the actual findings. Apparently filling out
+        category-template sections (e.g. Hardware, Performance) the real
+        evidence didn't cover.
+
+        A cited hallucination is worse than an uncited one -- the citation
+        falsely signals real grounding. This is a deterministic, mechanical
+        check (no LLM call): every [label](url) in the text is compared
+        against the real set of URLs in self.findings. A citation to a URL
+        outside that set has its link syntax stripped -- "as shown by
+        [Some Page](https://fake.example)" becomes "as shown by Some Page"
+        -- so the false claim of sourcing is gone without deleting the
+        sentence itself. Findings without a resolvable URL are excluded
+        from the report entirely; nothing to compare fabricated links to
+        would be worse than nothing.
+        """
+        valid_urls = {f.get("url", "") for f in self.findings if f.get("url")}
+        fabricated: List[str] = []
+
+        def _check(match: "re.Match") -> str:
+            label, url = match.group(1), match.group(2)
+            if url in valid_urls:
+                return match.group(0)
+            fabricated.append(url)
+            return label
+
+        # Matches [label](url), tolerating one level of parentheses inside
+        # the URL itself (e.g. Wikipedia's "...wiki/Foo_(bar)") so those
+        # real, legitimate citations aren't mistaken for malformed links
+        # and broken by a naive "stop at the first )" pattern.
+        cleaned = re.sub(
+            r'\[([^\]]*)\]\(([^()\s]*(?:\([^()]*\)[^()\s]*)*)\)',
+            _check,
+            text,
+        )
+        if fabricated:
+            logger.warning(
+                "Citation validator: stripped %d citation(s) linking to "
+                "URLs never actually fetched this run: %s",
+                len(fabricated), fabricated,
+            )
+            self.fabricated_citations = fabricated
+        return cleaned
+
+    # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
     def _emit(self, **kwargs):
@@ -970,4 +1031,6 @@ class DeepResearcher:
             stats["Search"] = ", ".join(self.providers_used)
         if self.category:
             stats["Category"] = self.category.capitalize()
+        if self.fabricated_citations:
+            stats["Fabricated citations removed"] = len(self.fabricated_citations)
         return stats
