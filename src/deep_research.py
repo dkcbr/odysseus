@@ -77,6 +77,12 @@ You are a research assistant planning web searches.
 Generate {num_queries} focused search queries that will help answer the question.
 {round_instruction}
 
+Write each query as a short, concrete search-engine keyword phrase -- the way \
+a person would actually type it into a search box (e.g. "LM Studio local LLM \
+hardware requirements" or "cloud API LLM pricing 2026"), NOT a full \
+grammatical question. Avoid leading words like "What", "How", "Why", or \
+"Can you" -- extract the core concept and keywords instead.
+
 Return ONLY a JSON array of query strings, nothing else.
 Example: ["query one", "query two", "query three"]
 """
@@ -471,7 +477,9 @@ class DeepResearcher:
             round_instruction = (
                 "We already have partial findings.  Generate targeted follow-up "
                 "queries to fill gaps, verify claims, or explore specific aspects "
-                "that the report doesn't yet cover well."
+                "that the report doesn't yet cover well. Keep them as short "
+                "keyword phrases, not full questions -- e.g. turn 'what are the "
+                "maintenance tasks for X' into 'X maintenance tasks'."
             )
 
         prompt = current_date_context() + QUERY_GEN_PROMPT.format(
