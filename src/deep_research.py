@@ -10,6 +10,7 @@ import asyncio
 import json
 import logging
 import re
+from urllib.parse import urlparse
 import time
 from datetime import datetime
 from typing import Callable, Dict, List, Optional, Set
@@ -102,12 +103,12 @@ Integrate the new findings into the existing report. Produce an updated, well-or
 report that answers the original question as completely as possible given all evidence so far. \
 Remove redundancy, resolve contradictions, and maintain logical flow.
 
-CITATION REQUIREMENT: every specific fact, claim, statistic, or quote you take from the \
-findings above must be followed immediately by an inline citation linking to that finding's \
-URL, in the form [short label](url) -- reuse the exact URL shown next to that finding, e.g. \
-finding "[Some Page Title](https://example.com/page)" backing a claim becomes \
-"...as reported by [Some Page Title](https://example.com/page)." A sentence stating a fact \
-from a finding with no citation attached is incomplete -- add the link, don't drop it, even \
+CITATION REQUIREMENT: each finding above already has its own real citation tag, \
+<cite id="N" url="...">title</cite> -- reuse that exact tag, character for character, \
+right after any specific fact, claim, statistic, or quote you take from that finding. \
+Do not invent a new id, do not write the literal placeholder id="N" -- copy the real \
+numeric id and url shown next to that specific finding. A sentence stating a fact from \
+a finding with no citation attached is incomplete -- add the tag, don't drop it, even \
 for facts that also sound like general knowledge.
 
 Write only the updated report — no preamble or meta-commentary.
@@ -158,12 +159,33 @@ above does not actually discuss, even if it would make the report feel more comp
 the evidence doesn't cover something, leave it out entirely rather than filling the gap \
 with plausible-sounding invented content.
 
-CITATION REQUIREMENT, non-negotiable: the evidence above already contains each source's URL \
-(as [title](url) links). Every specific fact, statistic, or claim you state in the report must \
-keep or add its inline citation in that same [title](url) form, right where the fact appears -- \
-not collected in a references list at the end. A sentence stating a specific fact with no link \
-attached is a defect in the report, not an acceptable simplification. If the evidence above has \
-no citation for something, don't state it as a sourced fact.
+CITATION REQUIREMENT, non-negotiable: the evidence above already contains each source's \
+citation as a <cite id="N" url="...">title</cite> tag. Every specific fact, statistic, or claim \
+you state in the report must keep its inline citation, right where the fact appears -- not \
+collected in a references list at the end. When you cite a fact, reproduce that finding's exact \
+<cite id="N" url="...">title</cite> tag verbatim, character for character -- do not rewrite it \
+into [title](url) markdown, do not shorten it, do not paraphrase the title inside it. Treat the \
+tag as a literal, atomic unit, like a citation you are copying, not text you are composing. A \
+sentence stating a specific fact with no citation attached is a defect in the report, not an \
+acceptable simplification. If the evidence above has no citation for something, don't state it \
+as a sourced fact.
+
+EVIDENCE WEIGHTING: each <cite> tag also has a domain_count attribute -- how many findings \
+above came from that same real source domain. A higher domain_count means multiple, independent \
+findings from that source corroborate the same information; domain_count="1" means only one \
+finding came from that domain. Use this only as a real, mechanical signal for how much weight to \
+give a claim -- domain_count does not measure whether a source is trustworthy or authoritative, \
+only how often the same domain recurred in this specific research run. Never use domain_count to \
+justify omitting a fact, and never state a claim more strongly than the evidence itself supports, \
+regardless of domain_count. domain_count is metadata for YOUR OWN reasoning only -- it must never \
+appear as visible text anywhere in the report itself (not as "(domain_count="2")", not as a \
+footnote, not in a heading). If you keep a <cite> tag verbatim as instructed above, that tag's \
+own domain_count attribute is fine to carry along inside the tag -- the reader never sees raw \
+tag attributes, only the rendered citation. Writing domain_count out in your own prose is always \
+wrong.
+
+Do not add a separate "References", "Sources", or "Citations" section at the end of the report. \
+Every citation belongs inline, as its <cite> tag, right where the fact it supports appears.
 
 Other requirements:
 - Use clear ## headings and ### subheadings to organize into logical sections
@@ -195,7 +217,45 @@ CATEGORY_PROMPTS = {
 - Include a ## Shared Considerations section for things that apply to all options
 - REMINDER: every fact above had a source link next to it -- keep those
   [title](url) citations inline as you write each strength/weakness, not
-  just in the table""",
+  just in the table
+- Real, added 2026-09-11 (evidence weighting, comparison tables): each
+  citation's domain_count is a real, mechanical corroboration signal --
+  how many findings above came from that same source domain. When
+  ordering rows in the Comparison Table, criteria supported by a higher
+  domain_count may be placed earlier or given more weight in the
+  narrative; criteria supported by only domain_count="1" may be placed
+  later. This is guidance only, not a rule: never invent a criterion to
+  "balance" domain counts, never infer a detail no finding actually
+  states, and never omit a criterion the evidence genuinely supports
+  just because its domain_count is low.
+- Real, added 2026-09-11 (criteria grouping): you may group related
+  comparison-table criteria into thematic sections (e.g. Capabilities,
+  Limitations, Operational Constraints, Performance, Cost Factors) --
+  but only when multiple criteria naturally cluster based on what the
+  evidence above actually discusses. domain_count may influence which
+  criteria appear earlier within a group, but never decides whether
+  something IS a group -- that comes only from the real evidence
+  clustering that way on its own. Do not invent a group the evidence
+  doesn't support, and do not fabricate a criterion just to fill one
+  out. If the evidence doesn't naturally cluster, produce a flat,
+  ungrouped table instead -- that is the correct, expected outcome for
+  evidence that doesn't group cleanly, not a fallback to avoid.
+- Real, added 2026-09-11 (conflict surfacing): if two or more findings
+  above genuinely, explicitly disagree about the same criterion (e.g.
+  one states a capability the other states as a limitation, or they
+  give different specific values for the same measurement), you may
+  mark that row as a conflict -- for example, "Connectivity
+  (Conflicting evidence)" -- and show what each side actually says,
+  rather than silently picking one or blending them into an averaged
+  or vague answer. domain_count may be noted alongside each side (e.g.
+  "supported by 2 domains" vs "1 domain") as corroboration context
+  only, never to decide which side is "correct" or to discard the
+  weaker side. Only surface a conflict that is explicitly present in
+  the evidence's own wording -- never infer disagreement the evidence
+  doesn't actually state, and never manufacture a conflict to make the
+  table feel more thorough. If the evidence doesn't disagree with
+  itself anywhere, produce a normal table with no conflict rows at
+  all -- that is the correct, expected, common outcome.""",
 
     "howto": """IMPORTANT FORMAT OVERRIDE — this is a HOW-TO guide:
 - Start with ## Quick Guide — a super concise numbered list (one line per step, no details, just the action). Example: 1. Install X  2. Run Y  3. Configure Z
@@ -413,6 +473,20 @@ class DeepResearcher:
 
         self.evolving_report = report  # preserve pre-synthesis report
         final = await self._final_report(question, report)
+        # Real, added 2026-09-11 (citation anchoring): reconcile against the
+        # pre-rewrite `report` (which still has every real <cite> tag from
+        # _format_findings) before stripping tags to plain markdown, since
+        # reconciliation needs the tags to compare against.
+        final = await self._reconcile_citations(question, report, final)
+        # Real, added 2026-09-11 (evidence completeness, transparency-only):
+        # runs on the tagged text, before stripping, so the real <cite id>
+        # tags are still present to compare against. No retry, no pressure
+        # to use more findings -- see _find_unused_citations's own comment
+        # for why forcing this would be unsafe here specifically.
+        unused_ids = self._find_unused_citations(report, final)
+        final += self._format_unused_sources_section(unused_ids)
+        final = self._strip_cite_tags(final)
+        final = self._strip_domain_count_leaks(final)
         final = self._validate_citations(final)
         elapsed = time.time() - self._start_time
         logger.info(
@@ -803,13 +877,16 @@ class DeepResearcher:
         # just inside CATEGORY_PROMPTS, since self.category can be
         # None/"general" and get no category template appended at all.
         prompt += (
-            "\n\nOne last reminder before you write: keep every [title](url) "
-            "citation from the evidence above in your final report, right "
-            "next to the fact it supports. Do not write a polished version "
-            "that drops the links. Also: do not add sections, criteria, or "
-            "claims about topics the evidence above doesn't cover -- a "
-            "shorter, accurate report beats a longer one with invented "
-            "detail."
+            "\n\nOne last reminder before you write: every <cite id=\"N\" "
+            "url=\"...\">title</cite> tag from the evidence above must appear "
+            "in your final report, verbatim, right next to the fact it "
+            "supports. Copy each tag exactly as written -- do not convert it "
+            "to [title](url) markdown, do not paraphrase or shorten it, do "
+            "not move it to a references list. Do not write a polished "
+            "version that drops or rewrites these tags. Also: do not add "
+            "sections, criteria, or claims about topics the evidence above "
+            "doesn't cover -- a shorter, accurate report beats a longer one "
+            "with invented detail."
         )
 
         try:
@@ -872,6 +949,194 @@ class DeepResearcher:
             return report  # return the evolving report as-is
 
     # ------------------------------------------------------------------
+    # RECONCILE: restore any <cite> tags the final rewrite dropped
+    # ------------------------------------------------------------------
+    # Real, updated 2026-09-11 (domain reinforcement): allows any additional
+    # attributes (e.g. domain_count="N") between the url attribute and the
+    # closing ">", via [^>]*, without capturing them as new groups --
+    # reconciliation and completeness-checking code below still only reads
+    # group(1)=id, group(2)=url, group(3)=title and must not break.
+    # Real, live-caught bug, 2026-09-11: an earlier version used [^<]* for
+    # the title group, on the assumption a citation title would never
+    # contain a literal "<" character. Confirmed directly, live: a real
+    # title read "...faster (<200ms)" -- the embedded "<" broke the match
+    # entirely, letting the WHOLE raw <cite> tag (including a fabricated
+    # URL, in that specific case) survive completely unprocessed into the
+    # final output, bypassing both _strip_cite_tags() and
+    # _validate_citations() -- a real safety-net gap, not a cosmetic one.
+    # Fixed with a non-greedy (.*?) that matches any character up to the
+    # first real </cite>, so an embedded "<" inside the title no longer
+    # breaks the match.
+    _CITE_TAG_RE = re.compile(r'<cite id="(\d+)" url="([^"]*)"[^>]*>(.*?)</cite>')
+
+    async def _reconcile_citations(self, question: str, pre_rewrite: str, final: str) -> str:
+        """Detect and repair citations dropped by the final-report rewrite.
+
+        Real, added 2026-09-11 (citation anchoring): a prompt reminder to
+        preserve citations is probabilistic -- the model can still drop or
+        rewrite them. This is the mechanical backstop: compare the real set
+        of cited URLs BEFORE the rewrite (pre_rewrite, i.e. the synthesized
+        `report`) against what actually survived AFTER it (final). If any
+        are missing, re-prompt exactly once with the specific, real URLs
+        that were dropped, mirroring the existing "too short -> expand"
+        retry pattern already used in _final_report -- a single, targeted
+        correction, not an unbounded retry loop.
+
+        A URL counts as "surviving" if it appears anywhere in the final
+        text at all -- as a <cite> tag, inside a [title](url) markdown
+        link (in case the model converted the tag back to markdown despite
+        the instruction not to), or as a bare substring -- deliberately
+        permissive here, since the real failure mode this guards against
+        is the URL disappearing entirely, not its exact surrounding syntax.
+        """
+        pre_urls = {m.group(2) for m in self._CITE_TAG_RE.finditer(pre_rewrite)}
+        if not pre_urls:
+            return final
+
+        missing = {url for url in pre_urls if url not in final}
+        if not missing:
+            return final
+
+        logger.warning(
+            "Citation anchoring: %d citation(s) present before the final "
+            "rewrite are missing from the output, re-prompting once: %s",
+            len(missing), missing,
+        )
+
+        missing_list = "\n".join(f"- {url}" for url in sorted(missing))
+        try:
+            restored = await self._llm(
+                [
+                    {"role": "user", "content": FINAL_REPORT_PROMPT.format(question=question, report=pre_rewrite)},
+                    {"role": "assistant", "content": final},
+                    {"role": "user", "content": (
+                        "The following citations from the evidence were dropped from your "
+                        "report above:\n" + missing_list + "\n\n"
+                        "Rewrite the report, restoring each dropped citation as its exact "
+                        '<cite id="N" url="...">title</cite> tag from the evidence, right next '
+                        "to the fact it supports. Keep everything else in the report the same."
+                    )},
+                ],
+                temperature=0.2,
+                max_tokens=self.max_report_tokens,
+                timeout=180,
+            )
+        except Exception as e:
+            logger.error(f"Citation reconciliation retry failed: {e}")
+            return final
+
+        still_missing = {url for url in missing if url not in restored}
+        if still_missing:
+            logger.warning(
+                "Citation anchoring: %d citation(s) still missing after the "
+                "single reconciliation retry, leaving as-is rather than "
+                "retrying indefinitely: %s",
+                len(still_missing), still_missing,
+            )
+        return restored
+
+    def _find_unused_citations(self, pre_rewrite: str, final_text: str) -> set:
+        """Real, added 2026-09-11 (evidence completeness, transparency-only
+        by deliberate design): which real finding IDs never appear in the
+        final report at all. Reuses the same _CITE_TAG_RE already built
+        and tested for citation anchoring, rather than a second regex.
+
+        Real, fixed 2026-09-11 (caught by a direct regression test after
+        the domain-reinforcement change, but a real, pre-existing bug from
+        this function's own first version, not something that change
+        introduced): originally checked only for a surviving <cite> TAG in
+        final_text, but _reconcile_citations (built earlier the same night)
+        deliberately treats a URL as "surviving" more permissively -- as a
+        <cite> tag, as [title](url) markdown, or as a bare substring -- on
+        the reasoning that the model converting the tag to markdown is
+        still real, genuine survival, not a drop. The two functions had
+        silently disagreed on this. Now takes the real pre-rewrite text
+        directly (matching _reconcile_citations's own signature) and uses
+        the same permissive "url in final_text" check, so a citation the
+        reconciliation pass already accepted as present is never then
+        re-flagged as "unused" by this separate check.
+
+        Deliberately NOT a forcing check: this never triggers a retry or
+        asks the model to "incorporate" anything. A real, dated comment
+        elsewhere in this same file (_final_report's own expansion-retry
+        logic, and _validate_citations's own fabricated-citation incident)
+        already documents that pressuring the model to use more evidence
+        than the question warrants is exactly what caused a real,
+        live-caught fabrication bug. This check is read-only surfacing,
+        never pressure.
+        """
+        id_to_url = {int(m.group(1)): m.group(2) for m in self._CITE_TAG_RE.finditer(pre_rewrite)}
+        return {i for i, url in id_to_url.items() if url not in final_text}
+
+    def _format_unused_sources_section(self, unused_ids: set) -> str:
+        """Real, added 2026-09-11 (evidence completeness): a plain,
+        non-coercive list of findings the report didn't directly cite --
+        transparency, not a defect report. self.findings is 1-indexed by
+        the same real IDs _format_findings() assigns (id N == findings[N-1]),
+        confirmed directly against that real, existing function.
+        """
+        if not unused_ids:
+            return ""
+        source_lines = []
+        for i in sorted(unused_ids):
+            if i < 1 or i > len(self.findings):
+                continue  # real, defensive guard against an out-of-range id
+            finding = self.findings[i - 1]
+            title = finding.get("title", "") or finding.get("url", "unknown source")
+            url = finding.get("url", "")
+            if url:
+                source_lines.append(f"- [{title}]({url})")
+        # Real, fixed 2026-09-11 (caught directly in isolated testing): don't
+        # add the header at all if every real id turned out to be
+        # out-of-range or urlless -- a header with nothing listed under it
+        # would look genuinely broken to the real end user.
+        if not source_lines:
+            return ""
+        return "\n\n## Sources Not Directly Cited\n" + "\n".join(source_lines)
+
+    def _strip_cite_tags(self, text: str) -> str:
+        """Convert any surviving <cite> tags to plain [title](url) markdown.
+
+        Real, added 2026-09-11 (citation anchoring): the structured <cite>
+        tag exists to survive the rewrite mechanically -- it was never
+        meant to reach the user. Odysseus's real frontend (static/app.js,
+        via js/markdown.js) renders plain markdown, not this custom tag, so
+        every real, surviving tag is converted back to normal, renderable
+        [title](url) form here, after reconciliation and before
+        _validate_citations (which already expects that markdown form).
+        """
+        return self._CITE_TAG_RE.sub(lambda m: f"[{m.group(3)}]({m.group(2)})", text)
+
+    # Matches a literal, visible "(domain_count="N")" (with or without the
+    # parens/quotes exactly matching) that the model wrote into its own
+    # prose instead of keeping it inside a <cite> tag's attributes, where
+    # the reader never sees it. Tolerates minor real variations seen live
+    # (curly vs straight quotes, missing parens) rather than only the one
+    # exact string from the first observed case.
+    _DOMAIN_COUNT_LEAK_RE = re.compile(
+        r'\s*\(?\s*domain_count\s*=\s*["\u201c\u201d](\d+)["\u201c\u201d]\s*\)?'
+    )
+
+    def _strip_domain_count_leaks(self, text: str) -> str:
+        """Remove any literal 'domain_count="N"' that leaked into visible
+        prose, as a deterministic backstop to the prompt instruction above.
+
+        Real, live-caught bug, 2026-09-11: domain_count is meant to be an
+        internal weighting signal for the model's own reasoning, carried
+        only inside <cite> tag attributes a real reader never sees directly
+        (_strip_cite_tags above already drops it correctly when the tag
+        format is used properly). Confirmed directly, live: the model wrote
+        it out as its own visible prose instead, e.g. a table cell reading
+        '**Performance** (domain_count="2")' -- a real user would see that
+        raw attribute as part of the criteria label, which looks like a
+        bug leaking through, not a feature. A prompt instruction alone is
+        probabilistic, not a guarantee (the same lesson already learned
+        from citation-dropping above) -- this is the deterministic,
+        mechanical safety net.
+        """
+        return self._DOMAIN_COUNT_LEAK_RE.sub("", text)
+
+    # ------------------------------------------------------------------
     # VALIDATE: strip citations to URLs that were never actually fetched
     # ------------------------------------------------------------------
     def _validate_citations(self, text: str) -> str:
@@ -901,11 +1166,24 @@ class DeepResearcher:
         fabricated: List[str] = []
 
         def _check(match: "re.Match") -> str:
-            label, url = match.group(1), match.group(2)
+            url = match.group(2)
             if url in valid_urls:
                 return match.group(0)
             fabricated.append(url)
-            return label
+            # Real, live-caught readability bug, 2026-09-11: an earlier
+            # version returned `label` here (keeping the bare citation
+            # title as dangling, unlinked text), on the reasoning that
+            # removing the link syntax alone was enough to stop it looking
+            # sourced. Confirmed directly, live, that this reads badly to a
+            # real reader -- e.g. "...compatibility issues with different
+            # systems Local LLM Deployment Guide" trails off with an
+            # orphaned proper-noun-looking phrase that has no grammatical
+            # connection to the sentence, since it was written as a link's
+            # title, not as prose. Removing it entirely reads more cleanly
+            # in practice; the sentence's real content rarely depended on
+            # the citation title as a grammatical component. Whitespace
+            # left behind by the removal is cleaned up below.
+            return ""
 
         # Matches [label](url), tolerating one level of parentheses inside
         # the URL itself (e.g. Wikipedia's "...wiki/Foo_(bar)") so those
@@ -923,6 +1201,14 @@ class DeepResearcher:
                 len(fabricated), fabricated,
             )
             self.fabricated_citations = fabricated
+            # Real, live-caught cleanup, 2026-09-11: removing a citation
+            # entirely (above) can leave a run of doubled spaces where it
+            # used to sit, or a stray space before the sentence's own
+            # trailing punctuation -- collapse both so the surrounding
+            # sentence still reads as one clean sentence, not one with a
+            # visible gap where something was cut out.
+            cleaned = re.sub(r'[ \t]{2,}', ' ', cleaned)
+            cleaned = re.sub(r'[ \t]+([.,;:!?])', r'\1', cleaned)
         return cleaned
 
     # ------------------------------------------------------------------
@@ -1027,17 +1313,60 @@ class DeepResearcher:
 
         return None
 
+    @staticmethod
+    def _real_domain(url: str) -> str:
+        """Extract a real, normalized domain from a URL for reinforcement
+        counting -- strips a leading "www." so "www.example.com" and
+        "example.com" count as the same real source, not two different ones.
+        """
+        try:
+            netloc = urlparse(url).netloc.lower()
+        except (ValueError, AttributeError):
+            return ""
+        return netloc[4:] if netloc.startswith("www.") else netloc
+
     def _format_findings(self, findings: List[Dict]) -> str:
-        """Format findings list into readable text for synthesis prompt."""
+        """Format findings list into readable text for synthesis prompt.
+
+        Real, added 2026-09-11 (citation anchoring): each citation is a
+        structured <cite id="N" url="...">title</cite> tag instead of a
+        plain [title](url) markdown link. A real, live-caught bug (see
+        _final_report's own comment) showed the final-report rewrite stage
+        can silently drop plain markdown citations even with an explicit
+        prompt reminder in place -- a reminder is probabilistic, not a
+        guarantee. A structured tag is a literal, atomic artifact the model
+        is asked to preserve rather than reflow as prose, and gives
+        _reconcile_citations() below something mechanical to detect and
+        compare, rather than trying to parse arbitrary markdown link
+        mutations.
+
+        Real, added 2026-09-11 (domain reinforcement, evidence weighting):
+        also attaches a real, mechanical "domain_count" attribute -- how
+        many of THIS run's findings share the same real domain. This is the
+        one weighting signal from that design discussion that survived
+        direct verification against the real data: not a subjective
+        quality score, not an invented metadata field, just a real count.
+        Deliberately not captured by _CITE_TAG_RE (which only needs
+        id/url/title for anchoring, reconciliation, and completeness) --
+        this attribute is informational to the synthesis model only and
+        never parsed back out by any of that existing logic.
+        """
+        domains = [self._real_domain(f.get("url", "")) for f in findings]
+        domain_counts = {d: domains.count(d) for d in domains if d}
+
         parts = []
         for i, f in enumerate(findings, 1):
             url = f.get("url", "unknown")
             title = f.get("title", "")
             summary = f.get("summary", "")
             evidence = f.get("evidence", "")
+            domain_count = domain_counts.get(domains[i - 1], 1)
             # Use summary if available, fall back to truncated evidence
             content = summary if summary else (evidence[:1000] if evidence else "(no content)")
-            parts.append(f"**Finding {i}** — [{title}]({url})\n{content}")
+            parts.append(
+                f'**Finding {i}** — <cite id="{i}" url="{url}" domain_count="{domain_count}">{title}</cite>'
+                f'\n{content}'
+            )
         return "\n\n".join(parts)
 
     def _fallback_report(self, question: str, findings: List[Dict]) -> str:
