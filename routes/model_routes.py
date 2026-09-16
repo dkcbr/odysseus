@@ -1371,6 +1371,31 @@ def _api_key_fingerprint(api_key: Optional[str]) -> str:
 def setup_model_routes(model_discovery):
     router = APIRouter(prefix="/api")
 
+    # Real, added 2026-09-13: wires up the frontend's "Rename AI" modal,
+    # which previously POSTed to this exact path with zero backend route --
+    # confirmed dead before this (404 on save, via a fresh grep of app.js
+    # and the whole backend). Any authenticated user, not admin-only --
+    # renaming the assistant's own display identity is a real, distinct,
+    # lower-stakes action than the general, admin-only /api/auth/settings
+    # route. Registered here (plain /api prefix), not in auth_routes.py
+    # (/api/auth prefix), so the final path genuinely matches what the
+    # existing frontend code actually calls.
+    @router.post("/ai/name")
+    async def set_ai_name(request: Request):
+        """Any authenticated user: set the assistant's display/identity name."""
+        if not _auth_disabled() and not effective_user(request):
+            raise HTTPException(401, "Not authenticated")
+        body = await request.json()
+        name = str(body.get("name", "")).strip()
+        if not name:
+            raise HTTPException(400, "name is required")
+        if len(name) > 50:
+            raise HTTPException(400, "name must be 50 characters or fewer")
+        current = _load_settings()
+        current["ai_name"] = name
+        _save_settings(current)
+        return {"success": True, "name": name}
+
     # ---- Model list cache ----
     import time as _time
     # Per-user cache: { owner_key: {"data": ..., "time": ...} }. owner_key is

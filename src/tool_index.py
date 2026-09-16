@@ -53,6 +53,16 @@ ALWAYS_AVAILABLE = frozenset({
     # published skill exists but have no way to actually read its
     # procedure. See odysseus issue #10/#11 -- added 2026-08-16.
     "skill_introspect",
+    # Real, live-caught gap, 2026-09-11: a direct "what's the WAN status of
+    # the router in Home Assistant?" question got a generic non-answer
+    # ("depends on router configuration...") instead of a real tool call --
+    # confirmed directly, separately, that ha_state itself works correctly
+    # when called directly. Same root cause and same fix as skill_introspect
+    # above: a home-infrastructure query never maps to whatever domain
+    # keyword RAG tool-selection matches on, so the model never even sees
+    # ha_state/ha_control as options unless they're ambient like this.
+    "ha_state",
+    "ha_control",
     # Ask the user a multiple-choice question for a decision/clarification.
     # Always reachable so the agent can pause and ask at any point.
     "ask_user",
@@ -66,7 +76,7 @@ ASSISTANT_ALWAYS_AVAILABLE = frozenset({
     "list_email_accounts", "list_emails", "read_email", "scan_email_unsubscribes", "unsubscribe_email", "send_email", "reply_to_email",
     "bulk_email", "archive_email", "delete_email", "mark_email_read",
     "manage_calendar", "manage_notes", "manage_tasks",
-    "manage_memory", "web_search", "read_file",
+    "manage_memory", "web_search", "read_file", "zeus",
     "create_document", "update_document",
     "resolve_contact", "search_chats",
     "api_call",  # For Miniflux/Gitea/Linkding/etc. integrations
@@ -107,6 +117,7 @@ BUILTIN_TOOL_DESCRIPTIONS: Dict[str, str] = {
     "list_models": "List all available AI models and their endpoints.",
     "manage_session": "Chat management: rename, archive, delete, or fork chats (the UI calls these 'chats'; internally 'sessions'). Use for 'rename my chats', 'rename this chat', 'archive/delete a chat'.",
     "manage_memory": "Memory management: list, add, edit, delete, or search persistent memories. For facts about the USER (their name, preferences, where they live). NOT for info about ANOTHER person — addresses, phones, emails belonging to a contact go in manage_contact, not memory.",
+    "zeus": "Read-only diagnostic access to the Zeus host via its dedicated agent (no shell/sudo). Currently supports action=uname (OS/kernel info), action=uptime (uptime seconds, human-readable, boot time), action=df (root filesystem usage: total/used/free bytes, percent used), action=health (agent reachability check, unauthenticated -- use first if uname/uptime/df fail, to distinguish a down agent from a bad token), action=ps (top 20 real processes by memory: pid, name, rss_kb, state), and action=journal_tail (most recent 30 real systemd journal entries system-wide: timestamp, unit, priority, message). Do not attempt other actions -- the agent will reject them.",
     "manage_skills": "Skill management: add, update, publish, or search reusable skills/presets.",
     "manage_tasks": "Scheduled task management: list, create, edit, delete, pause, resume, or run cron tasks.",
     "manage_endpoints": "Endpoint management: list, add, delete, enable, or disable model API endpoints.",
@@ -159,6 +170,12 @@ BUILTIN_TOOL_DESCRIPTIONS: Dict[str, str] = {
     "propose_write": "Preview a file write as a diff WITHOUT writing to disk. Returns a commit_token -- pass it to commit_write to actually apply the change. Use before writing to sensitive paths (data/agent_capabilities.json, data/app.db, data/auth.json, data/integrations.json, data/.app_key), which reject direct write_file calls.",
     "commit_write": "Apply a write previously previewed with propose_write. Requires the exact path, content, and commit_token returned by propose_write -- the token is single-use and expires after 5 minutes.",
     "lookup_ticker": "Look up REAL, VERIFIED company identity and quote data for a stock/crypto ticker symbol via Financial Modeling Prep. Call this before stating what company a ticker represents or its price -- small/mid-cap tickers are frequently misidentified from memory (e.g. TMC, MP). Errors (no API key, ticker not found) mean tell the user real data isn't available, never guess.",
+    "restart_service": "Restart one of 4 real, allowlisted, user-level host services (Whisper speech-to-text: jarvis-whisper-bridge.service, jarvis-whisper-server-container.service, jarvis-whisper-server.service; Piper text-to-speech: jarvis-piper-server.service) via a real, separate, narrow, host-level restart agent. Use if a voice-pipeline service appears hung, unresponsive, or is reported as failing -- not for restarting Odysseus itself or any container/system-level service.",
+    "read_systemd_logs": "Read recent, real log entries for any real, existing systemd service on the host (broad scope -- not limited to the voice-pipeline services restart_service covers). Use to diagnose why any real service, including Odysseus/container/system-level ones, is failing, hung, or misbehaving. Read-only, never modifies or restarts anything.",
+    "service_status": "Read the current, real systemd state (active/failed/running, PID, memory, restart count, last start time) for any real, existing service on the host -- same broad scope as read_systemd_logs. Use to check a service's health before deciding whether it actually needs restart_service or deeper log inspection. Read-only, never modifies anything.",
+    "check_service_dependencies": "Show the real systemd dependency tree (Requires/Wants/After/Before) for any real, existing service on the host -- same broad scope as service_status/read_systemd_logs. Use to diagnose cascading failures, e.g. a service failing because an upstream dependency is inactive, not because of the service itself. Read-only, never modifies anything.",
+    "restart_container": "Restart one of exactly 2 real, explicitly allowlisted, low-stakes Docker containers (odysseus-searxng-1, odysseus-ntfy-1) via the real docker-socket-proxy. A real, structural restriction -- no other container, including Odysseus's own runtime, can ever be restarted through this tool.",
+    "container_status": "Read the current, real Docker state (running/exited, uptime, restart count, health, image) for any real, existing container on the host -- broader scope than restart_container since this is read-only. Use to check a container's health before deciding whether it actually needs restart_container.",
     "get_portfolio_context": "Fetch DK's real, current portfolio context (holdings, strategy, rules, thesis notes). ALWAYS call for any question about a specific position, balance, holding, or stored trading rule — never assume you already know the answer. Answer the specific fact asked, not a general summary.",
     "search_vault": "Search DK's real Obsidian vault (personal notes, e.g. book summaries) for a query string. ALWAYS call for any question about what the vault or notes say — never assume you lack access or answer from training knowledge.",
     "create_document_office": "Create a real Word (.docx), PowerPoint (.pptx), Excel (.xlsx), or PDF file. ALWAYS call this for requests to create a Word document, presentation, spreadsheet, or PDF specifically — the generic create_document tool cannot produce real Office/PDF files. NEVER use bash/run_command/echo to write these files directly, that produces an invalid file that appears to work but cannot be opened.",

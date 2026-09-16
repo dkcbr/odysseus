@@ -18,7 +18,7 @@ OUTDIR = Path(__file__).parent / "repro_runs"
 OUTDIR.mkdir(exist_ok=True)
 
 API_BASE = "http://100.93.206.89:7000/api"
-SESSION_COOKIE = "5f3511cd3d94a06cd49486092cf5bb7eb538ad79bb065bff441c2b2982af6546"
+SESSION_COOKIE = "4af4d365b018c69e0276c25b5b4db82b2ce3daa3b4169c0d7644d00b9114a205"
 ENDPOINT_ID = "77bddaa5"
 DEFAULT_USER_PROMPT = "How many KTOS shares do I own?"
 

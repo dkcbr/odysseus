@@ -50,6 +50,7 @@ import capabilitiesModule from './js/capabilities.js';
 import tradingviewModule from './js/tradingview.js';
 import pollerStatusModule from './js/poller_status.js';
 import pollerDashboardModule from './js/poller_dashboard.js';
+import systemMonitorModule from './js/system_monitor.js';
 import taskHistoryModule from './js/task_history.js';
 
 const API_BASE = window.location.origin;
@@ -1532,6 +1533,20 @@ function initializeEventListeners() {
       const overflowTts = el('overflow-tts-btn');
       if (overflowTts) {
         overflowTts.style.display = ttsOff ? 'none' : '';
+      }
+      // Real, added 2026-09-13: apply a real, saved ai_name to the welcome
+      // screen's own title, replacing the hardcoded "Odysseus" text. Keeps
+      // the boat icon SVG intact (only replaces the trailing text node),
+      // and only touches it once at real page load -- the research-mode
+      // toggle above has its own, separate, revertible override for the
+      // same element and takes priority whenever that mode is active.
+      if (settings.ai_name) {
+        const welcomeNameEl = document.querySelector('.welcome-name');
+        if (welcomeNameEl) {
+          const svg = welcomeNameEl.querySelector('svg');
+          welcomeNameEl.textContent = settings.ai_name;
+          if (svg) welcomeNameEl.insertBefore(svg, welcomeNameEl.firstChild);
+        }
       }
     })
     .catch(() => {});
@@ -3790,6 +3805,9 @@ function startOdysseusApp() {
   if (pollerDashboardModule) {
     pollerDashboardModule.init();
   }
+  if (systemMonitorModule) {
+    systemMonitorModule.init();
+  }
 
   // Initialize task history module
   if (taskHistoryModule) {
@@ -3900,6 +3918,72 @@ function startOdysseusApp() {
   if (sidebarSearchBtn) {
     sidebarSearchBtn.addEventListener('click', () => {
       if (searchChatModule) searchChatModule.openSearch();
+    });
+  }
+
+  // Real, added 2026-09-16: frees the shared 16GB GPU for gaming by
+  // stopping/unloading every local AI service holding real VRAM, via
+  // routes/system_monitor_routes.py -> systemctl_agent.py -> game_mode.sh
+  // (all real, verified live this same session). Toggles on/off; the
+  // button's own label/title reflect the last known real state rather
+  // than assuming -- fetched once on load via 'status', not just set to
+  // a hardcoded default, since the real state could already be "on" from
+  // a previous session or a manual `game_mode.sh on` run from a terminal.
+  const sidebarGameModeBtn = el('sidebar-game-mode-btn');
+  const sidebarGameModeLabel = el('sidebar-game-mode-label');
+  let _gameModeOn = false;
+  let _gameModeBusy = false;
+
+  function _setGameModeUI(on) {
+    _gameModeOn = on;
+    if (sidebarGameModeLabel) sidebarGameModeLabel.textContent = on ? 'Exit Game Mode' : 'Game Mode';
+    if (sidebarGameModeBtn) sidebarGameModeBtn.title = on
+      ? 'Restore the voice pipeline (Whisper)'
+      : 'Free the GPU for gaming';
+  }
+
+  async function _callGameMode(action) {
+    const resp = await fetch('/api/system-monitor/game-mode', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action }),
+    });
+    if (!resp.ok) {
+      throw new Error('game-mode request failed: HTTP ' + resp.status);
+    }
+    return resp.json();
+  }
+
+  if (sidebarGameModeBtn) {
+    // Real initial state check -- see comment above on why this isn't
+    // just hardcoded to "off". Parses game_mode.sh's own real, explicit
+    // "game_mode: ON/OFF" first line rather than guessing from raw GPU
+    // numbers, which would be a real, fragile heuristic.
+    _callGameMode('status').then((data) => {
+      const output = (data && data.output) || '';
+      _setGameModeUI(/game_mode:\s*ON/.test(output));
+    }).catch(() => {});
+
+    sidebarGameModeBtn.addEventListener('click', async () => {
+      if (_gameModeBusy) return;
+      _gameModeBusy = true;
+      const nextAction = _gameModeOn ? 'off' : 'on';
+      const prevLabel = sidebarGameModeLabel ? sidebarGameModeLabel.textContent : '';
+      if (sidebarGameModeLabel) sidebarGameModeLabel.textContent = nextAction === 'on' ? 'Freeing GPU…' : 'Restoring…';
+      try {
+        const data = await _callGameMode(nextAction);
+        if (data && data.ok) {
+          _setGameModeUI(nextAction === 'on');
+        } else {
+          if (sidebarGameModeLabel) sidebarGameModeLabel.textContent = prevLabel;
+          console.error('game-mode action failed:', data && data.error);
+        }
+      } catch (e) {
+        if (sidebarGameModeLabel) sidebarGameModeLabel.textContent = prevLabel;
+        console.error('game-mode request error:', e);
+      } finally {
+        _gameModeBusy = false;
+      }
     });
   }
   // Modify form submit to handle special modes

@@ -29,6 +29,12 @@ def _invalidate_caches():
 # ── Default values ──
 
 DEFAULT_SETTINGS = {
+    # Real, added 2026-09-13: the display/identity name the assistant uses
+    # to refer to itself, wired into the system prompt in agent_loop.py and
+    # shown on the welcome screen. Empty string means the default identity
+    # (no rename applied) -- the "Rename AI" modal in the frontend was
+    # fully non-functional before this (POSTed to a route that didn't exist).
+    "ai_name": "",
     # Agent email safety: when True, the MCP send_email / reply_to_email
     # tools don't SMTP directly. They stage the composed message into the
     # scheduled_emails table with status='agent_draft' and return a

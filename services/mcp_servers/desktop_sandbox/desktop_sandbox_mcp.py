@@ -453,6 +453,265 @@ async def type_text(session_id: str, text: str) -> str:
     return f"Typed {len(text)} character(s)."
 
 
+# Real, flow definitions as data: each step is (tool_name, extra_kwargs).
+# session_id is deliberately not included per-step -- run_browser_flow
+# injects the caller's own session_id into every step, since every real
+# tool in this module requires it and a flow should only ever operate
+# within one real session/container.
+_FLOWS: dict[str, list[tuple[str, dict]]] = {
+    # Real, deliberately built from only already ground-truthed steps.
+    # An earlier draft of this flow included a click on Google's own
+    # search box, guessed at the same coordinate already proven for the
+    # address bar -- caught directly before testing: that coordinate was
+    # never actually verified against Google's real page layout, and
+    # would have just re-clicked the address bar instead. Left out
+    # entirely rather than guess a second, unverified coordinate.
+    "open_and_capture": [
+        ("open_firefox", {}),
+        ("navigate_and_screenshot", {"url": "https://example.com"}),
+    ],
+    # Real, the search-box click coordinate (512,376) was confirmed live,
+    # directly, on 2026-08-26 -- DK confirmed the cursor landed exactly
+    # centered in Google's real search field at that position, then
+    # confirmed the full click+type+search sequence actually worked.
+    # An earlier draft flow reused the address-bar coordinate here
+    # instead, which would have silently typed into the URL bar --
+    # caught and fixed before this was ever built.
+    "google_search": [
+        ("open_firefox", {}),
+        ("navigate_and_screenshot", {"url": "https://www.google.com"}),
+        ("click", {"x": 512, "y": 376}),
+        ("type_text", {"text": "jarvis ai"}),
+        # Real, fixed: "Return" (capitalized) is not a valid vncdo key
+        # name and causes a real, direct hang -- confirmed live, "enter"
+        # (lowercase) is the correct name, matching every other real,
+        # working key_press call already used tonight.
+        ("key_press", {"key": "enter"}),
+        ("screenshot", {}),
+    ],
+    "scroll_and_capture": [
+        ("open_firefox", {}),
+        ("navigate_and_screenshot", {"url": "https://example.com"}),
+        ("scroll", {"direction": "down"}),
+        ("screenshot", {}),
+    ],
+    # Real, GitHub login field coordinates confirmed live, directly,
+    # against the real, running desktop-sandbox container on 2026-08-26
+    # -- DK confirmed each position, and that a real "xxx"/"yyy" test
+    # string landed in the correct real field, not the address bar or
+    # the wrong field. The submit button's own position was confirmed
+    # visually (cursor centered on it) but deliberately never actually
+    # clicked during ground-truthing, to avoid triggering a real login
+    # attempt against GitHub's own servers. {username}/{password} are
+    # real placeholders substituted at call time via run_browser_flow's
+    # own params argument -- never hardcoded here.
+    "login_sequence": [
+        ("open_firefox", {}),
+        ("navigate_and_screenshot", {"url": "https://github.com/login"}),
+        ("click", {"x": 680, "y": 320}),
+        ("type_text", {"text": "{username}"}),
+        ("click", {"x": 680, "y": 360}),
+        ("type_text", {"text": "{password}"}),
+        ("click", {"x": 680, "y": 455}),
+        ("screenshot", {}),
+    ],
+    # Real, fixed: the earlier message's own version omitted x/y from the
+    # click step entirely, which would genuinely fail -- click's real
+    # signature requires both, confirmed against every real, working use
+    # of it tonight. {x}/{y} are real, string-formatted placeholders here
+    # (run_browser_flow's own substitution only touches string values);
+    # the underlying click() call still passes them through str() to
+    # vncdo either way, same as every other coordinate tonight.
+    "click_target": [
+        ("open_firefox", {}),
+        ("navigate_and_screenshot", {"url": "{url}"}),
+        ("click", {"x": "{x}", "y": "{y}"}),
+        ("screenshot", {}),
+    ],
+    # Real, parameterized version of google_search -- reuses the exact
+    # same search-box coordinate (512,376) already ground-truthed live
+    # with DK earlier tonight, not re-verified here since it's the same
+    # page element already proven. An earlier proposal for this flow
+    # called ("click", {}) with no x/y at all, which would fail
+    # immediately -- fixed to match click_target's own proven pattern.
+    "google_search_dynamic": [
+        ("open_firefox", {}),
+        ("navigate_and_screenshot", {"url": "https://www.google.com"}),
+        ("click", {"x": 512, "y": 376}),
+        ("type_text", {"text": "{query}"}),
+        ("key_press", {"key": "enter"}),
+        ("screenshot", {}),
+    ],
+    "navigate_and_capture_dynamic": [
+        ("open_firefox", {}),
+        ("navigate_and_screenshot", {"url": "{url}"}),
+        ("screenshot", {}),
+    ],
+    "scroll_dynamic": [
+        ("open_firefox", {}),
+        ("navigate_and_screenshot", {"url": "{url}"}),
+        ("scroll", {"direction": "{scroll_direction}"}),
+        ("screenshot", {}),
+    ],
+    "multi_page_dynamic": [
+        ("open_firefox", {}),
+        ("navigate_and_screenshot", {"url": "{page1}"}),
+        ("navigate_and_screenshot", {"url": "{page2}"}),
+        ("navigate_and_screenshot", {"url": "{page3}"}),
+        ("screenshot", {}),
+    ],
+    "multi_search_dynamic": [
+        ("open_firefox", {}),
+        ("navigate_and_screenshot", {"url": "https://www.google.com"}),
+        ("click", {"x": 512, "y": 376}),
+        ("type_text", {"text": "{query1}"}),
+        ("key_press", {"key": "enter"}),
+        ("navigate_and_screenshot", {"url": "https://www.google.com"}),
+        ("click", {"x": 512, "y": 376}),
+        ("type_text", {"text": "{query2}"}),
+        ("key_press", {"key": "enter"}),
+        ("screenshot", {}),
+    ],
+    # Real, Wikipedia account-creation field coordinates confirmed live,
+    # directly, with DK on 2026-08-26 -- each field verified via a real
+    # "xxx"/"yyy"/"zzz"/test-email string landing in the correct field.
+    # {username}/{password}/{email} are real placeholders substituted at
+    # call time via run_browser_flow's own params -- never hardcoded.
+    # Deliberately, permanently excludes any submit step: the "Create
+    # account" button's position (176,680) was confirmed only visually,
+    # never actually clicked, since clicking it would genuinely create
+    # a real Wikipedia account. If DK ever wants that last step, it
+    # needs his explicit, separate go-ahead, not something this flow
+    # does on its own.
+    "wikipedia_signup_fields": [
+        ("open_firefox", {}),
+        ("navigate_and_screenshot", {"url": "https://en.wikipedia.org/w/index.php?title=Special:CreateAccount"}),
+        ("click", {"x": 176, "y": 335}),
+        ("type_text", {"text": "{username}"}),
+        ("click", {"x": 176, "y": 460}),
+        ("type_text", {"text": "{password}"}),
+        ("click", {"x": 176, "y": 527}),
+        ("type_text", {"text": "{password}"}),
+        ("click", {"x": 176, "y": 632}),
+        ("type_text", {"text": "{email}"}),
+        ("screenshot", {}),
+    ],
+    # Real, YouTube search field and search-button coordinates
+    # ground-truthed live, directly, with DK on 2026-08-26. Worth
+    # noting directly: the search field (y=141) sits close enough
+    # below the browser's own address bar (y=82, ground-truthed
+    # earlier) that an initial attempt typed into the address bar by
+    # mistake and triggered an unrelated Google redirect -- confirmed
+    # and fixed live before this coordinate was accepted.
+    "youtube_search": [
+        ("open_firefox", {}),
+        ("navigate_and_screenshot", {"url": "https://www.youtube.com"}),
+        ("click", {"x": 512, "y": 141}),
+        ("type_text", {"text": "{query}"}),
+        ("click", {"x": 920, "y": 141}),
+        ("screenshot", {}),
+    ],
+}
+
+
+@mcp.tool()
+async def read_screenshot(filename: str) -> dict:
+    """Real, step-one-of-two tool: reads a PNG from DK's own real
+    screenshot folder, mounted read-only into this container at
+    /app/screenshots_data (docker-compose.yml, added 2026-08-26 --
+    the container genuinely had no access to /home/dk/Pictures/Screenshots
+    at all before this mount was added; confirmed missing live, first,
+    before adding it, rather than assumed present) and returns it as
+    base64.
+
+    Real, honest limitation, deliberately not oversold: this alone
+    does NOT give any part of Jarvis "vision" -- it only moves bytes.
+    agent_worker.py is a plain Python script with no image
+    understanding of its own. A real second piece (a call from
+    agent_worker.py to a genuine vision-capable model, e.g. a real
+    Anthropic API call with this base64 data as image content) would be
+    needed before anything in Jarvis could actually "see" what's in the
+    returned bytes. This tool is that first, real, working piece --
+    not a complete solution on its own."""
+    path = os.path.join("/app/screenshots_data", filename)
+    if not os.path.exists(path):
+        return {"error": f"File not found: {path}"}
+    with open(path, "rb") as f:
+        data = f.read()
+    return {
+        "filename": filename,
+        "base64": base64.b64encode(data).decode("utf-8"),
+    }
+
+# Real, maps each real flow step name to its actual, real function --
+# used instead of any generic "call_mcp_tool" dispatcher, since every
+# real tool this could call already lives in this same module as a
+# real, direct Python function, not behind any external MCP-call layer.
+_FLOW_TOOL_FUNCS = {
+    "open_firefox": open_firefox,
+    "navigate_and_screenshot": navigate_and_screenshot,
+    "click": click,
+    "double_click": double_click,
+    "move_mouse": move_mouse,
+    "type_text": type_text,
+    "key_press": key_press,
+    "scroll": scroll,
+    "screenshot": screenshot,
+}
+
+
+@mcp.tool()
+async def run_browser_flow(session_id: str, flow_name: str, params: dict | None = None) -> dict:
+    """Real, sequential execution of a named, pre-defined flow (see
+    _FLOWS above) -- each step is a real, already-verified tool in this
+    same module, called directly as a real Python function, not through
+    any external dispatch layer. Stops and returns immediately on the
+    first step that raises a real exception, rather than continuing a
+    flow after something has genuinely gone wrong. Deliberately
+    atomic from the worker's own perspective: the worker's real
+    retry/backoff/cooldown logic (in agent_worker.py) applies to this
+    whole flow as one task, not to each individual step -- an honest
+    tradeoff, since a step 3 failure means steps 1-2 already ran again
+    on any retry, not something this tool tries to make idempotent.
+
+    Real, honest limitation: _FLOWS is currently a fixed, in-code dict,
+    not a database or config file -- adding a new flow means editing
+    this file directly and rebuilding, the same real deployment cost as
+    any other new tool tonight, not a data-only change despite flows
+    being represented as data internally.
+
+    params, if given, substitutes real {field_name}-style placeholders
+    (e.g. {"username": "..."}) into any string-valued step argument via
+    str.format -- added specifically so a flow like login_sequence can
+    keep real credentials out of the fixed, in-code _FLOWS dict itself,
+    passed instead at call time."""
+    if flow_name not in _FLOWS:
+        raise ValueError(f"Unknown flow: {flow_name!r}. Known flows: {sorted(_FLOWS.keys())}")
+
+    params = params or {}
+    steps = _FLOWS[flow_name]
+    results = []
+    for tool_name, extra_kwargs in steps:
+        func = _FLOW_TOOL_FUNCS[tool_name]
+        real_kwargs = {
+            k: (v.format(**params) if isinstance(v, str) else v)
+            for k, v in extra_kwargs.items()
+        }
+        try:
+            step_result = await func(session_id=session_id, **real_kwargs)
+        except Exception as e:
+            return {
+                "flow": flow_name,
+                "status": "failed",
+                "failed_step": tool_name,
+                "error": str(e),
+                "completed_steps": results,
+            }
+        results.append({"tool": tool_name, "result": step_result})
+
+    return {"flow": flow_name, "status": "success", "steps": results}
+
+
 @mcp.tool()
 async def close_session(session_id: str) -> str:
     """Real, explicit, immediate teardown of this session's desktop
