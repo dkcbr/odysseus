@@ -54,6 +54,23 @@ DESIRED_AGENTS: dict[str, dict] = {
     # separately on the todo list; deliberately not fixed here to keep
     # this change scoped to desktop_agent specifically.
     "desktop_agent": {"enabled": True, "description": "Controls the isolated desktop-sandbox container (screenshot, mouse, keyboard)"},
+    # Real, added 2026-09-16: closing the gap flagged in the comment
+    # above. Real, live verification done before this change, not just
+    # added on faith: confirmed each agent's backing MCP server(s) are
+    # registered and enabled in the real DB (jarvis_system, tradingview,
+    # wigolo, public_com, risk_surface, knowledge-graph-memory); found
+    # and fixed a real, separate bug along the way (market_agent's
+    # capability profile said "public.com" but the real server name is
+    # "public_com" -- an exact-match check was silently blocking those
+    # calls). system_agent and market_agent already have real, running
+    # systemd worker services (jarvis-worker-system.service,
+    # jarvis-worker-market.service) that were previously idling, unable
+    # to claim any task. memory_agent has no worker service yet --
+    # enabling it here alone does not make it functional; a worker still
+    # needs to be created and started for it to actually process tasks.
+    "system_agent": {"enabled": True, "description": "Read-only host system diagnostics (disk, CPU, memory, backup status, network health)"},
+    "market_agent": {"enabled": True, "description": "Read-only market data, portfolio, and risk-surface analysis (TradingView, public.com, risk_surface)"},
+    "memory_agent": {"enabled": True, "description": "Knowledge-graph memory read/write (entities, relations, observations)"},
 }
 
 # Real, restored 2026-08-09 -- matches the host-side path (data/agent_worker_logs)
