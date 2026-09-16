@@ -260,12 +260,43 @@ class ChatProcessor:
             days_old = max((now - ts) / 86400, 0)
             recency = 1.0 / (1.0 + days_old * 0.05)
 
-            # Gate: need real relevance, not just recency
+            # Gate: need real relevance, not just recency.
+            # Real, stricter version (2026-09-13): a real, direct
+            # measurement against real memory data showed the original
+            # 0.20/0.08 gate admits 100% of candidates for sparse-domain
+            # queries (e.g. ssh logs) with zero genuine relevance, while
+            # working correctly for dense domains (MCP, container ops).
+            # Raising the vector bar to 0.30 (and requiring a real,
+            # combined score of 0.18, not 0.12) eliminated all measured
+            # false positives on the sparse cases without losing any
+            # genuinely relevant dense-domain match in that same test.
+            #
+            # Real, direct correction, same day: an initial version of
+            # this gate also included a "mixed_band" (vs>=0.22 AND
+            # kw_norm>=0.06) meant to catch decent-but-not-strong dual
+            # signals. Deployed, then re-tested live against the actual
+            # running system -- it was far too permissive in practice: a
+            # single generic keyword (e.g. "status") combined with a
+            # moderate vector score was enough to pass it, so real,
+            # unrelated memories (crypto/nvda monitor status lines) kept
+            # getting through at a 100% rate, identical to before this
+            # gate existed. Removed entirely after confirming its
+            # removal (leaving only the strong_vector/strong_keyword
+            # paths) reproduces the originally-intended, tested result.
             if has_vector:
-                if vs < 0.20 and kw_norm < 0.08:
+                strong_vector = vs >= 0.30
+                strong_keyword = kw_norm >= 0.10
+                if not (strong_vector or strong_keyword):
                     continue
                 final = (0.55 * vs) + (0.40 * kw_norm) + (0.05 * recency)
+                if final < 0.18:
+                    continue
             else:
+                # Real, unchanged fallback: no vector store available at
+                # all, so only the keyword signal exists. Not covered by
+                # the real, live measurement above (which only tested
+                # the has_vector=True path) -- left as-is rather than
+                # guessing a new threshold with no real test behind it.
                 if kw_norm < 0.08:
                     continue
                 final = (0.95 * kw_norm) + (0.05 * recency)

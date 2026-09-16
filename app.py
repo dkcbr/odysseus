@@ -1,3 +1,4 @@
+from routes.mcp_http_server import session_manager as odysseus_mcp_session_manager
 # app.py — slim orchestrator
 import mimetypes
 import os
@@ -651,6 +652,8 @@ upload_cleanup_task = None
 # emojis as flat SVG instead of system color glyphs.
 from routes.emoji_routes import setup_emoji_routes
 app.include_router(setup_emoji_routes())
+from routes.system_monitor_routes import setup_system_monitor_routes
+app.include_router(setup_system_monitor_routes())
 
 # Sessions
 from routes.session_routes import setup_session_routes
@@ -1019,11 +1022,13 @@ async def _lifespan(app):
     """Modern lifespan context manager replacing deprecated @app.on_event."""
     # ── STARTUP ──
     await _startup_event()
-    yield
+    async with odysseus_mcp_session_manager.run():
+        yield
     # ── SHUTDOWN ──
     await _shutdown_event()
 
 app.router.lifespan_context = _lifespan
+app.mount("/mcp", odysseus_mcp_session_manager.handle_request)
 
 
 async def _startup_event():

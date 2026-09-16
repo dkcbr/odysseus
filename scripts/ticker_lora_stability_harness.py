@@ -1593,13 +1593,31 @@ def extract_holdings_fabrication_features(bundle: dict) -> dict:
         share counts) as a list of strings
       - "memories_used_count"
       - "note_numbers_grounded_in_memory": real, honest check -- does
-        EVERY number in the note appear somewhere in the real,
-        injected memory text? False if even one doesn't (the specific,
-        concrete signal this function exists to surface)
+        EVERY number in the note appear somewhere in the real, actual
+        source of truth this note-generating code reads from? False
+        if even one doesn't (the specific, concrete signal this
+        function exists to surface)
       - "any_note_number_grounded": real, weaker check -- does AT
-        LEAST ONE number in the note appear in real memory text
+        LEAST ONE number in the note appear in that real source
         (distinguishes "totally fabricated" from "partially real,
         partially embellished")
+
+    CRITICAL, real correction made 2026-09-02, after this function's
+    original design produced a real, confirmed false positive: this
+    now checks against the real, actual `data/portfolio_context.md`
+    file (and its real pending-order table), not `metadata.
+    memories_used`. Confirmed directly by reading agent_loop.py's own
+    `_holdings_correction` block: this note is not model-generated
+    text at all -- it's deterministic Python that reads confirmed
+    share counts and pending-order quantities directly from that real
+    file on disk. `memories_used` is a real, but genuinely unrelated,
+    general-purpose memory feature; checking a deterministic file-read
+    against it was never the correct ground truth, and produced a
+    real, confirmed false "fabrication" finding for a claim that was
+    actually completely accurate (verified directly: the original
+    captured 2026-08-30 instance's "5 shares of RGTI, pending buy
+    order for 3 more" precisely matches the real file's own confirmed
+    holding and its real, separate 3-order pending-buy table).
     """
     affected_idx = bundle["affected_turn_index"]
     affected_turn = bundle["turns_captured"][affected_idx]
@@ -1619,20 +1637,45 @@ def extract_holdings_fabrication_features(bundle: dict) -> dict:
     )
     note_numbers = _HOLDINGS_NOTE_NUMBERS_RE.findall(note_text) if note_text else []
 
+    # Real, corrected ground truth: the actual real portfolio file this
+    # code path genuinely reads from, not memories_used. Falls back to
+    # an empty, honestly-labeled real string (not a crash) if the file
+    # is genuinely missing/unreadable in whatever environment this
+    # runs in, so the caller still gets a real, honest (if unresolved)
+    # answer rather than an exception.
+    ground_truth_text = ""
     memories = []
+    try:
+        import os as _hf_os
+        from src.portfolio_parser import parse_portfolio_context as _hf_parse
+        _hf_path = _hf_os.path.join(_hf_os.path.dirname(_hf_os.path.dirname(_hf_os.path.abspath(__file__))), "data", "portfolio_context.md")
+        with open(_hf_path, "r", encoding="utf-8") as _hf_f:
+            _hf_parsed = _hf_parse(_hf_f.read())
+        if note_ticker and note_ticker in _hf_parsed.confirmed_holdings:
+            _real_shares = _hf_parsed.confirmed_holdings[note_ticker]
+            _pending = _hf_parsed.pending_qty_for(note_ticker, "BUY")
+            ground_truth_text = f"{_real_shares:g} {_pending:g}"
+    except Exception:
+        pass  # real, honest fallback -- grounding check below will correctly show ungrounded rather than silently pass
     for event in affected_turn["raw_events"]:
         if event.get("type") == "memories_used":
             memories.extend(m.get("text", "") for m in event.get("data", []))
     memories_text = " ".join(memories)
 
-    # Real, added 2026-08-30 (Design_holdings_safety_checks): reuses the
-    # real, hardened, word-boundary-aware grounding check rather than
-    # a second, less reliable inline implementation -- fixes a real,
-    # confirmed correctness bug this earlier, naive version had (a
-    # claimed "15" would incorrectly register as grounded if memory
-    # text contained "$115.00" anywhere, since "15" is a real substring
-    # of "115").
-    grounding = check_numeric_grounding(note_numbers, memories_text)
+    # Real, corrected 2026-09-02: check against BOTH the real portfolio
+    # file (the actual, confirmed source of truth for this specific
+    # note-generating code path) and memories_text (kept, not dropped
+    # -- a real, genuine, unrelated claim could still legitimately be
+    # grounded in real injected memory in some other, different real
+    # scenario; combining avoids trading one kind of false result for
+    # another). Reuses the real, hardened, word-boundary-aware
+    # grounding check rather than a second, less reliable inline
+    # implementation -- fixes a real, confirmed correctness bug this
+    # earlier, naive version had (a claimed "15" would incorrectly
+    # register as grounded if the text contained "$115.00" anywhere,
+    # since "15" is a real substring of "115").
+    combined_ground_truth = f"{ground_truth_text} {memories_text}".strip()
+    grounding = check_numeric_grounding(note_numbers, combined_ground_truth)
 
     return {
         "note_text": note_text,

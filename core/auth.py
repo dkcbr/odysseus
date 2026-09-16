@@ -157,11 +157,24 @@ class AuthManager:
             self._sessions = {}
 
     def _save_sessions(self):
-        """Persist session tokens to disk (atomic, lock-guarded)."""
+        """Persist session tokens to disk (atomic, lock-guarded).
+
+        FIXED 2026-09-02: the write itself used to happen *outside* the
+        lock -- only the in-memory snapshot copy was guarded, contrary to
+        this method's own docstring and the lock's own comment ("guards
+        mutations of self._sessions and the on-disk sessions.json"). Two
+        threads could both take a valid snapshot, then both call
+        _atomic_write_json concurrently; combined with the tmp-path bug
+        fixed the same day in core/atomic_io.py, this produced real,
+        observed session-file corruption and save failures. Moving the
+        write inside the lock fully serializes saves end-to-end, so this
+        is now true belt-and-suspenders on top of the atomic_io.py fix,
+        not just in-memory consistency.
+        """
         try:
             with self._sessions_lock:
                 snapshot = dict(self._sessions)
-            _atomic_write_json(self._sessions_path, snapshot)
+                _atomic_write_json(self._sessions_path, snapshot)
         except Exception as e:
             logger.error(f"Failed to save sessions: {e}")
 

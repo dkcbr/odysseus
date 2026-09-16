@@ -1,17 +1,21 @@
 """Tests for ``core.atomic_io`` durability and crash-safety behavior.
 
 ``core.atomic_io`` provides ``atomic_write_json`` and ``atomic_write_text``.
-Both write to a sibling ``.tmp.<pid>`` file, ``fsync`` it, then ``os.replace``
-into place so a crash mid-write leaves the previous good copy untouched rather
-than a truncated/empty file.
+Both write to a sibling ``.tmp.<pid>.<uuid4>`` file, ``fsync`` it, then
+``os.replace`` into place so a crash mid-write leaves the previous good copy
+untouched rather than a truncated/empty file. The uuid4 suffix (added
+2026-09-02) makes the tmp path unique per *call*, not just per process --
+see the concurrency section below for the real bug this closes.
 
 These tests cover the happy path (round-trip, indent, parent-dir creation,
-full overwrite, no leftover tmp) and the two failure paths the implementation
-guarantees: the target file is preserved when serialization fails before the
-replace, and when ``os.replace`` itself fails.
+full overwrite, no leftover tmp), the two failure paths the implementation
+guarantees (target file preserved when serialization fails before the
+replace, and when ``os.replace`` itself fails), and a concurrency
+regression test for a real, observed production bug.
 """
 import importlib.util
 import json
+import threading
 from pathlib import Path
 
 import pytest
@@ -165,3 +169,59 @@ def test_atomic_write_text_preserves_target_when_replace_fails(tmp_path, monkeyp
         atomic_write_text(str(target), "new content that never lands")
 
     assert target.read_text(encoding="utf-8") == before
+
+
+# ---------------------------------------------------------------------------
+# Concurrency regression: real production bug, 2026-09-02.
+#
+# core/auth.py's _save_sessions() calls atomic_write_json concurrently from
+# FastAPI's threadpool. When the tmp path was `{path}.tmp.{pid}` -- unique
+# per process, not per call -- two threads sharing a pid raced on the same
+# tmp file: one thread's os.replace() failed with ENOENT after the other's
+# had already consumed the shared tmp file, and interleaved writes into the
+# same tmp file produced a target that parsed as one complete JSON object
+# followed by leftover trailing bytes (a real "Extra data" JSONDecodeError
+# on next load). Both symptoms were observed live in production the same
+# night this test was added.
+# ---------------------------------------------------------------------------
+def test_atomic_write_json_survives_concurrent_writers_same_process(tmp_path):
+    """Many threads (same process, same pid -- the exact condition that
+    broke the old per-pid tmp naming) hammer the same target path
+    concurrently. Every writer's payload is large enough that an
+    interleaved/truncated write would be obviously invalid JSON. After all
+    threads finish: the target must contain exactly one writer's complete,
+    valid payload (never a mix, never truncated, never trailing garbage),
+    and no tmp siblings may be left behind."""
+    target = tmp_path / "concurrent.json"
+    n_threads = 16
+    errors = []
+
+    def writer(i):
+        try:
+            # Large, distinct, easy-to-validate payload per thread -- big
+            # enough that a corrupt interleave would not coincidentally
+            # parse as valid JSON.
+            payload = {"writer": i, "padding": str(i) * 5000}
+            atomic_write_json(str(target), payload)
+        except Exception as e:  # pragma: no cover - surfaced via errors list
+            errors.append(e)
+
+    threads = [threading.Thread(target=writer, args=(i,)) for i in range(n_threads)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert not errors, f"writer thread(s) raised: {errors}"
+
+    # The critical assertion: whatever ended up on disk must be exactly one
+    # complete, valid JSON object -- not a mix of two writers, not
+    # truncated, no trailing bytes (json.loads is strict about trailing
+    # content, so this alone would catch the original "Extra data" bug).
+    text = target.read_text(encoding="utf-8")
+    data = json.loads(text)
+    assert set(data.keys()) == {"writer", "padding"}
+    assert data["padding"] == str(data["writer"]) * 5000
+
+    # No leftover tmp files from any of the 16 concurrent calls.
+    assert _tmp_siblings(tmp_path, "concurrent.json") == []

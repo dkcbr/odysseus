@@ -486,7 +486,8 @@ _DOMAIN_RULES = {
 ## Settings/API rules
 - Use `manage_settings` for preferences and tool enable/disable.
 - Use named tools over `app_api` when a named wrapper exists.
-- `app_api` is only for safe UI/API actions without a named tool; do not use it for shell, package installs, engine rebuilds, or sensitive auth/admin paths.""",
+- `app_api` is only for safe UI/API actions without a named tool; do not use it for shell, package installs, engine rebuilds, or sensitive auth/admin paths.
+- Real, added 2026-09-13: for the current state of MCP servers ("list mcp servers", "show mcp servers", "check mcp servers", or any phrasing asking for the live MCP server list), you MUST call `manage_mcp` with `action=list`. DO NOT answer from memory or summarize past MCP configurations -- confirmed via a real, live chat example that the model otherwise answers from a dense but stale memory entry instead of checking live state, even though this tool is available. This is distinct from the separate, existing nudge elsewhere in this prompt about preferring an already-retrieved external `mcp__*` tool for factual lookups -- this rule is specifically about checking the MCP server registry itself.""",
     "contacts": """\
 ## Contacts rules
 - Use `resolve_contact` to look up a contact's email or phone number by name. Searches the CardDAV address book and sent email history.
@@ -496,6 +497,16 @@ _DOMAIN_RULES = {
 ## Integration/API rules
 - To query or control a configured service integration (Home Assistant, Miniflux, Gitea, Linkding, Jellyfin, or any other registered service), use `api_call` with the integration name, HTTP method, path, and optional JSON body.
 - Do not use shell, curl, or `app_api` to reach a user's connected integration when `api_call` is available.""",
+    "system_diagnostics": """\
+## System/service diagnostics rules
+- For real host-service questions (is X hung/failing/crashed, check its logs, restart it, check its status), use `service_status` first to check real state, `read_systemd_logs` to see why, `check_service_dependencies` if the cause looks like an upstream/cascading failure, then `restart_service` only if a real problem is confirmed.
+- `restart_service` only ever accepts 4 real, allowlisted voice-pipeline services (Whisper/Piper) -- `service_status`/`read_systemd_logs`/`check_service_dependencies` accept any real, existing systemd unit on the host.
+- Do not use shell/bash to run `systemctl`/`journalctl` directly when these tools are available.""",
+    "container_management": """\
+## Container management rules
+- `container_status` accepts any real, existing container name (read-only) -- use it to check health before deciding whether `restart_container` is needed.
+- `restart_container` only ever accepts exactly 2 real, allowlisted, low-stakes containers: `odysseus-searxng-1`, `odysseus-ntfy-1`. This is a real, structural restriction -- it will refuse any other container, including Odysseus's own runtime container, no matter how the request is phrased. Do not suggest workarounds if it refuses.
+- Do not use shell/bash/docker CLI to check status or restart containers when these tools are available.""",
 }
 
 _DOMAIN_TOOL_MAP = {
@@ -510,6 +521,8 @@ _DOMAIN_TOOL_MAP = {
     "settings": {"manage_settings", "manage_endpoints", "manage_mcp", "manage_webhooks", "manage_tokens", "app_api"},
     "contacts": {"resolve_contact", "manage_contact"},
     "integrations": {"api_call"},
+    "system_diagnostics": {"restart_service", "read_systemd_logs", "service_status", "check_service_dependencies"},
+    "container_management": {"restart_container", "container_status"},
 }
 
 _WORKSPACE_TERMINUS_TOOLS = (
@@ -1381,6 +1394,31 @@ def _classify_agent_request(messages: List[Dict], last_user: str) -> Dict[str, o
     if has(r"\bapi[ _]call\b", r"\bintegrations?\b",
            r"\b(?:home ?assistant|miniflux|gitea|linkding|jellyfin)\b"):
         domains.add("integrations")
+    # Real, added 2026-09-05: same real class of bug as the #3794 fix
+    # above (api_call) -- confirmed directly, via the real
+    # [agent-intent] log, that queries like "check the recent logs for
+    # the ssh service" matched no existing domain, were classified
+    # low-signal, and never reached RAG-based tool retrieval at all,
+    # meaning restart_service/read_systemd_logs/service_status were
+    # only ever actually offered by accident (e.g. a service name like
+    # "jarvis-piper-server.service" happening to contain "server",
+    # matching the unrelated "cookbook" domain instead). Detect this
+    # real intent explicitly, independent of exact phrasing.
+    if has(r"\b(systemd|restart service|service (?:status|health|log|logs|"
+           r"dependenc\w*)|(?:log|logs) for.*service|"
+           r"is .*service (?:up|down|running|healthy)|"
+           r"hung service|crashed service|failing service|journalctl|"
+           r"service dependenc\w*|dependenc\w* (?:for|of) .*service|"
+           r"cascading failure|upstream (?:dependency|service|unit))\b"):
+        domains.add("system_diagnostics")
+    # Real, added 2026-09-05: same real bug class as system_diagnostics
+    # above -- without an explicit domain, container-related requests
+    # would only surface restart_container by accident, or fall to
+    # low_signal.
+    if has(r"\b(container|docker)\b.{0,20}\b(restart|status|logs?)\b",
+           r"\brestart\b.{0,20}\bcontainer\b",
+           r"\b(searxng|ntfy)\b"):
+        domains.add("container_management")
 
     low_signal = not continuation and not domains
     return {
@@ -2581,7 +2619,24 @@ def _build_system_prompt(
         except Exception as _mcp_err:
             logger.debug(f"MCP description injection skipped: {_mcp_err}")
 
-    agent_msg = {"role": "system", "content": agent_prompt}
+    # Real, added 2026-09-13: applied fresh per-request (never merged into
+    # the cached base prompt above), so a rename takes effect on the very
+    # next message without needing a restart, and never leaks a stale name
+    # into another user's cached prompt in a multi-user setup.
+    _final_agent_prompt = agent_prompt
+    try:
+        _ai_name = (get_setting("ai_name", "") or "").strip()
+        if _ai_name:
+            _final_agent_prompt = (
+                f'Your name is "{_ai_name}". The user has chosen this name for '
+                f'you specifically; refer to yourself by it when asked your '
+                f'name or when introducing yourself, rather than any other '
+                f'name.\n\n' + agent_prompt
+            )
+    except Exception as _name_err:
+        logger.debug(f"ai_name injection skipped: {_name_err}")
+
+    agent_msg = {"role": "system", "content": _final_agent_prompt}
     insert_idx = 0
     for i, msg in enumerate(messages):
         if msg.get("role") == "system":
@@ -3221,6 +3276,35 @@ async def stream_agent_loop(
     # no longer matches this model following an earlier, separate rename
     # fix for a different bug).
     _ody_ticker_model = "ticker" in (model or "").lower()
+    # Real, added 2026-09-02: the ticker LoRA's own duplication fix
+    # (see _ody_ticker_model's own comment above, and _dedup_buf below)
+    # is gated on this narrow, name-based check. A second, real,
+    # locally fine-tuned Odysseus adapter (jarvis-agent-behavior-lora-v1)
+    # was deployed with the same underlying streaming characteristics
+    # -- confirmed directly by reproducing the exact same verbatim-
+    # repeat bug for it, then tracing round_texts (clean, single copy)
+    # against the corrupted final content (duplicated), the same way
+    # this was originally confirmed for the ticker model -- but doesn't
+    # match "ticker" in its own name, so it fell through to the
+    # unfixed path and exhibited the identical, already-solved bug
+    # under a different name.
+    #
+    # Real, deliberate, additive design: a new, broader flag, not a
+    # change to _ody_ticker_model's own existing value or meaning --
+    # every current model's behavior is provably unchanged, since this
+    # new flag is true in every case the old one was, plus this one
+    # new case. Uses "-lora" as the broader signal (any locally
+    # fine-tuned, Unsloth-exported adapter deployed this way carries
+    # that suffix by convention) -- checked directly against every
+    # real, currently-registered Ollama model first: only the ticker
+    # model and this new one match; no generic base model does.
+    # Real, honest, known limitation: this is still a name-based
+    # heuristic, not a true capability check -- a future adapter
+    # deployed without "-lora" in its name would need either a
+    # naming-convention fix or a real capability flag (e.g., sourced
+    # from the Modelfile or a model-metadata table), which doesn't
+    # exist yet. Documented here rather than silently assumed solved.
+    _ody_dedup_fix_model = _ody_ticker_model or "-lora" in (model or "").lower()
     if _ody_qwen_finetune_model:
         try:
             temperature = min(float(temperature if temperature is not None else 0.2), 0.2)
@@ -4227,7 +4311,7 @@ async def stream_agent_loop(
                                 # response.
                                 _safe_text = _reasoning_gate.feed(_delta_text)
                                 _gate_buffered = not _safe_text
-                            if _ody_ticker_model:
+                            if _ody_dedup_fix_model:
                                 # Real, added 2026-08-28: hold this model's
                                 # content back entirely rather than add to
                                 # round_response/full_response or yield it
@@ -4246,7 +4330,7 @@ async def stream_agent_loop(
                         # suppressed here entirely -- see the comment on
                         # _dedup_buf above -- and flushed once, deduplicated,
                         # at the round's natural end instead.
-                        if not _ody_ticker_model and (not _ody_qwen_finetune_model or data.get("thinking")) and not _gate_buffered:
+                        if not _ody_dedup_fix_model and (not _ody_qwen_finetune_model or data.get("thinking")) and not _gate_buffered:
                             yield f"data: {json.dumps(data)}\n\n"
                         # Detect text-fence doc streaming. Normal agent prompts
                         # use ```create_document; the doc LoRA streaming path
@@ -4323,7 +4407,7 @@ async def stream_agent_loop(
         # was never certain about, e.g. a long final paragraph with no
         # blank-line boundary -- see ReasoningGate.flush() docstring).
         _gate_tail = _reasoning_gate.flush()
-        if _gate_tail and _ody_ticker_model:
+        if _gate_tail and _ody_dedup_fix_model:
             # Real, added 2026-08-28: this model's content still goes
             # through the same reasoning gate above -- whatever it was
             # still holding also needs to join the dedup buffer, not be
@@ -4340,7 +4424,7 @@ async def stream_agent_loop(
         # (rather than live streaming) is the only way to guarantee a
         # duplicate never reaches the user. Designed and unit-tested before
         # integration against the real, actual observed failure shape.
-        if _ody_ticker_model and _dedup_buf:
+        if _ody_dedup_fix_model and _dedup_buf:
             _deduped = _dedupe_full_text(_dedup_buf)
             round_response += _deduped
             full_response += _deduped
@@ -5424,6 +5508,26 @@ async def stream_agent_loop(
     _holdings_correction = None
     try:
         import re as _hc_re
+        # Real, critical fix, added 2026-09-02: confirmed directly, via
+        # live debug capture, that the model itself sometimes learns to
+        # generate its own version of this exact "(Note: the stored
+        # reference document lists...)" sentence -- unsurprising, since
+        # this same code has been generating this pattern in real,
+        # historical conversations that then became real training data.
+        # The model has no real way to read the actual, current
+        # portfolio file itself, so its own version is unreliable --
+        # confirmed live: one real capture showed the model claiming
+        # "8 shares of RGTI, pending 1 more" (actually IONQ's real
+        # numbers, not RGTI's), immediately followed by this code's own,
+        # correct, deterministic note ("5 shares... 3 more") -- both
+        # left visible together, contradicting each other in the same
+        # real response. Strip any such model-generated instance before
+        # this function's own real, deterministic check runs, so at
+        # most one note -- the real, correct one -- ever survives.
+        _hc_model_note_re = _hc_re.compile(
+            r"\n*\(Note: the stored reference document lists[^)]*\)",
+        )
+        full_response = _hc_model_note_re.sub("", full_response or "")
         _candidates = _hc_re.findall(r"\b[A-Z]{2,5}\b", full_response or "")
         if _candidates:
             from src.portfolio_parser import parse_portfolio_context, get_freshness_recommendation
@@ -5506,7 +5610,7 @@ async def stream_agent_loop(
         # not in the dedup fix itself. For this model, yield only the new
         # holdings-correction text (the genuinely new content), never the
         # whole response again.
-        if _ody_ticker_model and tool_events:
+        if _ody_dedup_fix_model and tool_events:
             _final_delta = _holdings_correction or ""
         else:
             _final_delta = _holdings_correction if (_holdings_correction and not tool_events) else full_response.strip()

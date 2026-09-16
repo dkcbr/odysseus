@@ -601,6 +601,89 @@ def _load_vault_index():
     return records
 
 
+def _vault_index_candidates(index_records, matched_category, include_root):
+    """Build the (path, content) list for a given category scope.
+
+    Shared by the fast, default-scoped search and the root-inclusive
+    fallback below it, so the two paths can't drift out of sync.
+
+    Real, live-caught bug fixed 2026-09-05, caught by testing rather
+    than trusted from a code read: the original condition ANDed
+    "category == matched_category" with "include_root or category !=
+    root", which meant a root file (category == "root") could never
+    pass the matched_category check once matched_category was set to
+    something else (e.g. "jarvis") -- confirmed directly, a call with
+    matched_category="jarvis", include_root=True returned only the 18
+    real "Jarvis"-category files, not 18 + the 187 real root files it
+    was supposed to also include. Rewritten as an explicit OR: when a
+    category matched, allow that category's files plus root (if
+    include_root); when no category matched, the original all-but-root
+    (or everything, if include_root) behavior is unchanged.
+    """
+    def _allowed(cat: str) -> bool:
+        cat = cat.lower()
+        if matched_category is not None:
+            return cat == matched_category or (include_root and cat == "root")
+        return include_root or cat != "root"
+
+    candidates = [r for r in index_records if _allowed(r["category"])]
+    all_files = []
+    seen_paths = set()
+    for r in candidates:
+        fpath = r.get("body_path")
+        if not fpath or fpath in seen_paths or not os.path.isfile(fpath):
+            continue
+        seen_paths.add(fpath)
+        try:
+            with open(fpath, "r", encoding="utf-8") as f:
+                all_files.append((fpath, f.read()))
+        except Exception:
+            continue
+    return all_files
+
+
+def _search_vault_files(all_files, search_terms, vault_root):
+    """Search an already-collected (path, content) list for the first
+    search term with any real match. Returns the formatted result
+    string, or None if nothing matched -- lets the caller decide
+    whether to retry with a wider file set rather than giving up.
+    """
+    for term in search_terms:
+        term_lower = term.lower()
+        matches = []
+        for fpath, text in all_files:
+            if term_lower in text.lower():
+                idx = text.lower().find(term_lower)
+                # Real, widened from the original 200 chars (which cut
+                # snippets off mid-word/mid-sentence, confirmed directly
+                # by a real, live "onlookers picture themse..." example)
+                # to 400, and snapped to real word boundaries rather than
+                # an arbitrary character count, so snippets read cleanly.
+                raw_start = max(0, idx - 400)
+                raw_end = min(len(text), idx + len(term) + 400)
+
+                start = raw_start
+                if raw_start > 0:
+                    space_idx = text.find(" ", raw_start)
+                    if 0 <= space_idx < raw_start + 40:
+                        start = space_idx + 1
+
+                end = raw_end
+                if raw_end < len(text):
+                    space_idx = text.rfind(" ", max(raw_start, raw_end - 40), raw_end)
+                    if space_idx != -1:
+                        end = space_idx
+
+                snippet = text[start:end].strip()
+                prefix = "..." if start > 0 else ""
+                suffix = "..." if end < len(text) else ""
+                rel_path = os.path.relpath(fpath, vault_root)
+                matches.append(f"### {rel_path}\n{prefix}{snippet}{suffix}")
+        if matches:
+            return f"Found {len(matches)} matching file(s) for query '{term}':\n\n" + "\n\n".join(matches[:5])
+    return None
+
+
 def search_vault_impl(query: str) -> str:
     """Real, in-process vault search. No search tool existed for this
     deployment before 2026-08-19 (confirmed directly, GitHub issue #14,
@@ -622,10 +705,27 @@ def search_vault_impl(query: str) -> str:
     deliberately unchanged -- this is a backend swap, not a new tool, so
     existing trigger wiring, schema, and UI expectations keep working
     without modification.
+
+    Real, live-caught bug found and fixed 2026-09-05: the original root
+    exclusion below was correct for the vault as it looked when written
+    (~40 unrelated root files) -- but the vault has since grown to where
+    root is 187 of 235 real indexed entries (~80%), including
+    jarvis-todo.md itself and every daily note. Since a plain, unscoped
+    query never contains the literal word "root", root-level content had
+    become silently unreachable by any normal query -- confirmed directly
+    by searching "jarvis" and getting zero matches despite the word
+    appearing 190 times in the index. Fixed with a root-inclusive
+    fallback: the original, fast, root-excluded search still runs first
+    and unchanged (no regression, no added cost, for every query that
+    already works); only if that finds nothing, and the query didn't
+    explicitly scope to some other real category (respecting that
+    explicit intent rather than silently widening past it), a second
+    pass retries with root-level files included.
     """
     vault_root = "/app/vault_data"
     index_records = _load_vault_index()
     effective_query = query  # real, safe default; only overridden below when a category is actually detected
+    matched_category = None
 
     if index_records:
         # Real, structured path: use the index to find candidate files,
@@ -652,29 +752,7 @@ def search_vault_impl(query: str) -> str:
                 pattern = re.compile(re.escape(framing_word), re.IGNORECASE)
                 effective_query = pattern.sub(" ", effective_query)
             effective_query = " ".join(effective_query.split()) or query
-        # Real, preserves the original function's own deliberate choice to
-        # never scan the vault root (confirmed directly: 40+ unrelated
-        # files there would slow every search on an already I/O-slow
-        # mount). Root-level records are only included if the query
-        # explicitly names "root" as a category -- never by default.
-        candidates = [
-            r for r in index_records
-            if r["category"].lower() != "root"
-            and (matched_category is None or r["category"].lower() == matched_category)
-        ]
-        search_dirs = None  # not used on this path
-        all_files = []
-        seen_paths = set()
-        for r in candidates:
-            fpath = r.get("body_path")
-            if not fpath or fpath in seen_paths or not os.path.isfile(fpath):
-                continue
-            seen_paths.add(fpath)
-            try:
-                with open(fpath, "r", encoding="utf-8") as f:
-                    all_files.append((fpath, f.read()))
-            except Exception:
-                continue
+        all_files = _vault_index_candidates(index_records, matched_category, include_root=False)
     else:
         # Real, pre-2026-08-23 fallback: the original three-folder scan,
         # kept so this tool degrades gracefully rather than breaking if
@@ -712,39 +790,30 @@ def search_vault_impl(query: str) -> str:
     quoted = re.findall(r"['\u2018\u2019\"]([^'\u2018\u2019\"]{3,})['\u2018\u2019\"]", query)
     search_terms = quoted + [effective_query] if quoted else [effective_query]
 
-    for term in search_terms:
-        term_lower = term.lower()
-        matches = []
-        for fpath, text in all_files:
-            if term_lower in text.lower():
-                idx = text.lower().find(term_lower)
-                # Real, widened from the original 200 chars (which cut
-                # snippets off mid-word/mid-sentence, confirmed directly
-                # by a real, live "onlookers picture themse..." example)
-                # to 400, and snapped to real word boundaries rather than
-                # an arbitrary character count, so snippets read cleanly.
-                raw_start = max(0, idx - 400)
-                raw_end = min(len(text), idx + len(term) + 400)
+    result = _search_vault_files(all_files, search_terms, vault_root)
+    if result:
+        return result
 
-                start = raw_start
-                if raw_start > 0:
-                    space_idx = text.find(" ", raw_start)
-                    if 0 <= space_idx < raw_start + 40:
-                        start = space_idx + 1
-
-                end = raw_end
-                if raw_end < len(text):
-                    space_idx = text.rfind(" ", max(raw_start, raw_end - 40), raw_end)
-                    if space_idx != -1:
-                        end = space_idx
-
-                snippet = text[start:end].strip()
-                prefix = "..." if start > 0 else ""
-                suffix = "..." if end < len(text) else ""
-                rel_path = os.path.relpath(fpath, vault_root)
-                matches.append(f"### {rel_path}\n{prefix}{snippet}{suffix}")
-        if matches:
-            return f"Found {len(matches)} matching file(s) for query '{term}':\n\n" + "\n\n".join(matches[:5])
+    # Real fallback, 2026-09-05: only reachable when there was a real
+    # index to widen (the pre-2026-08-23 three-folder scan has no
+    # "root" concept at all). Widens by adding root-level files
+    # *alongside* whatever category (if any) already matched, rather
+    # than dropping the category scope entirely -- a genuinely
+    # category-scoped request ("search my Portfolio notes for X")
+    # still gets Portfolio-first behavior, just with root available
+    # too if Portfolio alone came up empty. Deliberately does NOT
+    # require matched_category to be None: a real, live collision
+    # found during testing -- the vault has an actual category named
+    # "Jarvis" (18 entries), so searching "jarvis" matches it as a
+    # category, not as a null/unscoped query. Restricting the fallback
+    # to matched_category is None would have silently never widened
+    # for exactly this case, missing jarvis-todo.md (a "root" file)
+    # entirely.
+    if index_records:
+        root_included_files = _vault_index_candidates(index_records, matched_category, include_root=True)
+        result = _search_vault_files(root_included_files, search_terms, vault_root)
+        if result:
+            return result
 
     return f"No matches found in the vault for '{query}'."
 

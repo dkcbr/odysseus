@@ -140,6 +140,13 @@ services:
       # Real, added 2026-08-17: tells ydotool client where the real,
       # mounted socket is (see the volume mount above).
       - YDOTOOL_SOCKET=/tmp/.ydotool_socket
+      # Real, added 2026-09-09: passthrough for the zeus tool's real
+      # credentials -- the compose file uses explicit environment: entries,
+      # not automatic .env passthrough, confirmed directly after these
+      # vars were added to .env but never reached the container until
+      # this explicit entry was added too.
+      - ZEUS_AGENT_TOKEN=${ZEUS_AGENT_TOKEN:-}
+      - ZEUS_AGENT_URL=${ZEUS_AGENT_URL:-}
       - LLM_HOST=${LLM_HOST:-localhost}
       - LLM_HOSTS=${LLM_HOSTS:-}
       - OPENAI_API_KEY=${OPENAI_API_KEY:-}
@@ -174,6 +181,16 @@ services:
       # not optional, so an unset var surfaces as an empty/obviously-wrong
       # token rather than silently reusing a stale, exposed default.
       - ODYSSEUS_INTERNAL_TOKEN=${ODYSSEUS_INTERNAL_TOKEN}
+      # Real, added 2026-09-04: token for the real, separate, host-level
+      # systemctl_agent.py (a narrow, allowlisted restart capability for
+      # 4 real, user-level Whisper/Piper services -- see
+      # RestartServiceTool for the real caller). Deliberately a
+      # different, dedicated token from ODYSSEUS_INTERNAL_TOKEN above,
+      # not reused, so this separate agent's security isn't coupled to
+      # an unrelated token's own rotation lifecycle. Same real,
+      # required-prerequisite pattern as that token: no default here,
+      # real value lives only in .env (git-ignored).
+      - SYSTEMCTL_AGENT_TOKEN=${SYSTEMCTL_AGENT_TOKEN}
       # Real, added 2026-08-31: which Odysseus user's data the new MCP
       # HTTP server (routes/mcp_http_server.py) operates on for
       # owner-scoped tools (manage_email, manage_notes, etc.) -- needed

@@ -743,41 +743,56 @@ class McpManager:
         try:
             result = await self._do_call(session, tool_name, arguments, agent_name=agent_name)
         except Exception as e:
-            # Auto-reconnect for builtin servers whose subprocess may have died
-            if self.is_builtin(server_id):
-                logger.warning(f"MCP call failed for {qualified_name}, attempting reconnect: {e}")
-                reconnected = await self._reconnect_builtin(server_id)
-                if reconnected:
-                    session = self._sessions.get(server_id)
-                    if session:
-                        try:
-                            result = await self._do_call(session, tool_name, arguments, agent_name=agent_name)
-                        except Exception as e2:
-                            # Real, same fix as below -- always include the
-                            # exception type name, since some exception
-                            # types have a genuinely empty str() by design.
-                            error_detail = str(e2) or "(no message)"
-                            logger.error(f"MCP tool call failed after reconnect: {qualified_name}: [{type(e2).__name__}] {error_detail}")
-                            return {"error": f"[{type(e2).__name__}] {error_detail}", "exit_code": 1}
-                    else:
-                        return {"error": f"Reconnected but no session for {server_id}", "exit_code": 1}
+            # Real, deliberate fix 2026-08-20: found via wigolo debugging
+            # that this logged as genuinely empty ("MCP tool call
+            # failed: <name>: "), even when something real clearly went
+            # wrong. Root cause: certain real exception types (raised
+            # without a message argument) have a genuinely empty
+            # str(e) by design -- not a logging bug, but a real gap in
+            # what gets captured. Always include the real exception
+            # type name, which is never empty, so there's always
+            # something diagnostically useful in the log even when
+            # str(e) itself is blank.
+            error_detail = str(e) or "(no message)"
+            logger.error(f"MCP tool call failed: {qualified_name}: [{type(e).__name__}] {error_detail}")
+
+            # Real, fixed 2026-08-27: this used to only auto-reconnect for
+            # the small, hardcoded builtin set (is_builtin()) -- confirmed
+            # directly, by reading the code, that this left the cached
+            # self._connections[server_id]["status"] permanently stuck at
+            # "connected" for every other real server after any tool-call
+            # failure, since nothing else in this file ever revisits that
+            # dict once it's set. This is the real root cause the
+            # 2026-08-23 todo entry was asking about directly: mcp_manager
+            # never actively verifies a connection is alive, it only
+            # trusts last-known state -- confirmed, not assumed, by
+            # tracing every write site of self._connections.
+            #
+            # Fix: mark the connection as errored immediately (so
+            # get_server_status() reflects reality right away, even if
+            # the reconnect below also fails), then attempt a real,
+            # generic reconnect for ANY server, not just builtins, using
+            # _reconnect_server()'s own DB-backed config lookup.
+            if server_id in self._connections:
+                self._connections[server_id]["status"] = "error"
+                self._connections[server_id]["error"] = f"[{type(e).__name__}] {error_detail}"
+
+            logger.warning(f"MCP call failed for {qualified_name}, attempting reconnect: {e}")
+            reconnected = await self._reconnect_server(server_id)
+            if reconnected:
+                session = self._sessions.get(server_id)
+                if session:
+                    try:
+                        result = await self._do_call(session, tool_name, arguments, agent_name=agent_name)
+                    except Exception as e2:
+                        error_detail2 = str(e2) or "(no message)"
+                        logger.error(f"MCP tool call failed after reconnect: {qualified_name}: [{type(e2).__name__}] {error_detail2}")
+                        return {"error": f"[{type(e2).__name__}] {error_detail2}", "exit_code": 1}
                 else:
-                    logger.error(f"MCP reconnect failed for {server_id}")
-                    return {"error": f"MCP server crashed and reconnect failed: {server_id}", "exit_code": 1}
+                    return {"error": f"Reconnected but no session for {server_id}", "exit_code": 1}
             else:
-                # Real, deliberate fix 2026-08-20: found via wigolo debugging
-                # that this logged as genuinely empty ("MCP tool call
-                # failed: <name>: "), even when something real clearly went
-                # wrong. Root cause: certain real exception types (raised
-                # without a message argument) have a genuinely empty
-                # str(e) by design -- not a logging bug, but a real gap in
-                # what gets captured. Always include the real exception
-                # type name, which is never empty, so there's always
-                # something diagnostically useful in the log even when
-                # str(e) itself is blank.
-                error_detail = str(e) or "(no message)"
-                logger.error(f"MCP tool call failed: {qualified_name}: [{type(e).__name__}] {error_detail}")
-                return {"error": f"[{type(e).__name__}] {error_detail}", "exit_code": 1}
+                logger.error(f"MCP reconnect failed for {server_id}")
+                return {"error": f"MCP server crashed and reconnect failed: {server_id}", "exit_code": 1}
 
         return result
 
@@ -838,37 +853,100 @@ class McpManager:
             result_dict["images"] = images
         return result_dict
 
-    async def _reconnect_builtin(self, server_id: str) -> bool:
-        """Tear down and reconnect a crashed builtin MCP server."""
-        import sys
-        from src.builtin_mcp import _BUILTIN_SERVERS, builtin_python_env
+    async def _reconnect_server(self, server_id: str) -> bool:
+        """Tear down and reconnect ANY MCP server (not just builtins),
+        using either its real, persisted McpServer DB row, or (for
+        builtin servers, which have none) the same construction logic
+        the original _reconnect_builtin() used.
 
-        if server_id not in _BUILTIN_SERVERS:
+        Real, added 2026-08-27: confirmed directly, by reading the code,
+        that the original _reconnect_builtin() only worked for the
+        small, hardcoded builtin set (_BUILTIN_SERVERS) -- it returned
+        False immediately for anything else, and even without that
+        check, it had no way to know a real, non-builtin server's actual
+        transport, command, args, or url. This method fills that real
+        gap using the McpServer DB model (confirmed directly it stores
+        everything connect_server() needs, via core/database.py).
+
+        Real, honest correction, same day: the first version of this
+        method assumed EVERY server has a McpServer DB row, including
+        builtins -- confirmed directly, by reading register_builtin_
+        servers() in builtin_mcp.py, that this is wrong: builtin servers
+        are connected purely in-memory at startup and never get a DB
+        row at all. Without this branch, this method would have been a
+        real regression, breaking reconnection for every builtin server
+        that used to work via the old _reconnect_builtin().
+        """
+        if self.is_builtin(server_id):
+            import sys
+            from src.builtin_mcp import _BUILTIN_SERVERS, builtin_python_env
+
+            if server_id not in _BUILTIN_SERVERS:
+                return False
+
+            script_rel, name = _BUILTIN_SERVERS[server_id]
+            base_dir = get_app_root()
+            script_path = os.path.join(base_dir, script_rel)
+
+            await self.disconnect_server(server_id)
+
+            try:
+                ok = await self.connect_server(
+                    server_id=server_id,
+                    name=name,
+                    transport="stdio",
+                    command=sys.executable,
+                    args=[script_path],
+                    env=builtin_python_env(base_dir),
+                )
+                if ok:
+                    logger.info(f"Reconnected builtin MCP server: {name}")
+                return ok
+            except Exception as e:
+                logger.error(f"Failed to reconnect builtin MCP server {name}: {e}")
+                return False
+
+        db = SessionLocal()
+        try:
+            srv = db.query(McpServer).filter(McpServer.id == server_id).first()
+        finally:
+            db.close()
+
+        if not srv or not srv.is_enabled:
             return False
 
-        script_rel, name = _BUILTIN_SERVERS[server_id]
-        base_dir = get_app_root()
-        script_path = os.path.join(base_dir, script_rel)
-
-        # Clean up old connection
         await self.disconnect_server(server_id)
+
+        try:
+            args = json.loads(srv.args) if srv.args else None
+            env = json.loads(srv.env) if srv.env else None
+        except (ValueError, TypeError) as e:
+            logger.error(f"_reconnect_server: bad stored args/env JSON for {server_id}: {e}")
+            return False
 
         try:
             ok = await self.connect_server(
                 server_id=server_id,
-                name=name,
-                transport="stdio",
-                command=sys.executable,
-                args=[script_path],
-                env=builtin_python_env(base_dir),
+                name=srv.name,
+                transport=srv.transport,
+                command=srv.command,
+                args=args,
+                env=env,
+                url=srv.url,
             )
             if ok:
-                logger.info(f"Reconnected builtin MCP server: {name}")
+                logger.info(f"Reconnected MCP server: {srv.name} ({server_id})")
             return ok
         except Exception as e:
-            logger.error(f"Failed to reconnect builtin MCP server {name}: {e}")
+            logger.error(f"Failed to reconnect MCP server {srv.name} ({server_id}): {e}")
             return False
 
+    # Real, removed 2026-08-27: _reconnect_builtin() used to live here.
+    # Confirmed directly it was genuinely dead code after the fix above --
+    # its only caller (call_tool()'s exception handler) now calls the new,
+    # generic _reconnect_server() instead, which correctly handles builtin
+    # servers too (they're rows in the same McpServer table, same as any
+    # other server). Removed rather than left as unreachable code.
     def get_all_openai_schemas(self, disabled_map: Optional[Dict[str, set]] = None) -> List[Dict]:
         """Return all MCP tools in OpenAI function-calling format.
 

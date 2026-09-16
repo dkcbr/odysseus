@@ -281,6 +281,7 @@ _TOOL_NAME_MAP = {
     "session_control": "manage_session",
     "manage_memory": "manage_memory",
     "memory": "manage_memory",
+    "zeus": "zeus",
     "manage_tasks": "manage_tasks",
     "tasks": "manage_tasks",
     "schedule": "manage_tasks",

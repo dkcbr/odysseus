@@ -98,3 +98,11 @@ evdev
 # subprocess sidesteps this entirely, since Twisted's reactor then lives in
 # its own, separate process, never touching this process's asyncio loop.
 vncdotool
+
+# Real, added 2026-08-25: for routes/system_monitor_routes.py's real, live
+# CPU/memory/disk/network metrics (a new Odysseus home-page dashboard
+# widget, inspired by a real system-monitor app demo). Genuinely
+# lightweight, MIT licensed -- no licensing/weight concerns like the
+# optional-file entries, matching the same reasoning already used for
+# vncdotool above.
+psutil
