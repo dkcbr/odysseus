@@ -1,3 +1,4 @@
+from routes.mcp_http_server import session_manager as odysseus_mcp_session_manager
 # app.py — slim orchestrator
 import mimetypes
 import os
@@ -651,6 +652,10 @@ upload_cleanup_task = None
 # emojis as flat SVG instead of system color glyphs.
 from routes.emoji_routes import setup_emoji_routes
 app.include_router(setup_emoji_routes())
+from routes.system_monitor_routes import setup_system_monitor_routes
+app.include_router(setup_system_monitor_routes())
+from routes.price_query_routes import setup_price_query_routes
+app.include_router(setup_price_query_routes())
 
 # Sessions
 from routes.session_routes import setup_session_routes
@@ -702,6 +707,11 @@ app.include_router(setup_preset_routes(preset_manager))
 # Diagnostics
 from routes.diagnostics_routes import setup_diagnostics_routes
 app.include_router(setup_diagnostics_routes(rag_manager, rag_available, research_handler, memory_vector))
+
+# Real, restored 2026-08-09 -- lost in the same fork-drift event as most
+# of diagnostics_routes.py; see routes/factor_routes.py for detail.
+from routes.factor_routes import setup_factor_routes
+app.include_router(setup_factor_routes())
 
 # Cleanup
 from routes.cleanup.cleanup_routes import setup_cleanup_routes
@@ -811,6 +821,22 @@ mcp_manager = McpManager()
 set_mcp_manager(mcp_manager)
 app.include_router(setup_mcp_routes(mcp_manager))
 logger.info("MCP routes initialized")
+
+# Agent dashboard (recent /api/mcp/call activity + stats -- in-memory only)
+from routes.agent_dashboard import router as agent_dashboard_router
+app.include_router(agent_dashboard_router)
+logger.info("Agent dashboard routes initialized")
+
+# Task queue -- DB-native (agent_tasks.db), see routes/tasks.py
+from routes.tasks import router as agent_tasks_router
+app.include_router(agent_tasks_router)
+logger.info("Agent task queue routes initialized")
+
+# Task event history -- append-only SQLite log
+# (queue behavior itself is unchanged; see routes/tasks_history.py)
+from routes.tasks_history import init_db as _init_agent_tasks_history_db
+_init_agent_tasks_history_db()
+logger.info("Agent task event history DB initialized (/app/data/agent_tasks.db)")
 
 # AI Interaction tools (debates, pipelines, self-managing AI, UI control)
 from src.ai_interaction import set_session_manager as set_ai_session_manager, set_memory_manager as set_ai_memory_manager, set_rag_manager as set_ai_rag_manager
@@ -998,11 +1024,13 @@ async def _lifespan(app):
     """Modern lifespan context manager replacing deprecated @app.on_event."""
     # ── STARTUP ──
     await _startup_event()
-    yield
+    async with odysseus_mcp_session_manager.run():
+        yield
     # ── SHUTDOWN ──
     await _shutdown_event()
 
 app.router.lifespan_context = _lifespan
+app.mount("/mcp", odysseus_mcp_session_manager.handle_request)
 
 
 async def _startup_event():

@@ -85,6 +85,18 @@ class TestBuildModelsUrl:
     def test_ollama_tags(self):
         assert build_models_url("https://ollama.com/api") == "https://ollama.com/api/tags"
 
+    def test_lmstudio_uses_native_v0_models(self):
+        # Real, added 2026-09-06: LM Studio's generic /v1/models response
+        # lacks the type/capabilities fields model_capability_readers.lmstudio
+        # needs (confirmed directly, live -- every model came back
+        # family=unknown). LM Studio is detected here by port 1234, since
+        # _detect_provider() has no "lmstudio" concept of its own.
+        url = build_models_url("http://172.19.0.1:1234/v1")
+        assert url == "http://172.19.0.1:1234/api/v0/models"
+
+    def test_lmstudio_pathless_base_uses_native_v0_models(self):
+        assert build_models_url("http://localhost:1234") == "http://localhost:1234/api/v0/models"
+
     @pytest.mark.parametrize("bad_base", [
         "https://api.example.com/v1?token=abc",
         "https://api.example.com/v1#fragment",

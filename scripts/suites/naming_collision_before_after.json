@@ -1,0 +1,11 @@
+{
+  "name": "naming_collision_before_after",
+  "description": "Real, genuine before/after model-regression comparison: the current, fixed ticker-lookup-lora model against its original, pre-rename name odysseus-qwen3-tickers-lora (still registered, still genuinely subject to the real naming-collision tool-suppression bug fixed earlier the same day). Reuses the real holdings-correction suite's scenarios, since that path is one of the most tool-call-heavy real dimensions tested.",
+  "models": ["ticker-lookup-lora", "odysseus-qwen3-tickers-lora"],
+  "suite_tags": ["multi-model", "regression", "before-after"],
+  "scenarios": [
+    "scenarios/mixed_holdings_default.json",
+    "scenarios/rapid_holdings_stress.json",
+    "scenarios/holdings_absence_verification.json"
+  ]
+}

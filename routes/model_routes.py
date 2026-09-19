@@ -1371,6 +1371,31 @@ def _api_key_fingerprint(api_key: Optional[str]) -> str:
 def setup_model_routes(model_discovery):
     router = APIRouter(prefix="/api")
 
+    # Real, added 2026-09-13: wires up the frontend's "Rename AI" modal,
+    # which previously POSTed to this exact path with zero backend route --
+    # confirmed dead before this (404 on save, via a fresh grep of app.js
+    # and the whole backend). Any authenticated user, not admin-only --
+    # renaming the assistant's own display identity is a real, distinct,
+    # lower-stakes action than the general, admin-only /api/auth/settings
+    # route. Registered here (plain /api prefix), not in auth_routes.py
+    # (/api/auth prefix), so the final path genuinely matches what the
+    # existing frontend code actually calls.
+    @router.post("/ai/name")
+    async def set_ai_name(request: Request):
+        """Any authenticated user: set the assistant's display/identity name."""
+        if not _auth_disabled() and not effective_user(request):
+            raise HTTPException(401, "Not authenticated")
+        body = await request.json()
+        name = str(body.get("name", "")).strip()
+        if not name:
+            raise HTTPException(400, "name is required")
+        if len(name) > 50:
+            raise HTTPException(400, "name must be 50 characters or fewer")
+        current = _load_settings()
+        current["ai_name"] = name
+        _save_settings(current)
+        return {"success": True, "name": name}
+
     # ---- Model list cache ----
     import time as _time
     # Per-user cache: { owner_key: {"data": ..., "time": ...} }. owner_key is
@@ -2249,7 +2274,32 @@ def setup_model_routes(model_discovery):
 
     @router.get("/model-endpoints/{ep_id}/probe")
     def probe_endpoint_models(ep_id: str, request: Request):
-        """Re-probe all models on an endpoint. Updates hidden_models and streams SSE results."""
+        """Re-probe an endpoint's models and stream SSE results, updating hidden_models.
+
+        Real, changed 2026-08-28: previously sent a real warmup completion
+        request (via _probe_single_model, timeout=8) to EVERY chat model
+        unconditionally. Confirmed directly, via real measurement the same
+        night, that several locally-installed models take 20-38s to cold-
+        load, and that this endpoint's own 16GB VRAM can't hold this
+        system's full model roster at once -- so a full probe run causes
+        cascading evictions that make results *worse* on retry, not
+        better (confirmed: re-probing after individually warming all 12
+        previously-hidden models still made results worse, 7 ok/13 hidden
+        vs. the original 8/12). Increasing the timeout alone can't fix
+        this either, since it's bounded by real cold-load time, not an
+        arbitrary constant.
+
+        Fix: `ModelEndpoint.probe_eligible_models` (JSON list, NULL by
+        default) scopes which models actually get the real warmup call.
+        NULL/unset preserves the exact original behavior (probe
+        everything) for full backward compatibility. When set, models
+        NOT in the list skip the warmup call entirely -- never subjected
+        to a timeout, never at risk of being marked hidden due to slow
+        cold-load -- and are simply trusted as visible based on their
+        presence in the lightweight, no-VRAM-impact _probe_endpoint
+        listing alone. Models that ARE in the list still get full, real
+        functional verification exactly as before.
+        """
         require_admin(request)
         db = SessionLocal()
         try:
@@ -2257,8 +2307,15 @@ def setup_model_routes(model_discovery):
             if not ep:
                 raise HTTPException(404, "Endpoint not found")
             ep_data = {"id": ep.id, "name": ep.name, "base_url": ep.base_url, "api_key": ep.api_key}
+            raw_eligible = getattr(ep, "probe_eligible_models", None)
         finally:
             db.close()
+
+        try:
+            eligible_set = set(json.loads(raw_eligible)) if raw_eligible else None
+        except (ValueError, TypeError):
+            logger.warning(f"probe_endpoint_models: bad probe_eligible_models JSON for {ep_id}, probing all")
+            eligible_set = None
 
         base = _normalize_base(ep_data["base_url"])
         all_models = _probe_endpoint(base, ep_data["api_key"])
@@ -2270,6 +2327,20 @@ def setup_model_routes(model_discovery):
             failed = []
             ok_count = 0
             for mid in chat_models:
+                if eligible_set is not None and mid not in eligible_set:
+                    # Real, deliberate skip: no warmup call at all for this
+                    # model on this run, so it cannot be marked hidden due
+                    # to a slow cold-load. Trusted visible based on the
+                    # earlier, lightweight _probe_endpoint listing alone.
+                    result = {
+                        "status": "skipped_not_probe_eligible",
+                        "model": mid,
+                        "type": "probe_result",
+                        "endpoint": ep_data["name"],
+                    }
+                    ok_count += 1
+                    yield f"data: {json.dumps(result)}\n\n"
+                    continue
                 result = _probe_single_model(base, ep_data["api_key"], mid, timeout=8)
                 result["model"] = mid
                 result["type"] = "probe_result"
