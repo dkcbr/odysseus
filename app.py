@@ -654,6 +654,8 @@ from routes.emoji_routes import setup_emoji_routes
 app.include_router(setup_emoji_routes())
 from routes.system_monitor_routes import setup_system_monitor_routes
 app.include_router(setup_system_monitor_routes())
+from routes.price_query_routes import setup_price_query_routes
+app.include_router(setup_price_query_routes())
 
 # Sessions
 from routes.session_routes import setup_session_routes
