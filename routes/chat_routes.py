@@ -1917,7 +1917,9 @@ def setup_chat_routes(
         # confirmed/pending summed together). Checked before the vault
         # trigger since this is the more specific, narrower match.
         if isinstance(message, str) and not incognito:
-            from src.tool_execution import detect_holdings_query, answer_holdings_query
+            from src.tool_execution import (
+                detect_holdings_query, answer_holdings_query, detect_price_query,
+            )
             _holdings_ticker = detect_holdings_query(message)
             if _holdings_ticker:
                 _holdings_answer = answer_holdings_query(_holdings_ticker)
@@ -1931,6 +1933,28 @@ def setup_chat_routes(
                     yield "data: [DONE]\n\n"
 
                 return StreamingResponse(_holdings_query_stream(), media_type="text/event-stream")
+
+            # Real, added 2026-09-18: deterministic price-query
+            # short-circuit -- see the real, detailed rationale on
+            # detect_price_query/answer_price_query themselves
+            # (src/tool_execution.py). Checked after the holdings-query
+            # trigger, matching that trigger's own stated "most specific
+            # first" ordering (holdings-query's phrasing is narrower and
+            # more specific than a general price query).
+            _price_ticker = detect_price_query(message)
+            if _price_ticker:
+                from src.tool_execution import answer_price_query
+                _price_answer = await answer_price_query(_price_ticker)
+                sess.add_message(ChatMessage("user", message))
+                sess.add_message(ChatMessage("assistant", _price_answer))
+                session_manager.save_sessions()
+
+                async def _price_query_stream():
+                    yield f"data: {json.dumps({'delta': _price_answer})}\n\n"
+                    yield f"data: {json.dumps({'type': 'message_saved'})}\n\n"
+                    yield "data: [DONE]\n\n"
+
+                return StreamingResponse(_price_query_stream(), media_type="text/event-stream")
 
         if isinstance(message, str) and not incognito:
             from src.tool_execution import detect_vault_search_trigger, search_vault_impl
