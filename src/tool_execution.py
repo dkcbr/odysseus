@@ -872,6 +872,90 @@ HOLDINGS_QUERY_TRIGGER = re.compile(
 )
 
 
+# Real, added 2026-09-18, following directly from the real, documented
+# investigation earlier this session (jarvis-todo.md's 2026-09-17 entry):
+# a deterministic in-agent-loop interceptor was built, tested live, and
+# found to fire non-deterministically for reasons never root-caused --
+# same code, same single worker, same query, sometimes entered the code
+# block, sometimes silently didn't, zero exceptions raised either way.
+# This sidesteps that specific, unexplained non-determinism the same way
+# the holdings-query trigger above sidesteps model tool-selection/
+# synthesis unreliability: checked here, in chat_stream itself, before
+# the agent loop is ever invoked, not inside it.
+#
+# Real, deliberately MORE conservative than the reverted interceptor's
+# own detection (bare-ticker match alone): requires BOTH a real
+# price-intent keyword AND a valid, non-stoplisted ticker, not either
+# alone. The interceptor's broader, either/or detection was tuned for a
+# narrower context (only fired on messages already headed into the
+# agent loop for a real reason); this check runs against every single
+# chat message, so a bare ticker mention in an unrelated sentence
+# ("I'm reading about AAPL's supply chain") must NOT short-circuit into
+# a price quote.
+_PRICE_QUERY_KEYWORD_RE = re.compile(
+    r"\b(?:price|quote|trading at|worth|stock price)\b", re.IGNORECASE,
+)
+_BARE_TICKER_RE = re.compile(r"(?<![A-Za-z])[A-Z]{2,5}(?![A-Za-z])")
+_TICKER_STOPLIST = frozenset({
+    "CEO", "CFO", "CTO", "USA", "ASAP", "OK", "IT", "TV", "PC", "AI",
+    "US", "UK", "EU", "UN", "OMG", "LOL", "FYI", "ETA", "FAQ", "DIY",
+    "API", "URL", "PDF", "CSV", "SQL", "GPU", "CPU", "RAM", "SSD",
+    "IRA", "LLC", "INC", "VP", "HR", "PR", "PM", "AM",
+})
+
+
+def detect_price_query(message: str) -> Optional[str]:
+    """Real, direct, deterministic check: does this message contain both
+    a real price-intent keyword and a confident, non-stoplisted bare
+    ticker symbol? Returns the first such ticker (uppercased) if so,
+    else None. Deliberately requires both conditions (see the comment
+    above this function) -- narrower than the reverted interceptor's own
+    detection, appropriate for running against every chat message rather
+    than only ones already headed into the agent loop."""
+    text = message.strip()
+    if not _PRICE_QUERY_KEYWORD_RE.search(text):
+        return None
+    for token in _BARE_TICKER_RE.findall(text):
+        if token not in _TICKER_STOPLIST:
+            return token
+    return None
+
+
+async def answer_price_query(ticker: str) -> str:
+    """Real, direct, deterministic answer for a price query -- calls the
+    real, already-proven TickerLookupTool directly (same fail-closed,
+    FMP-backed tool the agent loop itself uses, and the same one the
+    standalone /api/price-query endpoint uses -- routes/price_query_routes.py)
+    and formats a real, human-readable sentence, with no model synthesis
+    step at all for this narrow, deterministic case."""
+    from src.agent_tools.finance_tools import TickerLookupTool
+
+    result = await TickerLookupTool().execute(ticker, {})
+    if "error" in result:
+        # Real, deliberate: surface the tool's own real, fail-closed
+        # error message directly rather than inventing a different one --
+        # it already correctly instructs not to guess (e.g. "no verified
+        # data found... do not guess a company name for it").
+        return result["error"]
+
+    fields: dict = {}
+    for line in result.get("output", "").split("\n"):
+        if ": " in line:
+            key, _, value = line.partition(": ")
+            fields[key] = value
+
+    name = fields.get("companyName") or ticker
+    price = fields.get("price")
+    change = fields.get("change")
+    if not price:
+        return f"Could not retrieve a verified price for {ticker} right now."
+    answer = f"{name} ({ticker}) is currently trading at ${price}"
+    if change:
+        answer += f", a change of {change}"
+    answer += "."
+    return answer
+
+
 def detect_holdings_query(message: str) -> Optional[str]:
     """Real, direct, deterministic check: does this message
     unambiguously ask for a specific ticker's share count? Returns the
