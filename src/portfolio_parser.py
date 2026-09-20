@@ -90,12 +90,21 @@ def parse_portfolio_context(raw_text: str) -> PortfolioParseResult:
                     shares = float(shares_raw.replace(",", ""))
                 except ValueError:
                     continue
-                # Real, deliberate choice: last real occurrence wins if a
-                # ticker appears more than once in the confirmed table
-                # (shouldn't happen in a correct document, but don't
-                # silently sum duplicates -- that would be its own,
-                # separate bug).
-                result.confirmed_holdings[ticker] = shares
+                # Real, fixed 2026-09-18 (live bug report from DK: "How
+                # many shares of PL do I own?" answered 3, when the real
+                # total is 30 (Taxable) + 3 (Roth) = 33). The original
+                # "last occurrence wins" choice here assumed a ticker
+                # appearing more than once in the confirmed table meant a
+                # document mistake -- confirmed directly, live, that
+                # assumption is wrong for this real document: the same
+                # ticker legitimately, correctly appears once per real,
+                # separate account section (Taxable, Roth IRA) when a
+                # position is held in more than one account. Summing is
+                # the real, correct behavior for "how many shares do I
+                # own" (a total across accounts), not "last wins".
+                result.confirmed_holdings[ticker] = (
+                    result.confirmed_holdings.get(ticker, 0.0) + shares
+                )
 
     return result
 

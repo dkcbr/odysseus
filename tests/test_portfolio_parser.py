@@ -65,6 +65,31 @@ def test_parses_pending_sell_orders():
 def test_unknown_ticker_returns_zero_pending_not_error():
     result = parse_portfolio_context(_FIXTURE)
     assert result.pending_qty_for("ZZZZ", "BUY") == 0.0
+
+
+# Real, added 2026-09-18: mirrors the exact real bug DK hit live --
+# "How many shares of PL do I own?" answered 3 (only the Roth IRA
+# holding), silently discarding a real, separate 30-share Taxable
+# holding of the same ticker. The real document legitimately has this
+# shape whenever a position is held in more than one real account.
+_MULTI_ACCOUNT_FIXTURE = """
+## Reconciled Holdings -- Public.com Taxable
+
+| Ticker | Shares | Basis | Current Price | Current Value | P&L % | Notes |
+|--------|--------|-------|----------------|----------------|-------|-------|
+| PL | 30 | $21.83 | $16.92 | $507.60 | -22.48% | |
+
+## Reconciled Holdings -- Public.com Roth IRA
+
+| Ticker | Shares | Basis | Current Price | Current Value | P&L % | Notes |
+|--------|--------|-------|----------------|----------------|-------|-------|
+| PL | 3 | $16.60 | $16.92 | $50.76 | +1.95% | |
+"""
+
+
+def test_same_ticker_across_multiple_real_accounts_is_summed_not_overwritten():
+    result = parse_portfolio_context(_MULTI_ACCOUNT_FIXTURE)
+    assert result.confirmed_holdings["PL"] == 33.0
     assert "ZZZZ" not in result.confirmed_holdings
 
 
