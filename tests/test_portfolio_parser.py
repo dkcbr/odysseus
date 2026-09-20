@@ -93,6 +93,123 @@ def test_same_ticker_across_multiple_real_accounts_is_summed_not_overwritten():
     assert "ZZZZ" not in result.confirmed_holdings
 
 
+# Real, added 2026-09-20, following directly from the audit prompted by
+# the multi-account bug above: a fixture mirroring the REAL, full,
+# actual structure of data/portfolio_context.md (confirmed directly
+# against the live document's real section order), not just the
+# minimal two-table shape the original fixture used. Exercises the
+# specific real risks the audit found:
+#   - a Crypto section whose real table header says "Token", not
+#     "Ticker" (so the section-boundary sentinel strings never match
+#     it) -- confirmed live that its rows still get picked up as
+#     confirmed holdings, correctly, but by regex-format coincidence
+#     rather than deliberate section detection.
+#   - a real account (Fidelity) with a pending-orders table but no
+#     confirmed-holdings table at all.
+#   - the real, live document's actual order of sections: Taxable
+#     Holdings -> ETFs (same real header) -> Crypto ("Token" header) ->
+#     Roth Holdings -> Roth Orders -> Taxable Orders -> Fidelity Orders
+#     -> a later, unrelated table ("Crypto Unit Targets") that must NOT
+#     be misparsed even though the in/out-of-orders toggle never resets
+#     after the last real orders section in the actual document.
+_FULL_STRUCTURE_FIXTURE = """
+## Reconciled Holdings -- Public.com Taxable
+
+| Ticker | Shares | Basis | Current Price | Current Value | P&L % | Notes |
+|--------|--------|-------|----------------|----------------|-------|-------|
+| KTOS | 19 | $55.97 | $53.59 | $1,018.21 | -4.25% | |
+
+## ETFs -- Public.com Taxable
+
+| Ticker | Shares | Basis | Current Price | Current Value | P&L % | Notes |
+|--------|--------|-------|----------------|----------------|-------|-------|
+| VOO | 2 | $550.00 | $560.00 | $1,120.00 | +1.8% | |
+
+## Crypto -- Public.com Taxable
+
+| Token | Qty | Basis | Current Price | Current Value | P&L % | Notes |
+|-------|-----|-------|--------------|---------------|-------|-------|
+| ADA | 2000 | $0.28 | $0.22 | $442.58 | -20.91% | |
+
+## Reconciled Holdings -- Public.com Roth IRA
+
+| Ticker | Shares | Basis | Current Price | Current Value | P&L % | Notes |
+|--------|--------|-------|----------------|----------------|-------|-------|
+| KTOS | 3 | $16.60 | $16.92 | $50.76 | +1.95% | |
+
+## Active Limit Orders -- Public.com Roth IRA
+
+| Ticker | Qty | Limit | Side | Notes |
+|--------|-----|-------|------|-------|
+| KTOS | 1 | $46.50 | BUY | |
+
+## Active Limit Orders -- Public.com Taxable
+
+| Ticker | Qty | Limit | Side | Notes |
+|--------|-----|-------|------|-------|
+| VOO | 1 | $540.00 | BUY | |
+
+## Active Limit Orders -- Fidelity Roth IRA
+
+| Ticker | Qty | Limit | Side | Notes |
+|--------|-----|-------|------|-------|
+| SPCX | 1 | $140.00 | BUY | Fidelity-only, unverified |
+
+## Crypto Unit Targets
+
+| Token | Taxable | Roth | Total | Target | Status |
+|-------|---------|------|-------|--------|--------|
+| ADA | 2,000 | 0 | 2,000 | 2,000 | Complete |
+"""
+
+
+def test_crypto_section_with_token_header_still_counts_as_confirmed_holding():
+    # Real, confirmed live: the Crypto table's header says "Token", not
+    # "Ticker", so it never matches either section-boundary sentinel --
+    # this test pins down that its rows are still correctly counted,
+    # not silently dropped, and documents that this currently works by
+    # regex-shape coincidence, not deliberate section-aware parsing.
+    result = parse_portfolio_context(_FULL_STRUCTURE_FIXTURE)
+    assert result.confirmed_holdings["ADA"] == 2000.0
+
+
+def test_holdings_across_taxable_and_roth_and_etf_sections_all_summed():
+    # KTOS appears in both Taxable (19) and Roth (3) real holdings
+    # tables -- same real shape as the PL bug, pinned here with a
+    # different ticker across the full, real document structure.
+    result = parse_portfolio_context(_FULL_STRUCTURE_FIXTURE)
+    assert result.confirmed_holdings["KTOS"] == 22.0
+    assert result.confirmed_holdings["VOO"] == 2.0
+
+
+def test_later_unrelated_table_after_last_orders_section_is_not_misparsed():
+    # Real, important: the in/out-of-orders toggle never resets after
+    # the Fidelity orders section (the last real orders table in the
+    # actual document) -- there is no holdings-table sentinel after it
+    # to flip back. Confirms this stays safe for the real "Crypto Unit
+    # Targets" table specifically (its rows don't match _ORDER_ROW's
+    # strict $-prefixed-column + literal BUY/SELL requirement), not
+    # just assumed safe.
+    result = parse_portfolio_context(_FULL_STRUCTURE_FIXTURE)
+    order_tickers = {o.ticker for o in result.pending_orders}
+    assert "ADA" not in order_tickers
+    # And it must not have been silently miscounted as a confirmed
+    # holding a second time via the orders path either.
+    ada_orders = [o for o in result.pending_orders if o.ticker == "ADA"]
+    assert ada_orders == []
+
+
+def test_ticker_held_only_in_unverified_fidelity_has_no_confirmed_holding():
+    # Real, honest edge case: Fidelity Roth IRA has a real pending-orders
+    # table but no confirmed-holdings table at all (unverified, no real
+    # API/MCP access exists for that brokerage). A ticker that only
+    # appears there must not be reported as a confirmed holding, and
+    # pending_qty_for must still correctly find its real pending order.
+    result = parse_portfolio_context(_FULL_STRUCTURE_FIXTURE)
+    assert "SPCX" not in result.confirmed_holdings
+    assert result.pending_qty_for("SPCX", "BUY") == 1.0
+
+
 def test_range_quantity_uses_low_end():
     fixture_with_range = _FIXTURE + "| NVDA | 1-2 | $190.00 | BUY | T1 rung |\n"
     result = parse_portfolio_context(fixture_with_range)
