@@ -828,10 +828,19 @@ def search_vault_impl(query: str) -> str:
 # Deliberately conservative -- false negatives (missing a real vault
 # query) are far safer than false positives (silently intercepting an
 # unrelated message and answering only from vault content).
+# Real, fixed 2026-09-20 following the assumption audit: these three
+# patterns were genuinely anchored with "^" and matched via
+# pattern.match() below, so "Can you search my vault for X?" (or any
+# leading text before the trigger phrase) was silently missed --
+# confirmed directly, live. Anchors removed; detect_vault_search_trigger
+# below now uses .search() instead of .match() to find the phrase
+# anywhere in the message, matching detect_price_query's own,
+# already-robust design.
 VAULT_SEARCH_TRIGGERS = [
-    re.compile(r"^search (?:my )?(?:vault|notes|obsidian) for (.+)$", re.IGNORECASE),
-    re.compile(r"^what does (?:my )?(?:vault|notes|obsidian) say about (.+?)\??$", re.IGNORECASE),
-    re.compile(r"^find (?:in|from) (?:my )?(?:vault|notes|obsidian)[:,]? (.+)$", re.IGNORECASE),
+    re.compile(r"search (?:my )?(?:vault|notes|obsidian) for (.+)$", re.IGNORECASE),
+    re.compile(r"what does (?:my )?(?:vault|notes|obsidian) say about (.+?)\??$", re.IGNORECASE),
+    re.compile(r"find (?:in|from) (?:my )?(?:vault|notes|obsidian)[:,]? (.+)$", re.IGNORECASE),
+    re.compile(r"(?:look|check) (?:in )?(?:my )?(?:vault|notes|obsidian)(?: notes)?(?: for| about)? (.+)$", re.IGNORECASE),
 ]
 
 
@@ -846,7 +855,7 @@ def detect_vault_search_trigger(message: str) -> Optional[str]:
     unrelated message."""
     stripped = message.strip()
     for pattern in VAULT_SEARCH_TRIGGERS:
-        m = pattern.match(stripped)
+        m = pattern.search(stripped)
         if m:
             query = m.group(1).strip().rstrip("?.")
             if len(query) >= 3:  # real, minimal sanity floor, matches process_correction_command's own length-floor pattern
@@ -866,10 +875,36 @@ def detect_vault_search_trigger(message: str) -> Optional[str]:
 # entirely for this narrow, high-value, unambiguous case -- not just
 # forcing the right tool call and hoping the model reads the result
 # correctly.
-HOLDINGS_QUERY_TRIGGER = re.compile(
-    r"how many shares (?:of|in) ([a-zA-Z][a-zA-Z0-9.\-]{0,9}) do i (?:own|have)\??$",
-    re.IGNORECASE,
-)
+# Real, fixed 2026-09-20 following the assumption audit prompted by the
+# PL summing bug: live-tested against 7 plausible real phrasings and
+# found this single pattern missed several natural ones despite already
+# using unanchored .search() (confirmed directly -- "Can you tell me
+# how many shares of PL do I own?" already worked; the real gap was
+# word-order/verb variation, not anchoring). Converted to a list of
+# patterns, matching VAULT_SEARCH_TRIGGERS' own already-proven design
+# below, covering the specific real phrasings confirmed missing:
+# "How many PL shares do I have?" (ticker-before-"shares") and "How
+# much PL do I own?" (no "shares" word at all). Deliberately still NOT
+# covering open-ended phrasings like "What is my PL position?" or "Do I
+# own any PL?" -- those are genuinely harder to extract a ticker from
+# without real false-positive risk ("position" and "own" are common
+# words in non-portfolio contexts too), matching the same deliberate,
+# conservative-narrowness philosophy process_correction_command already
+# uses elsewhere in this codebase.
+HOLDINGS_QUERY_TRIGGERS = [
+    re.compile(
+        r"how many shares (?:of|in) ([a-zA-Z][a-zA-Z0-9.\-]{0,9}) do i (?:own|have)\??$",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"how many ([a-zA-Z][a-zA-Z0-9.\-]{0,9}) shares do i (?:own|have)\??$",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"how much ([a-zA-Z][a-zA-Z0-9.\-]{0,9}) do i (?:own|have)\??$",
+        re.IGNORECASE,
+    ),
+]
 
 
 # Real, added 2026-09-18, following directly from the real, documented
@@ -960,14 +995,18 @@ def detect_holdings_query(message: str) -> Optional[str]:
     """Real, direct, deterministic check: does this message
     unambiguously ask for a specific ticker's share count? Returns the
     extracted ticker symbol (uppercased) if so, else None. Deliberately
-    narrow -- only the single, canonical 'how many shares of X do I
-    own' phrasing, not general portfolio questions (balance, strategy,
-    trading rules), which still need the full document and remain the
-    model's responsibility via get_portfolio_context."""
-    m = HOLDINGS_QUERY_TRIGGER.search(message.strip())
-    if not m:
-        return None
-    return m.group(1).upper()
+    narrow -- only the canonical 'how many shares of X do I own' class
+    of phrasing (see HOLDINGS_QUERY_TRIGGERS above for the real,
+    specific variants covered and why others are deliberately excluded),
+    not general portfolio questions (balance, strategy, trading rules),
+    which still need the full document and remain the model's
+    responsibility via get_portfolio_context."""
+    stripped = message.strip()
+    for pattern in HOLDINGS_QUERY_TRIGGERS:
+        m = pattern.search(stripped)
+        if m:
+            return m.group(1).upper()
+    return None
 
 
 def answer_holdings_query(ticker: str) -> str:

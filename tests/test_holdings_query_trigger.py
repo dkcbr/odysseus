@@ -23,6 +23,28 @@ def test_detects_with_in_instead_of_of():
     assert detect_holdings_query("How many shares in NVDA do I have?") == "NVDA"
 
 
+# Real, added 2026-09-20 following the assumption audit prompted by the
+# PL summing bug -- live-tested 7 plausible real phrasings and found
+# these two natural variants were missed by the original single
+# pattern, despite it already using unanchored .search(). Not an
+# anchoring problem (confirmed directly -- leading text like "Can you
+# tell me..." already worked); the real gap was word-order/verb
+# variation. Fixed by adding these as real, additional pattern variants.
+def test_detects_ticker_before_shares_word_order():
+    assert detect_holdings_query("How many PL shares do I have?") == "PL"
+
+
+def test_detects_how_much_phrasing_without_shares_word():
+    assert detect_holdings_query("How much PL do I own?") == "PL"
+
+
+def test_still_does_not_match_open_ended_position_question():
+    # Real, deliberate: "position" is a common word outside portfolio
+    # context too -- this stays excluded, same conservative-narrowness
+    # choice as process_correction_command elsewhere in this codebase.
+    assert detect_holdings_query("What is my PL position?") is None
+
+
 def test_does_not_match_unrelated_question():
     assert detect_holdings_query("What is my portfolio strategy?") is None
 

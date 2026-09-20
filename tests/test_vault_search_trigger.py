@@ -31,6 +31,31 @@ def test_find_in_vault_matches():
     assert result == "Kybalion principles"
 
 
+# Real, added 2026-09-20 following the assumption audit: the original
+# three patterns were genuinely anchored with "^" and matched via
+# .match(), so any leading text before the trigger phrase (politeness,
+# a lead-in sentence) was silently missed -- confirmed directly, live.
+# Anchors removed, switched to .search(); a fourth "look/check" pattern
+# added too, covering real phrasings the original three didn't attempt
+# at all.
+def test_matches_with_leading_polite_text():
+    result = detect_vault_search_trigger("Can you search my vault for the ticker-lora work?")
+    assert result == "the ticker-lora work"
+
+
+def test_matches_look_in_notes_phrasing():
+    result = detect_vault_search_trigger("Look in my notes for the game mode script")
+    assert result == "the game mode script"
+
+
+def test_matches_check_obsidian_notes_without_duplicating_notes_word():
+    # Real, caught live while building this fix: "obsidian notes" has
+    # two adjacent trigger words: a naive pattern captured "notes about
+    # portfolio" instead of just "portfolio". Pins the fix.
+    result = detect_vault_search_trigger("Check my obsidian notes about portfolio")
+    assert result == "portfolio"
+
+
 def test_unrelated_message_does_not_match():
     result = detect_vault_search_trigger("How many shares of KTOS do I own?")
     assert result is None
