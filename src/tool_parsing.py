@@ -643,7 +643,23 @@ def _raw_openai_tool_call_to_block(value) -> Optional[ToolBlock]:
         return ToolBlock(f"mcp__email__{name}", json.dumps(args) if args else "{}")
     if tool_type not in TOOL_TAGS:
         return None
+    return ToolBlock(tool_type, str(_extract_tool_content(tool_type, args) or ""))
 
+
+def _extract_tool_content(tool_type: str, args: dict) -> str:
+    """Real, factored out 2026-09-24 (previously inlined only in
+    _raw_openai_tool_call_to_block): per-tool_type extraction of the
+    ONE right argument value each tool's downstream executor actually
+    expects as its plain-string `content` -- e.g. bash wants a raw
+    shell command string, not a JSON-encoded {"command": ...} blob.
+    Shared by both _raw_openai_tool_call_to_block (pattern 4d) and
+    _xlam_call_to_block (pattern 4e) so the two raw-JSON-leak parsers
+    can never drift out of sync on how a given tool's arguments get
+    turned into content -- found as a real, live bug 2026-09-24: xLAM
+    tool-call RECOGNITION worked correctly once wired in, but its own
+    argument handling still just JSON-dumped the whole args dict for
+    every tool, so bash literally received the string
+    \'{"command": "date"}\' as its shell command instead of \'date\'."""
     if tool_type == "bash":
         content = args.get("command", "")
     elif tool_type == "python":
@@ -741,7 +757,69 @@ def _raw_openai_tool_call_to_block(value) -> Optional[ToolBlock]:
         content = args.get("filter", "") if tool_type == "list_models" else ""
     else:
         content = json.dumps(args) if args else ""
-    return ToolBlock(tool_type, str(content or ""))
+    return content
+
+
+def _xlam_call_to_block(value) -> Optional[ToolBlock]:
+    """Real, added 2026-09-22: Salesforce xLAM-family models (Llama-xLAM-2,
+    xLAM-2-*-fc-r, etc.) are natively trained on a bare JSON-array
+    tool-call format documented directly in their own model card/prompt
+    template: [{"name": "tool_name", "arguments": {...}}]. Confirmed
+    directly, live, under both Ollama and LM Studio: the model correctly
+    reasons about and names the real tool (when given real tool names in
+    its prompt) but this raw array leaks into plain assistant text/content
+    rather than the structured OpenAI tool_calls API field, since neither
+    serving engine implements xLAM's own documented custom tool-call
+    parser (`xlam_tool_call_parser.py`, referenced directly in Salesforce's
+    own vLLM serving docs). This mirrors _raw_openai_tool_call_to_block's
+    real, established shape for a different raw-JSON leak (pattern 4d)
+    rather than inventing a new approach.
+    """
+    if isinstance(value, list):
+        for item in value:
+            block = _xlam_call_to_block(item)
+            if block:
+                return block
+        return None
+    if not isinstance(value, dict):
+        return None
+    name = str(value.get("name") or "").strip()
+    if not name:
+        return None
+    tool_type = _TOOL_NAME_MAP.get(name, name)
+    raw_args = value.get("arguments")
+    if raw_args is None:
+        return None
+    try:
+        args = json.loads(raw_args) if isinstance(raw_args, str) else raw_args
+    except (json.JSONDecodeError, TypeError):
+        args = {}
+    if not isinstance(args, dict):
+        args = {}
+    if tool_type.startswith("mcp__"):
+        return ToolBlock(tool_type, json.dumps(args) if args else "{}")
+    if tool_type not in TOOL_TAGS:
+        return None
+    return ToolBlock(tool_type, str(_extract_tool_content(tool_type, args) or ""))
+
+
+def _parse_xlam_tool_call_json(text: str) -> Optional[ToolBlock]:
+    """Real, added 2026-09-22: find and parse xLAM's own native bare
+    JSON-array tool-call format leaked into plain assistant text. See
+    _xlam_call_to_block's own docstring for the full, real context.
+    """
+    if not isinstance(text, str) or '"name"' not in text or '"arguments"' not in text:
+        return None
+    decoder = json.JSONDecoder()
+    for match in re.finditer(r"[\[{]", text):
+        try:
+            parsed, _end = decoder.raw_decode(text[match.start():])
+        except json.JSONDecodeError:
+            continue
+        block = _xlam_call_to_block(parsed)
+        if block:
+            return block
+    return None
 
 
 def _parse_raw_openai_tool_call_json(text: str) -> Optional[ToolBlock]:
@@ -1397,6 +1475,17 @@ def parse_tool_blocks(text: str, skip_fenced: bool = False) -> List[ToolBlock]:
     # Example: {"function":{"arguments":"{\"action\":\"add\"}","name":"manage_memory"},"type":"function"}
     if not blocks:
         block = _parse_raw_openai_tool_call_json(text)
+        if block:
+            blocks.append(block)
+
+    # Pattern 4e: Salesforce xLAM-family native bare JSON-array tool-call
+    # format leaked as assistant text. Example:
+    # [{"name":"mcp__e986afd1__gev_fly_to_location","arguments":{"latitude":40.7128,"longitude":-74.006}}]
+    # Confirmed directly, live: xLAM-2-8b-fc-r produces this exact real
+    # shape under both Ollama and LM Studio -- see _xlam_call_to_block's
+    # own docstring for the full real context.
+    if not blocks:
+        block = _parse_xlam_tool_call_json(text)
         if block:
             blocks.append(block)
 
