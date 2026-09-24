@@ -43,6 +43,27 @@ def test_does_not_fire_on_stoplisted_tokens_only():
     assert detect_price_query("My CEO asked about the API") is None
 
 
+def test_does_not_fire_on_the_users_own_name_dk():
+    # Real, live-caught bug, 2026-09-24: "DK" is both the user's own
+    # real name/initials (appearing constantly in ordinary messages)
+    # and a real, valid stock ticker (Delek US Holdings). Confirmed
+    # directly, live: this exact collision silently hijacked a real,
+    # separate, load-bearing automated pipeline's entire Claude review
+    # call for 6 straight days (2026-09-19 through 09-24) -- the
+    # pipeline's own system prompt begins "You are reviewing DK's real,
+    # live brokerage account...", which also contains real price-intent
+    # keywords ("current price"), so both detection conditions were
+    # met on every single run. Not a synthetic edge case -- the exact
+    # real message text that broke in production, trimmed here.
+    real_broken_prompt = (
+        "You are reviewing DK's real, live brokerage account -- the "
+        "same kind of rung/queue review done manually. Real, hard "
+        "rules apply, including checking the real, current price "
+        "before any action."
+    )
+    assert detect_price_query(real_broken_prompt) is None
+
+
 def test_answer_price_query_formats_real_successful_lookup():
     async def _run():
         fake_result = {

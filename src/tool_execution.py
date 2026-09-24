@@ -931,11 +931,25 @@ _PRICE_QUERY_KEYWORD_RE = re.compile(
     r"\b(?:price|quote|trading at|worth|stock price)\b", re.IGNORECASE,
 )
 _BARE_TICKER_RE = re.compile(r"(?<![A-Za-z])[A-Z]{2,5}(?![A-Za-z])")
+# Real, live-caught bug fixed 2026-09-24: "DK" -- the user's own real
+# name/initials, appearing constantly in ordinary prompts and messages
+# (including this project's own automated scripts, e.g. "You are
+# reviewing DK's real, live brokerage account...") -- is ALSO a real,
+# valid stock ticker (Delek US Holdings). Confirmed directly, live: this
+# silently hijacked daily_rung_reasoning.py's entire real Claude review
+# call for 6 straight days (2026-09-19 through 09-24), returning a
+# spurious "Delek US Holdings... trading at $72.26" price quote instead
+# of running the actual portfolio review -- a real, load-bearing,
+# financial-monitoring pipeline broken by this exact detector, not a
+# hypothetical risk. It is extremely unlikely the user would ever
+# genuinely mean the ticker when writing "DK" in a message to Claude
+# (he would write "Delek" or "DK stock" explicitly to disambiguate);
+# blocking the bare 2-letter form here costs nothing real.
 _TICKER_STOPLIST = frozenset({
     "CEO", "CFO", "CTO", "USA", "ASAP", "OK", "IT", "TV", "PC", "AI",
     "US", "UK", "EU", "UN", "OMG", "LOL", "FYI", "ETA", "FAQ", "DIY",
     "API", "URL", "PDF", "CSV", "SQL", "GPU", "CPU", "RAM", "SSD",
-    "IRA", "LLC", "INC", "VP", "HR", "PR", "PM", "AM",
+    "IRA", "LLC", "INC", "VP", "HR", "PR", "PM", "AM", "DK",
 })
 
 

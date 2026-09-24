@@ -590,11 +590,20 @@ class ToolIndex:
     # false-positive -- deliberately NOT a hardcoded list of DK's own
     # current holdings (same real "unscalable, goes stale" reasoning
     # already rejected for the price-keyword fix).
+    # Real, live-caught bug fixed 2026-09-24: "DK" -- the user's own real
+    # name/initials, appearing constantly in ordinary messages -- is ALSO
+    # a real, valid stock ticker (Delek US Holdings). Confirmed directly:
+    # this exact collision (in the sibling copy of this stoplist in
+    # src/tool_execution.py) silently hijacked a real, load-bearing
+    # automated pipeline's entire chat call for 6 straight days. Added
+    # here too for the same structural reason, even though this specific
+    # copy backs the standalone /api/price-query endpoint rather than the
+    # confirmed-broken call site.
     _TICKER_STOPLIST = frozenset({
         "CEO", "CFO", "CTO", "USA", "ASAP", "OK", "IT", "TV", "PC", "AI",
         "US", "UK", "EU", "UN", "OMG", "LOL", "FYI", "ETA", "FAQ", "DIY",
         "API", "URL", "PDF", "CSV", "SQL", "GPU", "CPU", "RAM", "SSD",
-        "IRA", "LLC", "INC", "CEO", "VP", "HR", "PR", "PM", "AM",
+        "IRA", "LLC", "INC", "CEO", "VP", "HR", "PR", "PM", "AM", "DK",
     })
     _BARE_TICKER_RE = re.compile(r"(?<![A-Za-z])[A-Z]{2,5}(?![A-Za-z])")
 
