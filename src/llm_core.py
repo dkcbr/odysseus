@@ -2134,6 +2134,19 @@ async def llm_call_async(
         # Suppress thinking for qwen3/gemma4 on Ollama /v1 — same as stream_llm.
         if _is_ollama_openai_compat_url(url) and _supports_thinking(model):
             payload["think"] = False
+            # Real, added 2026-09-21: closes a real, documented gap from an
+            # earlier LoRA fine-tuning session (2026-08-07) -- confirmed via
+            # real, live upstream Ollama issues (ollama/ollama#14493, #14601,
+            # #10976) that "thinking"-family local models (qwen3, gemma,
+            # deepseek-r1, etc.) can fail to reliably stop generating after a
+            # tool call, sometimes continuing straight past the intended stop
+            # point into a fabricated continuation. The exact same stop
+            # tokens were already a proven, working mitigation for local
+            # MiniMax MLX requests (_apply_local_generation_stability below)
+            # but were never extended to this much larger, real class of
+            # local thinking models -- setdefault so an explicit, real
+            # caller-provided stop list is never silently overridden.
+            payload.setdefault("stop", ["<|im_end|>", "<|endoftext|>", "</s>"])
         if provider == "mistral" and _supports_thinking(model):
             payload["reasoning_effort"] = _MISTRAL_REASONING_EFFORT
         _apply_local_cache_affinity(payload, url, session_id)

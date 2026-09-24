@@ -169,7 +169,7 @@ BUILTIN_TOOL_DESCRIPTIONS: Dict[str, str] = {
     "manage_bg_jobs": "Inspect and control detached background `bash` jobs (the ones started with a `#!bg` marker). action='list' shows this chat's jobs (id/status/age/command); action='output' returns a job's captured output so far (check on a long-running job, or re-read a finished one); action='kill' stops a runaway job by id. Use for 'is the background job done', 'check on that job', 'show the build output', 'kill the background job', 'stop the bg task'. output/kill need a job_id from list.",
     "propose_write": "Preview a file write as a diff WITHOUT writing to disk. Returns a commit_token -- pass it to commit_write to actually apply the change. Use before writing to sensitive paths (data/agent_capabilities.json, data/app.db, data/auth.json, data/integrations.json, data/.app_key), which reject direct write_file calls.",
     "commit_write": "Apply a write previously previewed with propose_write. Requires the exact path, content, and commit_token returned by propose_write -- the token is single-use and expires after 5 minutes.",
-    "lookup_ticker": "Look up REAL, VERIFIED company identity and quote data for a stock/crypto ticker symbol via Financial Modeling Prep. Call this before stating what company a ticker represents or its price -- small/mid-cap tickers are frequently misidentified from memory (e.g. TMC, MP). Errors (no API key, ticker not found) mean tell the user real data isn't available, never guess.",
+    "lookup_ticker": "Look up REAL, VERIFIED company identity and quote data for a stock/crypto ticker symbol via Financial Modeling Prep. MANDATORY: call this before stating what company a ticker represents, its price, or any other fact about it - never answer from memory. Small and mid-cap tickers are frequently confused with unrelated companies when answered from memory (e.g. TMC has been misidentified as an unrelated medical-communications company when it is actually a deep-sea mining company; MP has been misidentified as an oil refiner when it is a rare-earth miner) - this tool exists specifically to prevent that. If the tool errors (no API key configured, ticker not found), tell the user real data isn't available rather than guessing.",
     "restart_service": "Restart one of 4 real, allowlisted, user-level host services (Whisper speech-to-text: jarvis-whisper-bridge.service, jarvis-whisper-server-container.service, jarvis-whisper-server.service; Piper text-to-speech: jarvis-piper-server.service) via a real, separate, narrow, host-level restart agent. Use if a voice-pipeline service appears hung, unresponsive, or is reported as failing -- not for restarting Odysseus itself or any container/system-level service.",
     "read_systemd_logs": "Read recent, real log entries for any real, existing systemd service on the host (broad scope -- not limited to the voice-pipeline services restart_service covers). Use to diagnose why any real service, including Odysseus/container/system-level ones, is failing, hung, or misbehaving. Read-only, never modifies or restarts anything.",
     "service_status": "Read the current, real systemd state (active/failed/running, PID, memory, restart count, last start time) for any real, existing service on the host -- same broad scope as read_systemd_logs. Use to check a service's health before deciding whether it actually needs restart_service or deeper log inspection. Read-only, never modifies anything.",
@@ -386,6 +386,20 @@ class ToolIndex:
 
     # Keyword hints: if the query mentions these words, force-include the tools.
     _KEYWORD_HINTS = {
+        # Real, added 2026-09-20: the new gods_eye_view MCP server (5
+        # tools, registered same session) was found live-failing this
+        # exact class of bug -- a real user query ("fly the God's Eye
+        # View globe to Rio de Janeiro and turn on the flights layer")
+        # never made the top-k=8 RAG cutoff at all, and the model
+        # (gemma4-e2b-longctx) correctly reported it had no relevant
+        # tools rather than hallucinating one. Same root cause and same
+        # fix shape as the earlier get_quotes force-include gap.
+        frozenset({"globe", "god's eye", "gods eye", "god's eye view",
+                   "gev", "fly to", "zoom in on", "outline", "annotate the map",
+                   "aircraft layer", "flights layer", "vessels layer",
+                   "satellites layer", "cctv layer", "military layer"}):
+            {"gev_fly_to_location", "gev_set_layer_visibility",
+             "gev_track_entity", "gev_annotate_map", "gev_clear_annotations"},
         # NOTE: "tell" was removed from this set. It fired on any "tell me ..."
         # request (e.g. "visit <url> and tell me the title"), force-including the
         # whole email toolset and crowding out the relevant tools — the model then
@@ -555,6 +569,58 @@ class ToolIndex:
             {"create_document", "edit_document", "update_document"},
     }
 
+    # Real, added 2026-09-16, price-query keyword force-include. Ticker
+    # symbols deliberately NOT included here (an earlier proposal suggested
+    # hardcoding a few, e.g. "aapl"/"msft"/"tsla") -- DK holds many more
+    # tickers than any short, static list could cover, and it would need
+    # manual updates every time a new position is opened. Matched on
+    # word boundaries, same convention as _KEYWORD_HINTS below.
+    _PRICE_QUERY_RE = re.compile(
+        r"\b(?:price|quote|trading at|worth|stock price)\b", re.I,
+    )
+    # Real, added 2026-09-16: bare-ticker detection, a real, separate,
+    # narrower gap found directly by regex-testing the price-keyword
+    # pattern above against realistic phrasings the previous evening --
+    # "AAPL" alone matched none of those keywords at all. Case-SENSITIVE
+    # on purpose (not re.I): tickers are conventionally typed in all-caps
+    # when someone means the symbol specifically ("AAPL", not "aapl" or
+    # a normal lowercase sentence), and dropping that signal would make
+    # this fire on ordinary words constantly. Still needs a stoplist for
+    # real, common all-caps acronyms/words that would otherwise
+    # false-positive -- deliberately NOT a hardcoded list of DK's own
+    # current holdings (same real "unscalable, goes stale" reasoning
+    # already rejected for the price-keyword fix).
+    _TICKER_STOPLIST = frozenset({
+        "CEO", "CFO", "CTO", "USA", "ASAP", "OK", "IT", "TV", "PC", "AI",
+        "US", "UK", "EU", "UN", "OMG", "LOL", "FYI", "ETA", "FAQ", "DIY",
+        "API", "URL", "PDF", "CSV", "SQL", "GPU", "CPU", "RAM", "SSD",
+        "IRA", "LLC", "INC", "CEO", "VP", "HR", "PR", "PM", "AM",
+    })
+    _BARE_TICKER_RE = re.compile(r"(?<![A-Za-z])[A-Z]{2,5}(?![A-Za-z])")
+
+    def _get_quotes_tool_names(self) -> Set[str]:
+        """Real, direct scan of currently-indexed tool names for any
+        real, live `__get_quotes` tool, by suffix rather than a static,
+        hardcoded qualified name -- confirmed directly last night that a
+        static entry (e.g. "mcp__74167655__get_quotes") would silently
+        break if that server is ever re-registered under a new id.
+        Deliberately not cached: server ids can change between calls in
+        a long-running process, and this is a cheap in-memory metadata
+        scan, not a real network/embedding call."""
+        names = set()
+        for lane in self._lanes:
+            try:
+                if lane.count() == 0:
+                    continue
+                data = lane.collection.get(include=["metadatas"])
+                for meta in data.get("metadatas") or []:
+                    name = meta.get("tool_name", "")
+                    if name.endswith("__get_quotes"):
+                        names.add(name)
+            except Exception as e:
+                logger.warning("get_quotes suffix scan failed in %s lane: %s", lane.name, e)
+        return names
+
     def get_tools_for_query(
         self, query: str, k: int = 8, always_include: Optional[Set[str]] = None
     ) -> Set[str]:
@@ -562,6 +628,28 @@ class ToolIndex:
         base = set(always_include or ALWAYS_AVAILABLE)
         retrieved = self.retrieve(query, k=k)
         base.update(retrieved)
+        # Real, added 2026-09-16: force-include any real, live `get_quotes`
+        # tool for price-intent queries, regardless of RAG top-K ranking.
+        # Confirmed directly the same evening: even after fixing a real
+        # description-indexing bug that had this tool ranking 210th of 370
+        # (a negative similarity score), it still only reached 18th for a
+        # plain "price of AAPL" query -- genuinely better, but still
+        # outside the real k=8 cutoff used above. RAG ranking will keep
+        # fluctuating as more finance-domain tools/servers get added, so
+        # this deterministic override, not a retrieval/ranking tweak, is
+        # the real, reliable fix for this specific tool.
+        if self._PRICE_QUERY_RE.search(query):
+            base.update(self._get_quotes_tool_names())
+        # Real, added 2026-09-16, same session: separate, narrower gap
+        # found directly (not assumed) by regex-testing the price-keyword
+        # check above against realistic phrasings -- a bare ticker mention
+        # alone ("AAPL") matches none of those keywords. Case-sensitive
+        # match against real all-caps tokens, filtered through a real
+        # stoplist of common acronyms/words to reduce false positives.
+        for token in self._BARE_TICKER_RE.findall(query):
+            if token not in self._TICKER_STOPLIST:
+                base.update(self._get_quotes_tool_names())
+                break
         # Keyword-based force-include for common intents. Match on word
         # boundaries, not raw substrings, so short hints like "fix", "line",
         # "serve", "reply" or "unread" don't fire inside unrelated words
@@ -630,6 +718,14 @@ class ToolIndex:
             base.add("manage_contact")
         if contact_only_signal and "manage_contact" in base:
             base.discard("manage_memory")
+        # Real, "Variant E" of a designed disambiguation experiment
+        # (remove WorldWideView's competing fly_to tool when God's Eye
+        # View is named explicitly) was implemented, tested live via
+        # 8 real fly-action trials, and found to make things WORSE:
+        # 8/8 resulted in no tool call at all, worse than the 25%
+        # baseline. Reverted 2026-09-21 to isolate the next variant
+        # (tool renaming) cleanly, rather than testing it on top of a
+        # confirmed-worse prior change.
         return base
 
 

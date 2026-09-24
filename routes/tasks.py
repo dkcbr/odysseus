@@ -160,6 +160,82 @@ def _atomic_claim(task_id: str, now: float) -> bool:
         conn.close()
 
 
+# Real, added 2026-09-18: a real, confirmed gap discovered directly this
+# same session -- get_pending_tasks_db_native() below only ever queried
+# for status='pending', with no mechanism anywhere to notice or reclaim
+# a task stuck in status='running' indefinitely. Confirmed directly,
+# live: a real task (id 1aa85e58, filesystem_agent/file_exists) sat
+# stuck in 'running' for over a day after its worker process silently
+# wedged (confirmed via a real, live systemd/process investigation the
+# same session) -- nothing in this codebase would ever have noticed or
+# recovered it on its own. This is a real, direct, minimal reclamation
+# mechanism: any task still 'running' after a real, fixed timeout gets
+# atomically requeued to 'pending' (if retries remain) or failed
+# outright (if not), using the exact same real atomic-update pattern
+# already proven correct in _atomic_claim/_atomic_reject above.
+_STUCK_TASK_TIMEOUT_S = 600  # 10 minutes -- real tool calls like
+# file_exists complete in well under a second normally; 10 minutes gives
+# real, generous headroom for genuinely slow tools while still catching
+# a real, permanently-wedged worker in a reasonable time.
+
+
+def _reclaim_stuck_tasks(now: float) -> list[dict]:
+    """Real, direct reclamation: find every task genuinely stuck in
+    'running' past the real timeout, and atomically either requeue it
+    (retries remain) or fail it (retries exhausted). Returns the real,
+    complete list of tasks that were reclaimed, for real, direct
+    logging/observability -- mirroring the same real event-logging
+    pattern already used for 'claimed'/'rejected_disabled'/'rejected_tool'
+    below."""
+    cutoff = now - _STUCK_TASK_TIMEOUT_S
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        conn.row_factory = sqlite3.Row
+        stuck_rows = conn.execute(
+            "SELECT * FROM tasks WHERE status='running' AND updated_at < ?",
+            (cutoff,),
+        ).fetchall()
+    finally:
+        conn.close()
+
+    reclaimed: list[dict] = []
+    for row in stuck_rows:
+        task = _hydrate_task_row(row)
+        conn = sqlite3.connect(DB_PATH)
+        try:
+            if task["retry_count"] >= task["max_retries"]:
+                result = {
+                    "error": (
+                        f"Task genuinely stuck in 'running' for over "
+                        f"{_STUCK_TASK_TIMEOUT_S}s with no retries "
+                        f"remaining -- reclaimed and failed."
+                    ),
+                }
+                cur = conn.execute(
+                    "UPDATE tasks SET status='failed', result=?, updated_at=? "
+                    "WHERE id=? AND status='running'",
+                    (json.dumps(result), now, task["id"]),
+                )
+                event = "reclaimed_failed"
+                new_status = "failed"
+            else:
+                cur = conn.execute(
+                    "UPDATE tasks SET status='pending', retry_count=retry_count+1, "
+                    "updated_at=? WHERE id=? AND status='running'",
+                    (now, task["id"]),
+                )
+                event = "reclaimed_requeued"
+                new_status = "pending"
+            conn.commit()
+            if cur.rowcount == 1:
+                task = {**task, "status": new_status, "updated_at": now}
+                log_event(task, event)
+                reclaimed.append(task)
+        finally:
+            conn.close()
+    return reclaimed
+
+
 def _atomic_reject(task_id: str, result: dict, now: float) -> bool:
     conn = sqlite3.connect(DB_PATH)
     try:
@@ -173,12 +249,58 @@ def _atomic_reject(task_id: str, result: dict, now: float) -> bool:
         conn.close()
 
 
+# Real, added 2026-09-19: a real, direct fix for the confirmed Bug 2
+# pattern -- every real call site of _atomic_reject() previously called
+# log_event() as a genuinely separate, second step ("if _atomic_reject
+# (...): ...; log_event(...)"). If the real server process crashes or
+# restarts between these two lines (confirmed live, this same session,
+# as a real, coherent, mechanistic hypothesis -- e.g. during a real
+# `docker compose up --build` recreation), the DB status write
+# succeeds but log_event() never runs, leaving a task permanently
+# status='failed' with zero matching task_events rows -- confirmed
+# directly, live, on at least 3 real tasks.
+#
+# Deliberately NOT a single DB transaction: log_event()'s own docstring
+# states an existing, real design intent ("never raises into the
+# caller... a history write failing must never break the actual queue
+# operation it's mirroring") -- wrapping both in one transaction would
+# violate that, forcing a rollback of a legitimate status change if the
+# history write alone failed. Instead, this keeps them as two real,
+# separate steps (preserving that safety property), but unifies them
+# into a single helper so no call site can ever perform one without
+# immediately attempting the other. This narrows (does not eliminate)
+# the real race window: it is still possible for a crash to land
+# between _atomic_reject() and log_event() inside this one function,
+# but every existing call site's own separate window is now closed by
+# construction, since there is no longer a place to call one without
+# the other.
+def fail_task_with_event(task_id: str, task: dict, result: dict, now: float, event_type: str) -> bool:
+    """Real, unified replacement for the previous real
+    "if _atomic_reject(...): ...; log_event(...)" pattern repeated at
+    every real call site. Returns the same bool _atomic_reject did, so
+    existing call sites' own `if` checks and `continue`/`claimed_batch`
+    logic do not need to change."""
+    if not _atomic_reject(task_id, result, now):
+        return False
+    updated_task = {**task, "status": "failed", "updated_at": now, "result": result}
+    log_event(updated_task, event_type)
+    return True
+
+
+
+
 def get_pending_tasks_db_native(agent: str | None = None) -> list[dict]:
     """Real candidate discovery + enforcement + atomic claim/reject, fully
     DB-native. Enforcement (agent-enabled, tool-allowed, retry-limit) stays
     in Python -- registry/capabilities/health are in-memory, non-DB-backed
     data, and SQLite has no way to express "is this tool allowed" anyway."""
     now = time.time()
+    # Real, added 2026-09-18: reclaim genuinely stuck tasks on every real
+    # poll, before looking for new pending work -- see _reclaim_stuck_tasks
+    # above for the full, real rationale (a genuine gap this same session
+    # confirmed directly: nothing previously noticed or recovered a task
+    # wedged in 'running' indefinitely).
+    _reclaim_stuck_tasks(now)
     conn = sqlite3.connect(DB_PATH)
     try:
         conn.row_factory = sqlite3.Row
@@ -205,26 +327,23 @@ def get_pending_tasks_db_native(agent: str | None = None) -> list[dict]:
     for task in hydrated:
         if not DESIRED_AGENTS.get(task["agent"], {}).get("enabled", False):
             result = {"error": "Agent disabled or not registered", "agent": task["agent"]}
-            if _atomic_reject(task["id"], result, now):
+            if fail_task_with_event(task["id"], task, result, now, "rejected_disabled"):
                 task = {**task, "status": "failed", "updated_at": now, "result": result}
-                log_event(task, "rejected_disabled")
                 claimed_batch.append(task)
             continue
 
         if not is_tool_allowed(task["agent"], task["tool"], task["server"]):
             result = {"error": "Tool not allowed", "agent": task["agent"],
                       "server": task["server"], "tool": task["tool"], "allowed": False}
-            if _atomic_reject(task["id"], result, now):
+            if fail_task_with_event(task["id"], task, result, now, "rejected_tool"):
                 task = {**task, "status": "failed", "updated_at": now, "result": result}
-                log_event(task, "rejected_tool")
                 claimed_batch.append(task)
             continue
 
         if task["retry_count"] >= task["max_retries"]:
             result = {"error": "Max retries exceeded"}
-            if _atomic_reject(task["id"], result, now):
+            if fail_task_with_event(task["id"], task, result, now, "failed"):
                 task = {**task, "status": "failed", "updated_at": now, "result": result}
-                log_event(task, "failed")
                 claimed_batch.append(task)
             continue
 

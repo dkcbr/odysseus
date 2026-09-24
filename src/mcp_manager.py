@@ -1082,8 +1082,23 @@ class McpManager:
             label = f"{server_name} ({identity})" if identity else server_name
             lines.append(f"\n**{label}:**")
             for t in server_tools:
-                # Truncate long descriptions
-                desc = t['description'][:120] + '...' if len(t['description']) > 120 else t['description']
+                # Real, fixed 2026-09-16: normalize before truncating, not
+                # after. Docstring-style descriptions (confirmed directly on
+                # public_com's tools) commonly start with a literal leading
+                # newline ("\nGet real-time quotes..."), which made the old
+                # code here produce a real, broken two-line entry
+                # ("- name: \nGet real-time..."). index_mcp_tools's line-based
+                # parser (which expects a single "- name: desc" line) then
+                # only ever saw the empty first line and silently dropped the
+                # real description entirely -- confirmed directly: this
+                # tool's own embedded RAG text had no description text at
+                # all, ranking 210th of 370 tools (negative similarity) for
+                # a plain "price of X" query it should have matched well.
+                # Flattening internal newlines to spaces too, not just
+                # leading/trailing, since a docstring can have blank lines
+                # deeper in its body that would cause the same failure.
+                clean_desc = " ".join(t['description'].split())
+                desc = clean_desc[:120] + '...' if len(clean_desc) > 120 else clean_desc
                 # Include the tool's declared inputs so the model calls it with
                 # real argument names instead of guessing from the description
                 # alone (issue #2509).

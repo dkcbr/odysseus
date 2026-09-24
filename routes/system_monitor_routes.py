@@ -62,6 +62,36 @@ def _real_gpu_metrics() -> dict | None:
 def setup_system_monitor_routes() -> APIRouter:
     router = APIRouter(prefix="/api/system-monitor", tags=["system-monitor"])
 
+    def _real_cpu_temp_c() -> float | None:
+        """Real, added 2026-09-17: CPU temperature to match the existing
+        GPU temperature display. Confirmed directly, live, that
+        psutil.sensors_temperatures() is already accessible from inside
+        this container (no special passthrough needed, unlike GPU's
+        nvidia-smi) -- real hardware sensors: 'k10temp' (this host's real
+        AMD Ryzen CPU), 'nvme', 'asusec' (motherboard). Prefers 'Tctl'
+        (AMD's standard, real overall-CPU-temp label) when present, since
+        this is what most monitoring tools report as "the" CPU temp for
+        AMD systems -- falls back to Intel's 'coretemp'/'Package id 0'
+        label, then to any first available reading, so this doesn't
+        silently break on a different host/CPU vendor.
+        """
+        try:
+            temps = psutil.sensors_temperatures()
+        except (AttributeError, OSError):
+            return None
+        if not temps:
+            return None
+        for entry in temps.get("k10temp", []):
+            if entry.label == "Tctl":
+                return round(entry.current, 1)
+        for entry in temps.get("coretemp", []):
+            if entry.label == "Package id 0":
+                return round(entry.current, 1)
+        for readings in temps.values():
+            if readings:
+                return round(readings[0].current, 1)
+        return None
+
     @router.get("/metrics")
     def get_metrics(request: Request):
         require_admin(request)
@@ -77,6 +107,7 @@ def setup_system_monitor_routes() -> APIRouter:
                 "percent": cpu_percent,
                 "per_core_percent": cpu_per_core,
                 "core_count": psutil.cpu_count(logical=True),
+                "temperature_c": _real_cpu_temp_c(),
             },
             "memory": {
                 "percent": mem.percent,

@@ -19,19 +19,62 @@ class TickerLookupTool:
     async def execute(self, content: str, ctx: dict) -> dict:
         raw = content.strip()
         symbol = raw
+        parsed: Any = None
         if raw.startswith("{"):
             try:
                 parsed = json.loads(raw)
                 if isinstance(parsed, dict):
-                    symbol = str(parsed.get("symbol") or parsed.get("ticker") or "").strip()
+                    # Real, direct fix (found live, 2026-09-16): a real
+                    # model call sent {"symbols": ["SPCX"], "instrument_type":
+                    # "EQUITY"} -- plural "symbols" as a list, plus an
+                    # unrequested "instrument_type" field. The schema itself
+                    # (tool_schemas.py) correctly specifies singular
+                    # "symbol", confirmed directly -- this was genuinely the
+                    # model deviating from its own correct schema, not a
+                    # schema-design problem. Since the error message
+                    # previously gave no indication of what shape was
+                    # actually wrong, the model kept repeating the same
+                    # malformed call verbatim until the loop-breaker forced
+                    # a stop, then hallucinated a price. Real, lenient fix:
+                    # accept "symbols" (a real, plural array) too, taking
+                    # its first real element, so a plausible near-miss
+                    # still succeeds instead of looping.
+                    raw_symbol = parsed.get("symbol") or parsed.get("ticker")
+                    if not raw_symbol:
+                        symbols_list = parsed.get("symbols")
+                        if isinstance(symbols_list, list) and symbols_list:
+                            raw_symbol = symbols_list[0]
+                    symbol = str(raw_symbol or "").strip()
             except json.JSONDecodeError:
                 symbol = ""
         if not symbol:
             symbol = raw.split("\n")[0].strip()
         symbol = symbol.upper()
         if not symbol or any(c in symbol for c in (" ", "\t", "\n")):
+            # Real, self-correcting error message (added 2026-09-16,
+            # replacing a generic message that gave the model no way to
+            # tell what it did wrong): explicitly echoes back the real
+            # keys actually received, so a model whose call was rejected
+            # can genuinely self-correct on retry instead of repeating the
+            # same malformed call and eventually triggering the
+            # loop-breaker/hallucinated-fallback failure mode confirmed
+            # live this same session.
+            received_keys = (
+                sorted(parsed.keys()) if isinstance(parsed, dict) else None
+            )
+            received_desc = (
+                f"keys: {', '.join(received_keys)}" if received_keys
+                else f"raw content: {raw[:80]!r}"
+            )
             return {
-                "error": "lookup_ticker: provide a single ticker symbol, e.g. KTOS",
+                "error": (
+                    "lookup_ticker error: expected an object with a single "
+                    'field {"symbol": "<TICKER>"} but received the '
+                    f"{received_desc}. Call this tool again using the "
+                    'correct schema, e.g. {"symbol": "SPCX"} -- only one '
+                    "ticker symbol is allowed; arrays, plural keys, or "
+                    "additional fields will be rejected."
+                ),
                 "exit_code": 1,
             }
 

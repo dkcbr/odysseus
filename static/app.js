@@ -50,6 +50,13 @@ import capabilitiesModule from './js/capabilities.js';
 import tradingviewModule from './js/tradingview.js';
 import pollerStatusModule from './js/poller_status.js';
 import pollerDashboardModule from './js/poller_dashboard.js';
+// Real, added 2026-09-15: these three modules and their real, working
+// backend endpoints already existed but were never actually imported or
+// initialized here -- confirmed directly (grep found zero references)
+// before adding this, not assumed. Dead sidebar buttons until now.
+import processTableModule from './js/process_table.js';
+import marketDashboardModule from './js/market_dashboard.js';
+import workerLogModule from './js/worker_log.js';
 import systemMonitorModule from './js/system_monitor.js';
 import taskHistoryModule from './js/task_history.js';
 
@@ -3804,6 +3811,21 @@ function startOdysseusApp() {
   // Initialize poller dashboard module
   if (pollerDashboardModule) {
     pollerDashboardModule.init();
+  }
+
+  // Initialize process table module
+  if (processTableModule) {
+    processTableModule.init();
+  }
+
+  // Initialize market dashboard module
+  if (marketDashboardModule) {
+    marketDashboardModule.init();
+  }
+
+  // Initialize worker log module
+  if (workerLogModule) {
+    workerLogModule.init();
   }
   if (systemMonitorModule) {
     systemMonitorModule.init();

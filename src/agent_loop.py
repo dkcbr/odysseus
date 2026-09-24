@@ -9,6 +9,7 @@ The LLM decides when to use tools by writing fenced code blocks.
 import asyncio
 import collections
 import json
+import os
 import re
 import time
 import logging
@@ -407,7 +408,9 @@ _AGENT_RULES = """\
 - After a tool succeeds, do not second-guess it; reply with one short confirmation unless more work remains.
 - After a tool fails, retry with a concrete fix or state what is blocking you.
 - Finish only when the user's concrete request is actually done, or clearly state that you are blocked.
+- Do not take actions beyond what the user explicitly asked for. If asked to enable one specific thing (e.g. one layer, one setting), do exactly that and stop -- do not also enable other, unrequested options, and do not repeat an action that already succeeded.
 - User identity facts/preferences ("my name is X", "call me X", "I live in X") use `manage_memory`, not contacts.
+- Real, added 2026-09-22: only save a memory via `manage_memory` when the user directly states a fact or preference about themselves, in their own words, in the current message. Never infer or save a memory based on a pattern you notice across multiple requests, repeated tool arguments, coordinates, test inputs, or how often an action has been requested -- those are not user preferences unless the user explicitly says so. Confirmed directly, live: this exact mistake ("the user targets latitude X, longitude Y", "the user frequently uses <tool>") has repeatedly poisoned memory and caused wrong, stale defaults on later, different requests.
 """
 
 _API_AGENT_RULES = """\
@@ -421,7 +424,9 @@ _API_AGENT_RULES = """\
 - After a tool succeeds, do not second-guess it; reply with one short confirmation unless more work remains.
 - After a tool fails, retry with a concrete fix or state what is blocking you.
 - Finish only when the user's concrete request is actually done, or clearly state that you are blocked.
+- Do not take actions beyond what the user explicitly asked for. If asked to enable one specific thing (e.g. one layer, one setting), do exactly that and stop -- do not also enable other, unrequested options, and do not repeat an action that already succeeded.
 - User identity facts/preferences ("my name is X", "call me X", "I live in X") use `manage_memory`, not contacts.
+- Real, added 2026-09-22: only save a memory via `manage_memory` when the user directly states a fact or preference about themselves, in their own words, in the current message. Never infer or save a memory based on a pattern you notice across multiple requests, repeated tool arguments, coordinates, test inputs, or how often an action has been requested -- those are not user preferences unless the user explicitly says so. Confirmed directly, live: this exact mistake ("the user targets latitude X, longitude Y", "the user frequently uses <tool>") has repeatedly poisoned memory and caused wrong, stale defaults on later, different requests.
 """
 
 _LINK_RULES = """\
@@ -530,6 +535,25 @@ _WORKSPACE_TERMINUS_TOOLS = (
     | {"manage_skills", "ask_teacher", "web_search", "web_fetch", "ask_user", "update_plan"}
 )
 
+# Real, added 2026-09-16 (deliberately held from a late-night 09-13/09-15
+# session for a fresh start, per that session's own real conclusion):
+# extended-hours pricing awareness for the external `get_quotes` MCP tool.
+# Real, checked and confirmed directly before writing this: external MCP
+# tools use qualified names (`mcp__{server_id}__{tool_name}`) with a
+# server_id that could change if the server is ever re-registered, so a
+# static _DOMAIN_TOOL_MAP entry (built for fixed built-in tool names) isn't
+# robust here -- matched by suffix instead, inside this shared function,
+# rather than a separate check bolted onto _assemble_prompt, since both the
+# compact and non-compact paths already call this same function.
+_EXTENDED_HOURS_PRICE_RULE = (
+    "When using `get_quotes`, do not assume `last` represents a "
+    "regular-session price -- it may reflect extended-hours trading. "
+    "Surface this uncertainty when answering price questions, without "
+    "attempting timestamp/timezone inference or assuming fields like "
+    "`extended_price`/`market_status` exist."
+)
+
+
 def _domain_rules_for_tools(tool_names: set) -> list[str]:
     names = set(tool_names or set())
     rules = []
@@ -538,6 +562,8 @@ def _domain_rules_for_tools(tool_names: set) -> list[str]:
             rules.append(_DOMAIN_RULES[domain])
     if names & {"create_session", "list_sessions", "manage_session", "manage_documents", "manage_notes", "manage_calendar", "manage_tasks", "manage_skills", "manage_research"}:
         rules.append(_LINK_RULES)
+    if any(n.endswith("__get_quotes") for n in names):
+        rules.append(_EXTENDED_HOURS_PRICE_RULE)
     return rules
 
 # Each tool section is keyed by tool name(s) it covers.
@@ -1986,6 +2012,50 @@ _FAKE_SUCCESS_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Real, added 2026-09-18: a real, direct, model-agnostic counterpart to
+# the existing _FAKE_SUCCESS_RE detector above -- confirmed directly,
+# live, this same session: gemma4-e2b-longctx answered "does
+# /home/dk/.bashrc exist?" with a confident, factually WRONG claim ("the
+# file does not exist") while genuinely never having called any real
+# filesystem tool at all (no tool_events this turn). Directly confirmed
+# the existing _FAKE_SUCCESS_RE mechanism does not cover this: it is
+# scoped only to _ody_qwen_finetune_model (models whose name starts with
+# "odysseus-qwen3"), which gemma4-e2b-longctx does not match. This is
+# real, deliberately logging-only (matching the pattern this observer
+# design was scoped to, and the same non-invasive design used throughout
+# the FrontierAgent observer suite built earlier this same night) --
+# it does NOT rewrite or block the response, only logs a real, direct
+# warning so this pattern's real frequency can be tracked before any
+# behavior-changing fix is considered.
+#
+# Real, direct bugs found and fixed before deployment via a real, live
+# unit test against the exact confirmed case: the query-regex originally
+# required "does/do", but the real query used "check if" -- broadened to
+# also match check/verify/is; the claim-regex originally matched bare
+# "exists" anywhere, causing a real false positive on unrelated text
+# ("rain exists in most models") -- tightened to require the claim
+# phrase to be genuinely anchored near a file/path/folder/directory
+# word, matching the real, confirmed phrasing ("the file ... does not
+# exist").
+_FILESYSTEM_QUERY_RE = re.compile(
+    r"\b(does|do|check|verify|confirm|is)\b.{0,40}\b(file|folder|directory|path)\b.{0,30}\bexist",
+    re.IGNORECASE,
+)
+_FILESYSTEM_CLAIM_RE = re.compile(
+    r"\b(file|folder|directory|path)\b.{0,60}\b(exists?|does not exist|"
+    r"doesn'?t exist|not found|no such file|is (?:not )?present)\b",
+    re.IGNORECASE,
+)
+
+
+
+def _looks_like_filesystem_query(text: str) -> bool:
+    return bool(_FILESYSTEM_QUERY_RE.search(text or ""))
+
+
+def _looks_like_filesystem_claim(text: str) -> bool:
+    return bool(_FILESYSTEM_CLAIM_RE.search(text or ""))
+
 
 def _looks_like_destructive_request(text: str) -> bool:
     return bool(_DESTRUCTIVE_REQUEST_RE.search(text or ""))
@@ -3261,6 +3331,19 @@ async def stream_agent_loop(
     _t0 = time.time()
     _needs_admin = _detect_admin_intent(messages)
     _last_user = _extract_last_user_message(messages)
+    # Real, attempted 2026-09-17, reverted same session: a deterministic
+    # price-query interceptor (pre-fetch lookup_ticker, inject as context)
+    # was built here to fix confirmed unreliable model routing for price
+    # queries. Direct, repeated live testing found it fired inconsistently
+    # -- same code, same single worker process (confirmed only one),
+    # same exact query, sometimes entered this block, sometimes silently
+    # didn't, with zero exception raised either way. Root cause of the
+    # intermittency itself was NOT found (ruled out: stale build, log
+    # buffer/time-window visibility, multi-worker routing) before the
+    # decision was made to stop chasing it -- a non-deterministic
+    # "deterministic" fix defeats its own purpose. See jarvis-todo.md for
+    # the full investigation and the decision to pursue a simpler,
+    # non-agent-loop path for price queries instead.
     _ody_qwen_finetune_model = (model or "").lower().startswith("odysseus-qwen3")
     # Real, added 2026-08-28: confirmed live, across multiple independent
     # real agent trials, that this specific ticker-lookup LoRA sometimes
@@ -4051,6 +4134,62 @@ async def stream_agent_loop(
     # using tools — i.e. it was cut off, not finished. Drives a "Continue" event
     # so the user can resume instead of the turn silently stalling.
     _exhausted_rounds = False
+
+    # Real, added 2026-09-22: caps exact-duplicate tool calls (same tool,
+    # same arguments) within one real agent-loop request. Confirmed
+    # directly, live: qwen2.5:7b repeatedly re-toggled the same GEV layer
+    # (e.g. "ais-live-vessels") 6+ times in one real run, and separately
+    # toggled unrequested layers well beyond what the user asked for --
+    # a prompt-level rule addition was tried first and did not change
+    # this behavior across three real trials (0/16/21 calls). This is a
+    # deliberately narrow, code-level backstop: it only blocks an EXACT
+    # repeat of a call already made successfully this turn, not "was this
+    # tool/argument combination reasonable to call at all" -- that
+    # broader question is a real, separate, harder problem this does not
+    # attempt to solve.
+    _ody_seen_tool_calls: set = set()
+    # Real, added 2026-09-22: hard cap on total calls to any one
+    # tool within a turn, on top of the exact-duplicate blocker
+    # above. Confirmed directly, live: blocking exact duplicates
+    # alone did not stop the excess -- the model just tried
+    # different, still-unrequested layers instead (satellites,
+    # earthquakes, airspace, aircraft, ships), reaching 21 total
+    # calls in one real trial. 3 gives real headroom for a
+    # genuine multi-layer request while stopping runaway cases.
+    _ody_tool_call_counts: dict = {}
+    # Real, fixed 2026-09-22: this MUST match the real, full,
+    # MCP-prefixed tool_type seen at runtime (e.g.
+    # "mcp__e986afd1__gev_set_layer_visibility"), not the bare
+    # tool name -- confirmed directly, live, via debug logging,
+    # that the bare-name version below NEVER matched at all,
+    # meaning this entire cap mechanism silently did nothing
+    # since it was first written. Real, known fragility: this
+    # hardcoded server id ("e986afd1") breaks silently if the
+    # gods_eye_view MCP server is ever re-registered with a new one.
+    _ody_CAPPED_TOOLS = {"mcp__e986afd1__gev_set_layer_visibility": 3}
+    # Real, added 2026-09-22: confirmed directly, live, that
+    # disabling a capped tool for future rounds alone is not
+    # enough -- the model kept trying anyway (reaching round 16+,
+    # hitting the connection timeout still looping) rather than
+    # accepting the text instruction or the disabled schema. This
+    # flag forces the whole turn to end the round a cap is first
+    # hit, mirroring the existing real "budget_hit"/"_awaiting_user"
+    # break pattern already used elsewhere in this same loop.
+    _ody_force_stop_turn = False
+    # Real, added 2026-09-22: separate, general safeguard from the
+    # per-tool cap above. Confirmed directly, live: a real trial
+    # produced 20 straight rounds of gev_fly_to_location calls that
+    # ALL failed validation (null/malformed arguments every time,
+    # including the model echoing its own prior error text -- the
+    # literal string "DUPLICATE" -- back as a location query). Since
+    # the per-tool cap only increments on real SUCCESS, it never
+    # engaged at all here -- the count stayed at 0 the whole time.
+    # This tracks consecutive FAILURES across any/all tools, reset
+    # on any real success, and force-stops the turn once it gets
+    # unreasonably high -- independent of which specific tool is
+    # failing.
+    _ody_consecutive_failures = 0
+    _ODY_MAX_CONSECUTIVE_FAILURES = 5
 
     for round_num in range(1, max_rounds + 1):
         round_response = ""
@@ -4890,6 +5029,43 @@ async def stream_agent_loop(
                 _ody_notes_finetune_mode
                 and block.tool_type in {"manage_notes", "manage_calendar", "manage_tasks"}
             )
+            # Real, added 2026-09-22: normalize (tool, arguments) into a
+            # stable key -- confirmed directly the same real repeated call
+            # sometimes arrives with JSON keys in a different order (e.g.
+            # {"layerId":..,"enabled":..} vs {"enabled":..,"layerId":..}),
+            # so a raw string compare alone would miss real duplicates.
+            try:
+                _ody_call_key = (block.tool_type, json.dumps(json.loads(block.content), sort_keys=True))
+            except Exception:
+                _ody_call_key = (block.tool_type, block.content.strip())
+            _ody_is_dupe = _ody_call_key in _ody_seen_tool_calls
+            _ody_cap = _ody_CAPPED_TOOLS.get(block.tool_type)
+            _ody_over_cap = (
+                _ody_cap is not None
+                and _ody_tool_call_counts.get(block.tool_type, 0) >= _ody_cap
+            )
+            # Real, fixed 2026-09-22: this must be independent of the
+            # if/elif messaging chain below. Confirmed directly, live,
+            # that the original version -- setting this only inside the
+            # "elif _ody_over_cap" branch -- almost never actually fired,
+            # because a call that is both over-cap AND an exact duplicate
+            # (the common real case once a model starts repeating failed
+            # attempts) always hit the earlier "elif _ody_is_dupe" branch
+            # first, so this code was unreachable in that case. Real,
+            # observed result of that bug: a live trial reached round 10
+            # with a repeatedly-blocked-as-duplicate call that was ALSO
+            # over cap the whole time, without this ever triggering --
+            # the turn only ended when Odysseus's separate, pre-existing
+            # max_rounds/round-exhaustion limit finally cut it off, not
+            # this mechanism. Rather than leaving the tool available and
+            # rejecting it every time, disable it for future rounds (the
+            # real, existing disabled_tools set already used to rebuild
+            # the schema list each round) and force the whole turn to
+            # end, regardless of whether this specific call also happens
+            # to be a duplicate.
+            if _ody_over_cap:
+                disabled_tools.add(block.tool_type)
+                _ody_force_stop_turn = True
             if tool_policy and tool_policy.blocks(block.tool_type) and not _ody_clamped_tool_allowed:
                 desc = f"{block.tool_type}: BLOCKED"
                 result = {
@@ -4898,6 +5074,30 @@ async def stream_agent_loop(
                     "blocked": True,
                 }
                 logger.info("Tool blocked before start by policy: %s", block.tool_type)
+            elif _ody_is_dupe:
+                desc = f"{block.tool_type}: DUPLICATE"
+                result = {
+                    "error": (
+                        f"Skipped: this exact {block.tool_type} call (same arguments) already "
+                        "succeeded earlier this turn. If you need to do something different, "
+                        "use different arguments; otherwise this action is already done."
+                    ),
+                    "exit_code": 1,
+                    "blocked": True,
+                }
+                logger.info("Tool call skipped as an exact duplicate: %s", block.tool_type)
+            elif _ody_over_cap:
+                desc = f"{block.tool_type}: CALL_LIMIT_REACHED"
+                result = {
+                    "error": (
+                        f"Skipped: {block.tool_type} has already been called {_ody_cap} times "
+                        "this turn. Stop calling this tool -- only do what the user explicitly "
+                        "asked for, and finish your reply now."
+                    ),
+                    "exit_code": 1,
+                    "blocked": True,
+                }
+                logger.info("Tool call skipped, per-turn cap reached: %s", block.tool_type)
             else:
                 yield (
                     f'data: {json.dumps({"type": "tool_start", "tool": block.tool_type, "command": cmd_display, "full_command": full_command, "round": round_num})}\n\n'
@@ -4939,6 +5139,12 @@ async def stream_agent_loop(
                             f'data: {json.dumps({"type": "tool_progress", "tool": block.tool_type, "round": round_num, **evt})}\n\n'
                         )
                     desc, result = await _tool_task
+                    if not result.get("error"):
+                        _ody_seen_tool_calls.add(_ody_call_key)
+                        if block.tool_type in _ody_CAPPED_TOOLS:
+                            _ody_tool_call_counts[block.tool_type] = (
+                                _ody_tool_call_counts.get(block.tool_type, 0) + 1
+                            )
                 finally:
                     # If the SSE client disconnects (or this generator is
                     # otherwise closed) while we're awaiting a progress event
@@ -5330,6 +5536,45 @@ async def stream_agent_loop(
             if block.tool_type in _VERIFIER_EFFECTFUL_TOOLS:
                 _effectful_used = True
 
+            # Real, added 2026-09-22: general, tool-agnostic safeguard.
+            # Reset on any real success; increment on any failure
+            # (policy-blocked, duplicate, over-cap, or a genuine
+            # execution/validation error -- result["error"] is set
+            # consistently across all of those real paths). Force-stops
+            # the turn once too many failures happen in a row, regardless
+            # of which specific tool keeps failing -- confirmed directly
+            # this is needed since the per-tool cap above only tracks
+            # successes and never engages during an all-failures loop.
+            # Real, fixed 2026-09-22: genuine MCP tool results use
+            # {"stdout", "stderr", "exit_code"} -- confirmed directly,
+            # live, via debug logging, that they do NOT have an "error"
+            # key at all. Only the synthetic results this file
+            # constructs itself (policy-blocked/duplicate/over-cap) use
+            # "error". Checking result.get("error") alone silently
+            # missed every genuine MCP validation failure -- exit_code
+            # is the real, universal indicator across both shapes.
+            # Real, fully validated 2026-09-22 via a direct, deterministic
+            # E2E test (a temporary forced-failure injector, since
+            # removed): confirmed the complete real path end to end --
+            # failure count 1..5 -> threshold reached -> force_stop_turn
+            # set -> stop block entered -> yield statement reached ->
+            # (separately, downstream in chat_routes.py's own consumer)
+            # the yielded delta shape recognized -> client receives the
+            # stop message. That downstream piece needed its own real
+            # fix (this file's yield used {"type": "delta", "content":
+            # ...} where the real consumer only recognizes a bare
+            # {"delta": ...} shape) -- see this same file's own stop-yield
+            # site below for that fix's details.
+            _ody_result_failed = bool(result.get("error")) or (
+                isinstance(result, dict) and result.get("exit_code") not in (0, None)
+            )
+            if _ody_result_failed:
+                _ody_consecutive_failures += 1
+                if _ody_consecutive_failures >= _ODY_MAX_CONSECUTIVE_FAILURES:
+                    _ody_force_stop_turn = True
+            else:
+                _ody_consecutive_failures = 0
+
             formatted = format_tool_result(desc, result)
             tool_results.append(formatted)
             tool_result_texts.append(formatted)
@@ -5348,6 +5593,31 @@ async def stream_agent_loop(
 
         # If budget was hit, stop the loop
         if budget_hit:
+            break
+
+        # Real, added 2026-09-22: a per-turn tool-call cap was hit this
+        # round -- stop the whole turn now rather than let the model keep
+        # trying blocked/disabled calls in further rounds (confirmed live
+        # this happens otherwise). Tell the user plainly what happened.
+        if _ody_force_stop_turn:
+            _ody_stop_msg = (
+                "\n\n(Stopped: reached the per-turn limit on repeated tool "
+                "calls. The requested action(s) above were completed; "
+                "additional, unrequested calls were blocked.)"
+            )
+            full_response += _ody_stop_msg
+            # Real, fixed 2026-09-22: the real, consuming code in
+            # chat_routes.py checks "if \"delta\" in data" -- a literal,
+            # top-level "delta" key -- and falls through an explicit
+            # allowlist of recognized event types otherwise, silently
+            # dropping anything that matches neither. Confirmed directly
+            # this file's own established, correct shape for every real
+            # text delta is bare {"delta": text}, not {"type": "delta",
+            # "content": text} -- the shape used here originally, which
+            # matched neither check and was silently discarded every
+            # time, despite the yield statement itself executing
+            # correctly (confirmed via direct debug-log instrumentation).
+            yield f'data: {json.dumps({"delta": _ody_stop_msg})}\n\n'
             break
 
         # ask_user posed a question — stop here and wait for the user's choice.
@@ -5427,6 +5697,41 @@ async def stream_agent_loop(
             and _looks_like_success_claim(full_response)
         ):
             full_response = "I couldn't make that change because no matching tool action completed."
+    # Real, added 2026-09-18: a real, model-agnostic, logging-only
+    # detector for the filesystem-claim-without-a-tool-call pattern
+    # confirmed directly, live, this same session (gemma4-e2b-longctx
+    # confidently, wrongly claimed a real, existing file did not exist,
+    # having genuinely never called any filesystem tool at all this
+    # turn). Deliberately does NOT rewrite/block the response yet --
+    # only logs a real, direct warning, so this pattern's real frequency
+    # can be tracked before any behavior-changing fix is considered.
+    if (
+        not tool_events
+        and _looks_like_filesystem_query(_last_user)
+        and _looks_like_filesystem_claim(full_response)
+    ):
+        logger.warning(
+            "[agent] filesystem hallucination overridden: model=%r made a "
+            "real filesystem claim with zero tool_events this turn -- "
+            "user_query=%r original_response_snippet=%r",
+            model, _last_user[:200], full_response[:200],
+        )
+        # Real, upgraded 2026-09-18 (round 2): from logging-only to a
+        # real, deterministic code-level override -- confirmed directly
+        # this same session that prompt-level guidance alone is
+        # insufficient (the existing "files" domain rule pack already
+        # says "Use file tools for real disk files", and the model
+        # still ignored it). This mirrors the exact same real pattern
+        # already proven in the _ody_qwen_finetune_model block just
+        # above: detect the bad response, then replace it with an
+        # honest failure message, rather than relying on the model to
+        # follow instructions. This is a real, deterministic Python
+        # if-condition, not prompt text the model could ignore.
+        full_response = (
+            "I need to actually check the filesystem to answer that "
+            "accurately, and I wasn't able to complete that check this "
+            "turn. Please try asking again."
+        )
     _response_before_tool_summary = full_response
     if tool_events:
         for _ev in reversed(tool_events):

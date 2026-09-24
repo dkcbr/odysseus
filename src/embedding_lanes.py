@@ -374,12 +374,41 @@ def query_lanes(
             n = min(n_results(lane), count)
             if n <= 0:
                 continue
-            results = lane.collection.query(
-                query_embeddings=lane.encode([query]),
-                n_results=n,
-                where=where,
-                include=list(include),
-            )
+            try:
+                results = lane.collection.query(
+                    query_embeddings=lane.encode([query]),
+                    n_results=n,
+                    where=where,
+                    include=list(include),
+                )
+            except Exception as e:
+                # Real, added 2026-09-16: a real, targeted fix for the
+                # "error finding id" retrieval bug (confirmed live, this
+                # same session, root-caused to Odysseus's own real,
+                # triple-layer caching of the ChromaDB client/collection
+                # objects, which never refresh if the underlying
+                # collection is ever recreated with a new internal ID
+                # while Odysseus keeps running). Rather than guess at a
+                # broad string match on the real error text (which could
+                # be fragile across ChromaDB versions), this always
+                # attempts one real, direct re-fetch of the lane's own
+                # collection object via its own client -- cheap, and a
+                # genuine no-op if the collection was never actually
+                # stale (get_or_create_collection on an already-valid,
+                # unchanged collection is a fast, safe call).
+                lane.collection = lane.client.get_or_create_collection(
+                    lane.collection_name
+                )
+                results = lane.collection.query(
+                    query_embeddings=lane.encode([query]),
+                    n_results=n,
+                    where=where,
+                    include=list(include),
+                )
+                logger.warning(
+                    "%s lane recovered after a real collection re-fetch "
+                    "(original error: %s)", lane.name, e,
+                )
             out.append((lane, results))
         except Exception as e:
             failures.append(f"{lane.name}: {e}")

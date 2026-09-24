@@ -71,7 +71,14 @@ function _render(data) {
   const { cpu, memory, disk, gpu } = data;
 
   let html = '';
-  html += _renderBar('CPU', cpu.percent, `${cpu.percent.toFixed(1)}% · ${cpu.core_count} threads`);
+  // Real, added 2026-09-17: mirrors the existing GPU temperature display
+  // pattern exactly. Unlike GPU (entirely omitted when absent), CPU
+  // itself is always present -- only temperature_c specifically might
+  // genuinely be null (no real sensor found on this host), so this
+  // needs its own null-check rather than reusing GPU's "if (gpu)" guard.
+  const cpuTempLabel = (cpu.temperature_c !== null && cpu.temperature_c !== undefined)
+    ? ` · ${cpu.temperature_c.toFixed(0)}°C` : '';
+  html += _renderBar('CPU', cpu.percent, `${cpu.percent.toFixed(1)}% · ${cpu.core_count} threads${cpuTempLabel}`);
   html += _renderCores(cpu.per_core_percent);
   html += _renderBar('Memory', memory.percent, `${memory.used_gb} / ${memory.total_gb} GB`);
   html += _renderBar('Disk', disk.percent, `${disk.used_gb} / ${disk.total_gb} GB`);
