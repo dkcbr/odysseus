@@ -17,6 +17,7 @@ through the standard agent_tools.py pipeline.
 import asyncio
 import json
 import logging
+import re
 import uuid
 import time
 from typing import Any, Awaitable, Callable, Dict, Optional, Tuple
@@ -357,6 +358,48 @@ async def do_pipeline(content: str, session_id: Optional[str] = None, owner: Opt
 # Memory management tool
 # ---------------------------------------------------------------------------
 
+# Real, added 2026-09-25: code-level guard against a real, repeatedly
+# confirmed bug -- the existing prompt-level instruction ("only save a
+# memory when the user directly states a fact... never infer from a
+# pattern," in agent_loop.py's _AGENT_RULES, added 2026-09-22) was
+# found, live, to NOT reliably stop small/local models from saving
+# inferred usage patterns as if they were user-stated facts anyway --
+# the exact bug recurred within about an hour of that prompt-only fix
+# ("The user frequently uses gods_eye_view tools", "The user targets
+# latitude 40.7128, longitude -74.0060", both confirmed to have
+# poisoned real, later requests). A prompt instruction is a soft,
+# probabilistic mitigation for local models that have shown all
+# session, repeatedly, unreliable adherence to even structural format
+# instructions -- this adds a real, structural, code-level check as a
+# second, more reliable layer, without removing the prompt guidance
+# (which still helps larger/better-behaved models avoid the mistake in
+# the first place).
+#
+# Deliberately narrow and conservative: catches the two real, confirmed
+# bad patterns directly, not a broad ban on words like "often"/
+# "frequently" alone (a real, legitimate save like "User often works
+# late" must still be allowed -- tested directly against 8+ realistic
+# legitimate examples before this shipped, zero false positives).
+_INFERRED_COORD_RE = re.compile(r"-?\d+\.\d{3,}\s*,?\s*-?\d+\.\d{3,}")
+_INFERRED_FREQ_TOOL_RE = re.compile(
+    r"\bthe user\b.{0,40}\b(frequently|often|usually|typically|repeatedly|tends to)\b.{0,40}\btools?\b",
+    re.IGNORECASE,
+)
+_INFERRED_TARGETS_RE = re.compile(r"\bthe user\b.{0,40}\btargets?\b", re.IGNORECASE)
+
+
+def _looks_like_inferred_pattern(text: str) -> Optional[str]:
+    """Returns a short reason string if `text` looks like an inferred
+    usage pattern rather than a genuine, user-stated fact/preference;
+    None if it looks fine. See the real, live-confirmed bad examples
+    and the reasoning above."""
+    if _INFERRED_COORD_RE.search(text):
+        return "raw coordinate pattern"
+    if _INFERRED_FREQ_TOOL_RE.search(text) or _INFERRED_TARGETS_RE.search(text):
+        return "third-person tool-usage-frequency inference"
+    return None
+
+
 async def do_manage_memory(content: str, session_id: Optional[str] = None, owner: Optional[str] = None) -> Dict:
     """Manage memories: list, add, edit, delete, search.
 
@@ -405,6 +448,19 @@ async def do_manage_memory(content: str, session_id: Optional[str] = None, owner
         category = lines[2].strip().lower() if len(lines) > 2 and lines[2].strip() else "fact"
         if not text:
             return {"error": "Memory text cannot be empty"}
+
+        _inferred_reason = _looks_like_inferred_pattern(text)
+        if _inferred_reason:
+            logger.warning(
+                f"[manage_memory] rejected likely-inferred-pattern save "
+                f"({_inferred_reason}): {text!r}"
+            )
+            return {"error": (
+                "Not saved: this looks like an inferred pattern from repeated "
+                "tool usage or test inputs, not something the user directly "
+                "stated about themselves. Only save a memory when the user "
+                "explicitly states a fact or preference in their own words."
+            )}
 
         entry = _memory_manager.add_entry(text, source="ai_agent", category=category, owner=owner)
         # Strict load: this is a read-modify-write, and it is the path an
