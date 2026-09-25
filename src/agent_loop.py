@@ -277,6 +277,42 @@ def _load_mcp_disabled_map() -> Dict[str, set]:
     return disabled_map
 
 # System prompt that tells the LLM about available tools.
+# Real, added 2026-09-25, directly from a live evaluation of
+# xLAM-2-8b-fc-r as a candidate coordinator model (see
+# scripts/model_tool_calling_eval.py). get_tools_for_query()'s own
+# real, effective tool count can end up far larger than its nominal
+# `k` (a real, live case measured 8 in, 61 out, from ALWAYS_AVAILABLE +
+# domain seeding + keyword force-includes all stacking on top of the
+# base RAG retrieval). A direct, multi-trial evaluation found
+# tool-selection accuracy for a small (8B), locally-served model
+# collapsing well before a list that size -- especially once a
+# realistic system prompt is also present, which measurably compounds
+# the failure independent of tool count alone. This is a real,
+# reasonable, deliberately conservative starting cap based on that
+# evaluation, not a precisely-tuned number -- the evaluation itself
+# showed real run-to-run variance, so treat this as a starting point
+# to refine with more real trials via that same script, not a final
+# answer. Keyword-matched the same way as _model_supports_tools below,
+# so this stays in sync with which local model families are actually
+# in use, without needing a change at every call site.
+_SMALL_LOCAL_MODEL_KEYWORDS = (
+    "xlam",
+)
+_SMALL_LOCAL_MODEL_TOOL_CAP = 15
+
+
+def _tool_cap_for_model(model: str) -> "int | None":
+    """Real, direct helper: returns a real, conservative max_tools cap
+    for models known/measured to need one (see the comment above), or
+    None for everything else, meaning get_tools_for_query()'s existing,
+    uncapped behavior is completely unchanged for any model not in
+    _SMALL_LOCAL_MODEL_KEYWORDS."""
+    model_lc = (model or "").lower()
+    if any(kw in model_lc for kw in _SMALL_LOCAL_MODEL_KEYWORDS):
+        return _SMALL_LOCAL_MODEL_TOOL_CAP
+    return None
+
+
 # Always injected — the LLM decides whether to use them.
 _AGENT_PREAMBLE = """\
 You are an AI assistant with tool access. You can run shell commands, execute Python, search the web, \
@@ -3602,7 +3638,10 @@ async def stream_agent_loop(
                 if _retrieval_query:
                     try:
                         _relevant_tools = await asyncio.wait_for(
-                            asyncio.to_thread(tool_idx.get_tools_for_query, _retrieval_query, 8),
+                            asyncio.to_thread(
+                                tool_idx.get_tools_for_query, _retrieval_query, 8,
+                                None, _tool_cap_for_model(model),
+                            ),
                             timeout=_TOOL_SELECTION_TIMEOUT_SECONDS,
                         )
                         logger.info(f"[tool-rag] Retrieved tools for query: {sorted(_relevant_tools - ALWAYS_AVAILABLE)}")

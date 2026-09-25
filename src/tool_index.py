@@ -631,9 +631,27 @@ class ToolIndex:
         return names
 
     def get_tools_for_query(
-        self, query: str, k: int = 8, always_include: Optional[Set[str]] = None
+        self, query: str, k: int = 8, always_include: Optional[Set[str]] = None,
+        max_tools: Optional[int] = None,
     ) -> Set[str]:
-        """Get the set of tool names to include for a given user query."""
+        """Get the set of tool names to include for a given user query.
+
+        Real, added 2026-09-25: `max_tools`, an optional final cap on the
+        total returned set. Found directly, this same session: this
+        function's own `base` set only ever grows (ALWAYS_AVAILABLE, RAG
+        retrieval, then a long chain of deterministic force-includes for
+        specific real gaps -- ticker/price detection, scheduling intent,
+        contact-save patterns, domain seeding, etc.) with no final trim,
+        so the real, effective tool count sent to the model can end up
+        far larger than the `k` passed in (a real, live case measured
+        this at k=8 in, 61 out). A direct evaluation of xLAM-2-8b-fc-r
+        found tool-selection accuracy collapsing well before a list that
+        size, especially once a realistic system prompt is also present
+        -- see scripts/model_tool_calling_eval.py. `max_tools` lets a
+        caller (agent_loop.py, based on the active model) enforce a real
+        ceiling for models known/measured to need one, without changing
+        this function's behavior at all for callers that don't pass it.
+        """
         base = set(always_include or ALWAYS_AVAILABLE)
         retrieved = self.retrieve(query, k=k)
         base.update(retrieved)
@@ -735,6 +753,34 @@ class ToolIndex:
         # baseline. Reverted 2026-09-21 to isolate the next variant
         # (tool renaming) cleanly, rather than testing it on top of a
         # confirmed-worse prior change.
+        if max_tools is not None and len(base) > max_tools:
+            # Real, direct priority order when trimming is actually needed:
+            # (1) ALWAYS_AVAILABLE first -- small, safety-relevant baseline,
+            # always kept whole; (2) the original RAG-retrieved tools, in
+            # their real relevance-ranked order (self.retrieve() returns
+            # closest-match first) -- these are the ones actually specific
+            # to this query; (3) everything else this function added along
+            # the way (force-includes, domain seeding), in deterministic
+            # sorted order, filling any remaining room. This means a hard
+            # cap drops the "bonus" additions first, not the query-relevant
+            # core -- the opposite of a naive arbitrary truncation.
+            always = set(always_include or ALWAYS_AVAILABLE)
+            trimmed: Set[str] = set(always) & base
+            for name in retrieved:
+                if len(trimmed) >= max_tools:
+                    break
+                if name in base:
+                    trimmed.add(name)
+            if len(trimmed) < max_tools:
+                for name in sorted(base - trimmed):
+                    if len(trimmed) >= max_tools:
+                        break
+                    trimmed.add(name)
+            logger.info(
+                "[tool-rag] max_tools=%d applied: %d -> %d tools",
+                max_tools, len(base), len(trimmed),
+            )
+            return trimmed
         return base
 
 
