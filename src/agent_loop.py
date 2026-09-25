@@ -3895,6 +3895,21 @@ async def stream_agent_loop(
         # deepseek-v2/v3/chat support tools via the cloud API; deepseek-r1
         # (reasoning model) does not — handled by the blocklist below.
         "deepseek-v", "deepseek-chat",
+        # Real, added 2026-09-24: Salesforce's xLAM-2 models are
+        # specifically fine-tuned for native, OpenAI-style function
+        # calling (the "fc" in the real model name, e.g.
+        # llama-xlam-2-8b-fc-r) -- confirmed directly, live: given the
+        # native tools= parameter, xLAM produces a correct tool call on
+        # the first try; given only the fenced-block prompt-text
+        # convention (the default for local/LM-Studio-served models),
+        # it repeatedly hallucinated calls to tools that don't exist
+        # (e.g. "date", "ntfy.sh") instead of reliably reading the
+        # prompt-described tools. This is genuinely the format it was
+        # trained on, not a broad exception -- kept as its own,
+        # narrowly-matched keyword rather than widening _API_HOSTS
+        # (which would affect every other model served through the same
+        # LM Studio endpoint, not just this one).
+        "xlam",
     ))
     # Models known to reject tool schemas at the Ollama/local level even when
     # the endpoint URL would otherwise enable native function calling.
