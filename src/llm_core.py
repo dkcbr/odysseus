@@ -2997,6 +2997,12 @@ async def stream_llm_with_fallback(candidates, messages, **kwargs):
         is_last = (i == len(cands) - 1)
         emitted = False
         retried = False
+        # Real, added 2026-09-25: tracks whether we've seen any REAL
+        # answer content (non-thinking text, or a completed/streaming
+        # tool call) as opposed to only thinking-tagged deltas. See the
+        # note below at the substantive check for why this is tracked
+        # separately from `emitted`.
+        real_answer_seen = False
         pending_metadata = []
         async for chunk in stream_llm(url, model, messages, headers=headers, **kwargs):
             if chunk.startswith("event: error"):
@@ -3036,6 +3042,23 @@ async def stream_llm_with_fallback(candidates, messages, **kwargs):
                 event_type == "tool_calls"
                 and bool(event_data.get("calls"))
             )
+            # Real, added 2026-09-25: a thinking-tagged delta still
+            # satisfies `substantive` above (deliberately -- an existing,
+            # tested design: test_text_or_reasoning_output_prevents_fallback
+            # confirms thinking output should NOT trigger a mid-stream
+            # candidate switch, since switching after real content has
+            # started streaming would duplicate output to the client).
+            # But found directly, live: a hard reasoning prompt with a
+            # tight max_tokens can consume the ENTIRE budget on thinking
+            # with genuinely zero real-answer content, then end cleanly
+            # with no error at all -- `emitted` alone can't distinguish
+            # "the model is genuinely working, thinking now, answer
+            # coming" from "the model ran out of budget and will NEVER
+            # produce a real answer this call." real_answer_seen tracks
+            # the narrower, real signal: did we ever get non-thinking
+            # substantive content.
+            if substantive and not event_data.get("thinking"):
+                real_answer_seen = True
 
             if substantive and not emitted:
                 # First real output from a NON-primary candidate: tell the client
@@ -3063,6 +3086,27 @@ async def stream_llm_with_fallback(candidates, messages, **kwargs):
             elif not is_done:
                 pending_metadata.append(chunk)
 
+        if emitted and not real_answer_seen:
+            # Real, added 2026-09-25: the whole response was thinking-only
+            # -- stream already committed to this candidate (thinking was
+            # shown live), so retroactively switching candidates here
+            # would duplicate output the client already saw. Instead,
+            # surface a clear, visible diagnostic rather than silently
+            # ending as if this were a normal, complete success.
+            logger.warning(
+                f"[fallback] {model} produced only thinking content, no real "
+                f"answer, before ending -- likely reasoning-budget exhaustion"
+            )
+            yield ('data: ' + json.dumps({
+                "type": "error",
+                "error": "Model produced only reasoning/thinking content, no "
+                         "real answer, before the response ended. This "
+                         "usually means max_tokens was exhausted by internal "
+                         "reasoning before a real answer began -- try again "
+                         "with a larger max_tokens.",
+                "status": 502,
+            }) + '\n\n')
+            return
         if emitted:
             return
         if retried:
