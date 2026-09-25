@@ -400,6 +400,37 @@ def _looks_like_inferred_pattern(text: str) -> Optional[str]:
     return None
 
 
+def _record_rejected_memory(
+    text: str, category: str, reason: str,
+    session_id: Optional[str], owner: Optional[str],
+) -> None:
+    """Real, added 2026-09-25: durable telemetry for a rejected
+    memory-add attempt, supporting the "measure recurrence" step of a
+    staged hardening plan for the inferred-pattern guard above.
+    Container logs alone are ephemeral; this is the durable, queryable
+    record. Deliberately best-effort and non-fatal: a telemetry write
+    failing must never turn a correct rejection into a hard error for
+    the caller -- the reject response itself already happened by the
+    time this runs."""
+    try:
+        from src.database import SessionLocal, RejectedMemory
+        db = SessionLocal()
+        try:
+            db.add(RejectedMemory(
+                id=str(uuid.uuid4()),
+                text=text,
+                category=category,
+                reason=reason,
+                session_id=session_id,
+                owner=owner,
+            ))
+            db.commit()
+        finally:
+            db.close()
+    except Exception as e:
+        logger.error(f"[manage_memory] failed to record rejected-memory telemetry: {e}")
+
+
 async def do_manage_memory(content: str, session_id: Optional[str] = None, owner: Optional[str] = None) -> Dict:
     """Manage memories: list, add, edit, delete, search.
 
@@ -455,6 +486,7 @@ async def do_manage_memory(content: str, session_id: Optional[str] = None, owner
                 f"[manage_memory] rejected likely-inferred-pattern save "
                 f"({_inferred_reason}): {text!r}"
             )
+            _record_rejected_memory(text, category, _inferred_reason, session_id, owner)
             return {"error": (
                 "Not saved: this looks like an inferred pattern from repeated "
                 "tool usage or test inputs, not something the user directly "
