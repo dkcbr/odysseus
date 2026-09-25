@@ -392,7 +392,39 @@ def _looks_like_inferred_pattern(text: str) -> Optional[str]:
     """Returns a short reason string if `text` looks like an inferred
     usage pattern rather than a genuine, user-stated fact/preference;
     None if it looks fine. See the real, live-confirmed bad examples
-    and the reasoning above."""
+    and the reasoning above.
+
+    Real, added 2026-09-25 -- escalation acceptance criteria, defined
+    directly so a future session can check against something concrete
+    rather than a vague "measure recurrence" intention. A broader,
+    provenance-based grounding check (comparing candidate memory text
+    against the user's own recent messages, not just known-bad shapes)
+    was designed but deliberately deferred. Build it when ANY of:
+
+    1. A real, confirmed escape: a live memory entry is found that (a)
+       demonstrably causes a problem (interferes with a later,
+       unrelated request, matching the original bug's own bar) and
+       (b) is confirmed NOT caught here -- verified by literally
+       running this function against the exact text and confirming it
+       returns None. The strongest trigger; conclusive on its own.
+    2. Sustained rejection volume: 10+ rows in the RejectedMemory table
+       (core/database.py) within any 30-day window. Not conclusive by
+       itself -- go look at what got rejected. If it's converging on
+       these same two shapes, no action needed; if it's diversifying
+       into new phrasings, that's real evidence this narrow guard's
+       coverage is thinning.
+    3. A new candidate coordinator model is introduced. Confirmed this
+       same session: different local models (xLAM, gemma4, qwen2.5)
+       have materially different failure signatures -- re-run
+       tests/test_manage_memory_inferred_pattern_guard.py's real
+       scenarios against that model's actual behavior before assuming
+       these two known shapes still cover it.
+
+    Explicitly NOT a trigger for the above: a legitimate save getting
+    wrongly rejected here. That's evidence to tighten/refine THIS
+    guard's own patterns, a different, separate response from building
+    the broader grounding check -- keep these two directions distinct.
+    """
     if _INFERRED_COORD_RE.search(text):
         return "raw coordinate pattern"
     if _INFERRED_FREQ_TOOL_RE.search(text) or _INFERRED_TARGETS_RE.search(text):
