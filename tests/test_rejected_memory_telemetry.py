@@ -51,7 +51,12 @@ def test_rejected_memory_writes_a_durable_row(isolated_memory_manager):
 
         assert len(rows) == 1
         assert rows[0].text == "The user targets latitude 40.7128, longitude -74.0060"
-        assert rows[0].reason == "third-person tool-usage-frequency inference"
+        # Real, updated 2026-09-25: the coordinate regex was broadened
+        # (stress-test follow-up) to also recognize explicit "latitude
+        # X ... longitude Y" phrasing, so this exact text is now caught
+        # by the coordinate check first (checked before the frequency
+        # check) -- an equally correct reason for the same rejection.
+        assert rows[0].reason == "raw coordinate pattern"
         assert rows[0].owner == "test-owner"
         assert rows[0].timestamp is not None
     finally:

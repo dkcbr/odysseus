@@ -380,12 +380,98 @@ async def do_pipeline(content: str, session_id: Optional[str] = None, owner: Opt
 # "frequently" alone (a real, legitimate save like "User often works
 # late" must still be allowed -- tested directly against 8+ realistic
 # legitimate examples before this shipped, zero false positives).
-_INFERRED_COORD_RE = re.compile(r"-?\d+\.\d{3,}\s*,?\s*-?\d+\.\d{3,}")
-_INFERRED_FREQ_TOOL_RE = re.compile(
-    r"\bthe user\b.{0,40}\b(frequently|often|usually|typically|repeatedly|tends to)\b.{0,40}\btools?\b",
-    re.IGNORECASE,
+_INFERRED_COORD_RE = re.compile(
+    r"-?\d+\.\d{3,}\s*,?\s*-?\d+\.\d{3,}"                              # comma/space separated decimals
+    r"|-?\d+\.\d{3,}\s*[NSEWnsew]\s*,?\s*-?\d+\.\d{3,}\s*[NSEWnsew]"    # N/S/E/W suffix notation
+    r"|\blat(?:itude)?\b.{0,15}-?\d+\.\d+.{0,20}\blong(?:itude)?\b.{0,15}-?\d+\.\d+"  # "lat X ... long Y" labels
 )
-_INFERRED_TARGETS_RE = re.compile(r"\bthe user\b.{0,40}\btargets?\b", re.IGNORECASE)
+
+
+_real_tool_names_regex_fragment_cache: Optional[str] = None
+
+
+def _tool_identifier_pattern() -> str:
+    """Builds the "looks like a tool identifier" alternation lazily,
+    cached on first real call at RUNTIME (not at module-import time --
+    src.agent_tools has a real circular import back to this module via
+    session_tools.py, confirmed directly: calling this at module-body
+    evaluation time fails with ImportError on a partially initialized
+    module).
+
+    Combines two real signals, found necessary by direct testing
+    (neither alone was sufficient -- see the docstring below):
+    1. A snake_case-style identifier (lowercase, at least one
+       underscore) -- essentially never appears in ordinary written
+       English ("power tools" has a space, not an underscore), so it
+       safely catches MCP/product-style names like "gods_eye_view" or
+       "web_search" without needing them to be in any registry.
+    2. The real, registered TOOL_TAGS names directly -- needed for
+       single-word built-ins with no underscore at all, like "bash" or
+       "python", which the snake_case pattern alone cannot catch.
+    """
+    global _real_tool_names_regex_fragment_cache
+    if _real_tool_names_regex_fragment_cache is None:
+        from src.agent_tools import TOOL_TAGS
+        tool_alt = "|".join(re.escape(t) for t in sorted(TOOL_TAGS))
+        snake_case = r"[a-z][a-z0-9]*(?:_[a-z0-9]+)+"
+        _real_tool_names_regex_fragment_cache = (
+            r"\b(?:" + snake_case + r"|" + tool_alt + r")\b"
+        )
+    return _real_tool_names_regex_fragment_cache
+
+
+# Real, added 2026-09-25, after a direct stress test found two real,
+# concrete gaps in the original version of this check (see the
+# docstring below for the full, real background):
+# 1. FALSE POSITIVE found: "The user often uses power tools for
+#    woodworking as a hobby" -- a genuinely legitimate hobby fact -- was
+#    wrongly caught, because the original pattern matched the generic
+#    word "tools?" rather than an actual registered tool name. Fixed by
+#    matching against the real TOOL_TAGS list instead, so "power tools"
+#    (not a registered tool) no longer matches, but "bash"/
+#    "gods_eye_view"/etc. still do.
+# 2. FALSE NEGATIVES found: several adversarial rephrasings evaded the
+#    original pattern -- "this user" (not "the user"), "consistently"/
+#    "commonly" (not in the original word list), and dropping the
+#    literal word "tool" entirely ("makes use of gods_eye_view").
+#    Fixed by broadening the user-reference and frequency-word
+#    alternations, and matching real tool names directly instead of
+#    the word "tool" (which also fixes false negative #2 above, since
+#    a real tool name match no longer needs the word "tool" nearby).
+# Re-verified against 26 cases (the original 2 real bad examples, 6
+# adversarial rephrasings, and 18 legitimate/false-positive-risk
+# examples) before shipping -- 0 mismatches.
+# Compiled lazily on first real call (see the getters below), not at
+# module-import time -- same circular-import reason as above. Two
+# regexes, not one: the frequency word and the tool-like identifier
+# can appear in either order ("the user frequently uses X" vs "the
+# user's X usage is frequent").
+_FREQ_WORDS = r"(frequently|often|usually|typically|repeatedly|tends to|consistently|commonly)"
+_inferred_freq_tool_re_cache = None
+_inferred_tool_freq_re_cache = None
+
+
+def _get_inferred_freq_tool_re():
+    global _inferred_freq_tool_re_cache
+    if _inferred_freq_tool_re_cache is None:
+        _inferred_freq_tool_re_cache = re.compile(
+            r"\b(?:the|this)\s+user\b.{0,60}\b" + _FREQ_WORDS + r"\b.{0,60}"
+            + _tool_identifier_pattern(),
+            re.IGNORECASE,
+        )
+    return _inferred_freq_tool_re_cache
+
+
+def _get_inferred_tool_freq_re():
+    global _inferred_tool_freq_re_cache
+    if _inferred_tool_freq_re_cache is None:
+        _inferred_tool_freq_re_cache = re.compile(
+            r"\b(?:the|this)\s+user\b.{0,60}" + _tool_identifier_pattern()
+            + r".{0,60}\b" + _FREQ_WORDS + r"\b",
+            re.IGNORECASE,
+        )
+    return _inferred_tool_freq_re_cache
+_INFERRED_TARGETS_RE = re.compile(r"\b(?:the|this)\s+user\b.{0,40}\btargets?\b", re.IGNORECASE)
 
 
 def _looks_like_inferred_pattern(text: str) -> Optional[str]:
@@ -427,7 +513,11 @@ def _looks_like_inferred_pattern(text: str) -> Optional[str]:
     """
     if _INFERRED_COORD_RE.search(text):
         return "raw coordinate pattern"
-    if _INFERRED_FREQ_TOOL_RE.search(text) or _INFERRED_TARGETS_RE.search(text):
+    if (
+        _get_inferred_freq_tool_re().search(text)
+        or _get_inferred_tool_freq_re().search(text)
+        or _INFERRED_TARGETS_RE.search(text)
+    ):
         return "third-person tool-usage-frequency inference"
     return None
 
