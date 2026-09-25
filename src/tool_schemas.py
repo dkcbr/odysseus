@@ -1543,13 +1543,13 @@ FUNCTION_TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "ha_state",
-            "description": "Read the real, current state of one allowlisted Home Assistant entity via the real Zeus host agent -- never talks to Home Assistant directly. Read-only, never modifies anything. Real, currently allowlisted entity_ids: 'binary_sensor.verizon_internet_gateway_wan_status' (the router's WAN/internet connectivity status). Use this exact entity_id for any WAN/router/internet-status question -- do not guess a different entity_id. The agent enforces its own entity allowlist; requesting an entity that isn't allowed returns a clear error.",
+            "description": "Read the real, current state of one allowlisted Home Assistant entity via the real Zeus host agent -- never talks to Home Assistant directly. Read-only, never modifies anything. The agent enforces its own, real, live entity allowlist independently of this description -- it is not fixed and can grow over time, so do not assume this tool's own text lists every entity that is actually allowed. If you know or can infer a real entity_id relevant to the question (e.g. a real domain like climate./light./binary_sensor. plus a plausible, specific name), try it directly rather than assuming it must be rejected -- a disallowed entity_id returns a clear, real error naming the exact entity_id that failed, which is the authoritative source of truth, not this description.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "entity_id": {
                         "type": "string",
-                        "description": "The exact Home Assistant entity_id to read. Currently only 'binary_sensor.verizon_internet_gateway_wan_status' is allowlisted -- use this exact string for router/WAN questions."
+                        "description": "The exact, real Home Assistant entity_id to read (e.g. climate.nest_thermostat, binary_sensor.verizon_internet_gateway_wan_status). The real, current allowlist is enforced live by the agent, not fixed here -- try the entity_id that best matches the question."
                     }
                 },
                 "required": ["entity_id"]
@@ -1560,11 +1560,11 @@ FUNCTION_TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "ha_control",
-            "description": "Call one allowlisted Home Assistant service (e.g. turn a light or switch on/off) against one allowlisted entity, via the real Zeus host agent -- never talks to Home Assistant directly. Mutating. Real, current allowlist status: no light/switch entities are allowlisted yet as of 2026-09-11 (only the read-only binary_sensor.verizon_internet_gateway_wan_status is allowlisted for ha_state) -- calling ha_control will currently be rejected for any entity, since ALLOWED_HA_ENTITIES on the agent has no controllable entities yet. Do not guess an entity_id like 'light.living_room' -- it does not exist in the real allowlist. The agent enforces its own entity AND domain+service allowlists independently -- requesting anything not explicitly allowed returns a clear error rather than doing something unexpected.",
+            "description": "Call one allowlisted Home Assistant service (e.g. set a thermostat's temperature, turn a light or switch on/off) against one allowlisted entity, via the real Zeus host agent -- never talks to Home Assistant directly. Mutating. The agent enforces its own, real, live entity AND domain+service allowlists independently of this description -- neither is fixed here, and both can grow over time. If a real, plausible entity_id/domain/service combination matches the request, try it directly rather than assuming it must be rejected -- a disallowed request returns a clear, real error naming exactly what failed, which is the authoritative source of truth, not this description.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "entity_id": {"type": "string", "description": "The exact, real Home Assistant entity_id to act on. No controllable entity is allowlisted yet -- any value will currently be rejected by the agent."},
+                    "entity_id": {"type": "string", "description": "The exact, real Home Assistant entity_id to act on (e.g. climate.nest_thermostat). The real, current allowlist is enforced live by the agent, not fixed here."},
                     "domain": {"type": "string", "description": "The Home Assistant service domain, e.g. 'light' or 'switch'."},
                     "service": {"type": "string", "description": "The service to call within that domain, e.g. 'turn_on', 'turn_off', 'toggle'."},
                     "data": {"type": "object", "description": "Optional extra service data (e.g. brightness, color). Omit for a plain on/off/toggle call."}
