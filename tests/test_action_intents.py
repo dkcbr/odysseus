@@ -83,3 +83,50 @@ def test_router_reports_non_calendar_categories():
     assert classify_tool_intent("reply to that email").category == "email"
     assert classify_tool_intent("open my calendar").category == "ui"
     assert classify_tool_intent("research cost effective local models").category == "research"
+
+
+# Real, added 2026-09-25: found completely missing while investigating
+# a real Home Assistant question ("What's the indoor temperature?")
+# that silently failed to trigger tool use in plain chat mode. This
+# entire category didn't exist before this.
+def test_home_assistant_lookup_and_control_requests_promote_to_agent():
+    assert message_needs_tools("What's the indoor temperature?")
+    assert message_needs_tools("Is the thermostat on?")
+    assert message_needs_tools("Turn the temperature down")
+    assert message_needs_tools("Set the thermostat to 70")
+    assert message_needs_tools("Turn off the living room light")
+    assert message_needs_tools("Is the garage door open?")
+    intent = classify_tool_intent("What's the indoor temperature?")
+    assert intent.category == "home-assistant"
+
+
+def test_home_assistant_does_not_match_unrelated_weather_or_figurative_door():
+    # Real, caught live while building this: "door" alone is too
+    # ambiguous/figurative to safely match ("the door to opportunity").
+    assert not message_needs_tools("What is the temperature outside today?")
+    assert not message_needs_tools(
+        "Is the door to opportunity still open for this role?"
+    )
+
+
+# Real, added 2026-09-25: natural system-diagnostic questions ("Is the
+# whisper service running?", "How much disk space do I have left?")
+# were falling through entirely -- the pre-existing "server/process
+# debugging request" pattern only covered imperative/"can you"
+# phrasing, not a plain question.
+def test_system_diagnostic_questions_promote_to_agent():
+    assert message_needs_tools("How much disk space do I have left?")
+    assert message_needs_tools("Is the whisper service running?")
+    assert message_needs_tools("Is odysseus running?")
+    assert message_needs_tools("How much memory is free?")
+    intent = classify_tool_intent("Is the whisper service running?")
+    assert intent.category == "workspace"
+
+
+def test_system_diagnostic_pattern_does_not_match_stock_price_questions():
+    # Real bug caught and fixed while building this: an earlier draft
+    # included bare "up"/"down" as state words, which incorrectly
+    # matched real, unrelated stock-price-direction questions.
+    assert not message_needs_tools("Is Bitcoin going up?")
+    assert not message_needs_tools("Is Bitcoin up?")
+    assert not message_needs_tools("Is KTOS down?")

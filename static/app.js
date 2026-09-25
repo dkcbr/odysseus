@@ -10,14 +10,14 @@ import modelsModule from './js/models.js?v=20260715startupcalm2';
 import ragModule from './js/rag.js';
 import presetsModule from './js/presets.js';
 import searchModule from './js/search.js';
-import chatModule from './js/chat.js?v=20260722ctxheader4';
+import chatModule from './js/chat.js?v=20260801fix1';
 import compareModule from './js/compare/index.js?v=20260723compareicon2';
 import documentModule from './js/document.js?v=20260722emailfastindex1';
 import searchChatModule from './js/search-chat.js';
 import { makeWindowDraggable } from './js/windowDrag.js';
 import markdownModule from './js/markdown.js';
 import chatRenderer from './js/chatRenderer.js?v=20260722emailfastindex1';
-import sessionModule from './js/sessions.js?v=20260722ctxheader4';
+import sessionModule from './js/sessions.js';
 import memoryModule from './js/memory.js?v=20260722memoryloading1';
 import voiceRecorderModule from './js/voiceRecorder.js';
 import censorModule from './js/censor.js';
@@ -45,6 +45,20 @@ import spinnerModule from './js/spinner.js';
 import { initKeyboardShortcuts } from './js/keyboard-shortcuts.js';
 import { initSidebarLayout, syncRailSide } from './js/sidebar-layout.js?v=20260715startupclean';
 import { initSectionCollapse, initSectionDrag } from './js/section-management.js';
+import registryModule from './js/registry.js';
+import capabilitiesModule from './js/capabilities.js';
+import tradingviewModule from './js/tradingview.js';
+import pollerStatusModule from './js/poller_status.js';
+import pollerDashboardModule from './js/poller_dashboard.js';
+// Real, added 2026-09-15: these three modules and their real, working
+// backend endpoints already existed but were never actually imported or
+// initialized here -- confirmed directly (grep found zero references)
+// before adding this, not assumed. Dead sidebar buttons until now.
+import processTableModule from './js/process_table.js';
+import marketDashboardModule from './js/market_dashboard.js';
+import workerLogModule from './js/worker_log.js';
+import systemMonitorModule from './js/system_monitor.js';
+import taskHistoryModule from './js/task_history.js';
 
 const API_BASE = window.location.origin;
 window.themeModule = themeModule;
@@ -1527,6 +1541,20 @@ function initializeEventListeners() {
       if (overflowTts) {
         overflowTts.style.display = ttsOff ? 'none' : '';
       }
+      // Real, added 2026-09-13: apply a real, saved ai_name to the welcome
+      // screen's own title, replacing the hardcoded "Odysseus" text. Keeps
+      // the boat icon SVG intact (only replaces the trailing text node),
+      // and only touches it once at real page load -- the research-mode
+      // toggle above has its own, separate, revertible override for the
+      // same element and takes priority whenever that mode is active.
+      if (settings.ai_name) {
+        const welcomeNameEl = document.querySelector('.welcome-name');
+        if (welcomeNameEl) {
+          const svg = welcomeNameEl.querySelector('svg');
+          welcomeNameEl.textContent = settings.ai_name;
+          if (svg) welcomeNameEl.insertBefore(svg, welcomeNameEl.firstChild);
+        }
+      }
     })
     .catch(() => {});
 
@@ -1689,11 +1717,19 @@ function initializeEventListeners() {
   
   const newMemoryInput = el('new-memory-input');
   if (newMemoryInput) {
-    newMemoryInput.addEventListener('keypress', (e) => {
-      if (e.key === 'Enter') {
+    // keydown, not the deprecated keypress: keypress is not guaranteed to
+    // fire for Enter everywhere, which left the Add Memory form with no
+    // working submit path (#5828).
+    newMemoryInput.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' && !e.isComposing) {
+        e.preventDefault();
         memoryModule.addNewMemory();
       }
     });
+  }
+  const newMemoryAddBtn = el('new-memory-add-btn');
+  if (newMemoryAddBtn) {
+    newMemoryAddBtn.addEventListener('click', () => memoryModule.addNewMemory());
   }
 
 // Voice recording is handled by the dual-purpose send/mic button (see below)
@@ -3752,6 +3788,54 @@ function startOdysseusApp() {
     searchChatModule.init(API_BASE);
   }
 
+  // Initialize agent registry module
+  if (registryModule) {
+    registryModule.init();
+  }
+
+  // Initialize capability inspector module
+  if (capabilitiesModule) {
+    capabilitiesModule.init();
+  }
+
+  // Initialize TradingView module
+  if (tradingviewModule) {
+    tradingviewModule.init();
+  }
+
+  // Initialize poller status module
+  if (pollerStatusModule) {
+    pollerStatusModule.init();
+  }
+
+  // Initialize poller dashboard module
+  if (pollerDashboardModule) {
+    pollerDashboardModule.init();
+  }
+
+  // Initialize process table module
+  if (processTableModule) {
+    processTableModule.init();
+  }
+
+  // Initialize market dashboard module
+  if (marketDashboardModule) {
+    marketDashboardModule.init();
+  }
+
+  // Initialize worker log module
+  if (workerLogModule) {
+    workerLogModule.init();
+  }
+  if (systemMonitorModule) {
+    systemMonitorModule.init();
+  }
+
+  // Initialize task history module
+  if (taskHistoryModule) {
+    taskHistoryModule.init();
+  }
+
   // Search buttons — icon rail + sidebar
   const railSearchBtn = el('rail-search-btn');
   if (railSearchBtn) {
@@ -3858,6 +3942,72 @@ function startOdysseusApp() {
       if (searchChatModule) searchChatModule.openSearch();
     });
   }
+
+  // Real, added 2026-09-16: frees the shared 16GB GPU for gaming by
+  // stopping/unloading every local AI service holding real VRAM, via
+  // routes/system_monitor_routes.py -> systemctl_agent.py -> game_mode.sh
+  // (all real, verified live this same session). Toggles on/off; the
+  // button's own label/title reflect the last known real state rather
+  // than assuming -- fetched once on load via 'status', not just set to
+  // a hardcoded default, since the real state could already be "on" from
+  // a previous session or a manual `game_mode.sh on` run from a terminal.
+  const sidebarGameModeBtn = el('sidebar-game-mode-btn');
+  const sidebarGameModeLabel = el('sidebar-game-mode-label');
+  let _gameModeOn = false;
+  let _gameModeBusy = false;
+
+  function _setGameModeUI(on) {
+    _gameModeOn = on;
+    if (sidebarGameModeLabel) sidebarGameModeLabel.textContent = on ? 'Exit Game Mode' : 'Game Mode';
+    if (sidebarGameModeBtn) sidebarGameModeBtn.title = on
+      ? 'Restore the voice pipeline (Whisper)'
+      : 'Free the GPU for gaming';
+  }
+
+  async function _callGameMode(action) {
+    const resp = await fetch('/api/system-monitor/game-mode', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action }),
+    });
+    if (!resp.ok) {
+      throw new Error('game-mode request failed: HTTP ' + resp.status);
+    }
+    return resp.json();
+  }
+
+  if (sidebarGameModeBtn) {
+    // Real initial state check -- see comment above on why this isn't
+    // just hardcoded to "off". Parses game_mode.sh's own real, explicit
+    // "game_mode: ON/OFF" first line rather than guessing from raw GPU
+    // numbers, which would be a real, fragile heuristic.
+    _callGameMode('status').then((data) => {
+      const output = (data && data.output) || '';
+      _setGameModeUI(/game_mode:\s*ON/.test(output));
+    }).catch(() => {});
+
+    sidebarGameModeBtn.addEventListener('click', async () => {
+      if (_gameModeBusy) return;
+      _gameModeBusy = true;
+      const nextAction = _gameModeOn ? 'off' : 'on';
+      const prevLabel = sidebarGameModeLabel ? sidebarGameModeLabel.textContent : '';
+      if (sidebarGameModeLabel) sidebarGameModeLabel.textContent = nextAction === 'on' ? 'Freeing GPU…' : 'Restoring…';
+      try {
+        const data = await _callGameMode(nextAction);
+        if (data && data.ok) {
+          _setGameModeUI(nextAction === 'on');
+        } else {
+          if (sidebarGameModeLabel) sidebarGameModeLabel.textContent = prevLabel;
+          console.error('game-mode action failed:', data && data.error);
+        }
+      } catch (e) {
+        if (sidebarGameModeLabel) sidebarGameModeLabel.textContent = prevLabel;
+        console.error('game-mode request error:', e);
+      } finally {
+        _gameModeBusy = false;
+      }
+    });
+  }
   // Modify form submit to handle special modes
   const chatForm = document.getElementById('chat-form');
   const originalSubmit = chatModule.handleChatSubmit;
@@ -3908,85 +4058,10 @@ function startOdysseusApp() {
   const messageInput = el('message');
   const modelPickerWrap = document.getElementById('model-picker-wrap');
 
-  function _readComposerPromptHistory() {
-    const chatBox = document.getElementById('chat-history');
-    if (!chatBox) return [];
-    return Array.from(chatBox.querySelectorAll('.msg-user'))
-      .reverse()
-      .map(msg => {
-        const body = msg.querySelector('.body');
-        return msg.dataset?.raw || (body ? body.textContent : '') || '';
-      })
-      .filter(Boolean);
-  }
-
-  if (messageInput && !messageInput._odysseusPromptRecallCapture) {
-    messageInput._odysseusPromptRecallCapture = true;
-    let recallHistory = [];
-    let recallIndex = -1;
-    let lastRecalled = '';
-    const norm = (v) => String(v || '').replace(/\r\n/g, '\n').trimEnd();
-    messageInput.addEventListener('input', () => {
-      if (norm(messageInput.value) === norm(lastRecalled)) return;
-      recallHistory = [];
-      recallIndex = -1;
-      lastRecalled = '';
-      try { delete messageInput.dataset.odysseusRecallIndex; } catch {}
-    }, true);
-    messageInput.addEventListener('keydown', (e) => {
-      if (e.key !== 'ArrowUp' && e.key !== 'ArrowDown') return;
-      if (e.shiftKey || e.altKey || e.ctrlKey || e.metaKey || e.isComposing) return;
-      if (window._ghostAutocomplete?.isActive?.()) return;
-      const fresh = _readComposerPromptHistory();
-      const history = fresh.length ? fresh : recallHistory;
-      if (!history.length) return;
-      const current = norm(messageInput.value);
-      let currentIndex = current ? history.findIndex(item => norm(item) === current) : -1;
-      if (current && currentIndex < 0 && current === norm(lastRecalled)) currentIndex = recallIndex;
-      if (current && currentIndex < 0) {
-        const markedIndex = Number(messageInput.dataset.odysseusRecallIndex);
-        if (Number.isInteger(markedIndex) && markedIndex >= 0 && markedIndex < history.length) {
-          currentIndex = markedIndex;
-        }
-      }
-      e.preventDefault();
-      e.stopPropagation();
-      e.stopImmediatePropagation();
-      if (e.key === 'ArrowDown') {
-        if (currentIndex < 0) return;
-        const nextIndex = currentIndex - 1;
-        if (nextIndex < 0) {
-          recallHistory = history;
-          recallIndex = -1;
-          lastRecalled = '';
-          try { delete messageInput.dataset.odysseusRecallIndex; } catch {}
-          messageInput.value = '';
-          try { messageInput.selectionStart = messageInput.selectionEnd = 0; } catch {}
-          try { uiModule.autoResize(messageInput); } catch {}
-          return;
-        }
-        const recalled = history[nextIndex];
-        recallHistory = history;
-        recallIndex = nextIndex;
-        lastRecalled = recalled;
-        try { messageInput.dataset.odysseusRecallIndex = String(nextIndex); } catch {}
-        messageInput.value = recalled;
-        try { messageInput.selectionStart = messageInput.selectionEnd = recalled.length; } catch {}
-        try { uiModule.autoResize(messageInput); } catch {}
-        return;
-      }
-      const nextIndex = currentIndex >= 0 ? Math.min(currentIndex + 1, history.length - 1) : 0;
-      const recalled = history[nextIndex];
-      if (!recalled) return;
-      recallHistory = history;
-      recallIndex = nextIndex;
-      lastRecalled = recalled;
-      try { messageInput.dataset.odysseusRecallIndex = String(nextIndex); } catch {}
-      messageInput.value = recalled;
-      try { messageInput.selectionStart = messageInput.selectionEnd = recalled.length; } catch {}
-      try { uiModule.autoResize(messageInput); } catch {}
-    }, true);
-  }
+  // ArrowUp/ArrowDown prompt recall on #message lives in
+  // static/js/composerArrowUpRecall.js (wired from chat.js). Do not re-add a
+  // copy here: two capture-phase listeners on the same textarea meant the one
+  // without the draft guard won and ate unsent multi-line prompts (#5862).
 
   const _sendIcon = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg>';
   const _micIcon = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/></svg>';

@@ -119,7 +119,33 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
                 "font-src 'self' https://cdn.jsdelivr.net; "
                 "img-src 'self' data: blob: https:; "
                 "media-src 'self' blob:; "
-                "connect-src 'self'; "
+                # Real, narrow addition, 2026-08-09: poller_status.js and
+                # poller_dashboard.js do direct browser fetches to three
+                # real health endpoints -- TradingView poller (originally
+                # on Oracle at 100.116.88.44:7010, confirmed unreachable
+                # from inside the container, browser-only) and the
+                # NVDA/crypto zone monitors, which run on the same
+                # Pop!_OS host as Odysseus itself but a different port
+                # (100.93.206.89:7020, confirmed reachable from the
+                # container too -- a proxy was viable here, but kept
+                # this consistent with the Oracle entry rather than
+                # building two different patterns for the same widget
+                # family). Three specific host:ports, not a broad
+                # relaxation.
+                #
+                # Real, corrected 2026-09-15: the TradingView poller
+                # itself was migrated from Oracle to Zeus on 2026-08-22
+                # (poller_status.js's own fetch URL was updated then to
+                # 192.168.1.253:7010, Zeus's real local-LAN address --
+                # confirmed directly reachable via curl, and confirmed
+                # the CSP was the actual, sole cause of the real,
+                # persistent "Failed to fetch" error via a real browser
+                # console capture, not CORS as first suspected), but
+                # this CSP entry was never updated to match at the time
+                # -- left pointing at the stale, pre-migration Oracle
+                # IP for nearly a month. Updated to the real, current
+                # Zeus address.
+                "connect-src 'self' http://192.168.1.253:7010 http://100.93.206.89:7020; "
                 "frame-src 'self'; "
                 "frame-ancestors 'none'"
             )

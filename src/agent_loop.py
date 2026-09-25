@@ -9,6 +9,7 @@ The LLM decides when to use tools by writing fenced code blocks.
 import asyncio
 import collections
 import json
+import os
 import re
 import time
 import logging
@@ -23,6 +24,7 @@ from src.llm_core import (
 from src.model_context import estimate_tokens
 from src.settings import get_setting
 from src.prompt_security import untrusted_context_message
+from src.text_helpers import ReasoningGate
 from src.tool_security import blocked_tools_for_owner, plan_mode_disabled_tools
 from src.tool_policy import GUIDE_ONLY_DIRECTIVE, WEB_TOOL_NAMES, ToolPolicy
 from src.tool_utils import _truncate, get_mcp_manager
@@ -275,6 +277,42 @@ def _load_mcp_disabled_map() -> Dict[str, set]:
     return disabled_map
 
 # System prompt that tells the LLM about available tools.
+# Real, added 2026-09-25, directly from a live evaluation of
+# xLAM-2-8b-fc-r as a candidate coordinator model (see
+# scripts/model_tool_calling_eval.py). get_tools_for_query()'s own
+# real, effective tool count can end up far larger than its nominal
+# `k` (a real, live case measured 8 in, 61 out, from ALWAYS_AVAILABLE +
+# domain seeding + keyword force-includes all stacking on top of the
+# base RAG retrieval). A direct, multi-trial evaluation found
+# tool-selection accuracy for a small (8B), locally-served model
+# collapsing well before a list that size -- especially once a
+# realistic system prompt is also present, which measurably compounds
+# the failure independent of tool count alone. This is a real,
+# reasonable, deliberately conservative starting cap based on that
+# evaluation, not a precisely-tuned number -- the evaluation itself
+# showed real run-to-run variance, so treat this as a starting point
+# to refine with more real trials via that same script, not a final
+# answer. Keyword-matched the same way as _model_supports_tools below,
+# so this stays in sync with which local model families are actually
+# in use, without needing a change at every call site.
+_SMALL_LOCAL_MODEL_KEYWORDS = (
+    "xlam",
+)
+_SMALL_LOCAL_MODEL_TOOL_CAP = 15
+
+
+def _tool_cap_for_model(model: str) -> "int | None":
+    """Real, direct helper: returns a real, conservative max_tools cap
+    for models known/measured to need one (see the comment above), or
+    None for everything else, meaning get_tools_for_query()'s existing,
+    uncapped behavior is completely unchanged for any model not in
+    _SMALL_LOCAL_MODEL_KEYWORDS."""
+    model_lc = (model or "").lower()
+    if any(kw in model_lc for kw in _SMALL_LOCAL_MODEL_KEYWORDS):
+        return _SMALL_LOCAL_MODEL_TOOL_CAP
+    return None
+
+
 # Always injected — the LLM decides whether to use them.
 _AGENT_PREAMBLE = """\
 You are an AI assistant with tool access. You can run shell commands, execute Python, search the web, \
@@ -406,7 +444,9 @@ _AGENT_RULES = """\
 - After a tool succeeds, do not second-guess it; reply with one short confirmation unless more work remains.
 - After a tool fails, retry with a concrete fix or state what is blocking you.
 - Finish only when the user's concrete request is actually done, or clearly state that you are blocked.
+- Do not take actions beyond what the user explicitly asked for. If asked to enable one specific thing (e.g. one layer, one setting), do exactly that and stop -- do not also enable other, unrequested options, and do not repeat an action that already succeeded.
 - User identity facts/preferences ("my name is X", "call me X", "I live in X") use `manage_memory`, not contacts.
+- Real, added 2026-09-22: only save a memory via `manage_memory` when the user directly states a fact or preference about themselves, in their own words, in the current message. Never infer or save a memory based on a pattern you notice across multiple requests, repeated tool arguments, coordinates, test inputs, or how often an action has been requested -- those are not user preferences unless the user explicitly says so. Confirmed directly, live: this exact mistake ("the user targets latitude X, longitude Y", "the user frequently uses <tool>") has repeatedly poisoned memory and caused wrong, stale defaults on later, different requests.
 """
 
 _API_AGENT_RULES = """\
@@ -420,7 +460,9 @@ _API_AGENT_RULES = """\
 - After a tool succeeds, do not second-guess it; reply with one short confirmation unless more work remains.
 - After a tool fails, retry with a concrete fix or state what is blocking you.
 - Finish only when the user's concrete request is actually done, or clearly state that you are blocked.
+- Do not take actions beyond what the user explicitly asked for. If asked to enable one specific thing (e.g. one layer, one setting), do exactly that and stop -- do not also enable other, unrequested options, and do not repeat an action that already succeeded.
 - User identity facts/preferences ("my name is X", "call me X", "I live in X") use `manage_memory`, not contacts.
+- Real, added 2026-09-22: only save a memory via `manage_memory` when the user directly states a fact or preference about themselves, in their own words, in the current message. Never infer or save a memory based on a pattern you notice across multiple requests, repeated tool arguments, coordinates, test inputs, or how often an action has been requested -- those are not user preferences unless the user explicitly says so. Confirmed directly, live: this exact mistake ("the user targets latitude X, longitude Y", "the user frequently uses <tool>") has repeatedly poisoned memory and caused wrong, stale defaults on later, different requests.
 """
 
 _LINK_RULES = """\
@@ -485,7 +527,8 @@ _DOMAIN_RULES = {
 ## Settings/API rules
 - Use `manage_settings` for preferences and tool enable/disable.
 - Use named tools over `app_api` when a named wrapper exists.
-- `app_api` is only for safe UI/API actions without a named tool; do not use it for shell, package installs, engine rebuilds, or sensitive auth/admin paths.""",
+- `app_api` is only for safe UI/API actions without a named tool; do not use it for shell, package installs, engine rebuilds, or sensitive auth/admin paths.
+- Real, added 2026-09-13: for the current state of MCP servers ("list mcp servers", "show mcp servers", "check mcp servers", or any phrasing asking for the live MCP server list), you MUST call `manage_mcp` with `action=list`. DO NOT answer from memory or summarize past MCP configurations -- confirmed via a real, live chat example that the model otherwise answers from a dense but stale memory entry instead of checking live state, even though this tool is available. This is distinct from the separate, existing nudge elsewhere in this prompt about preferring an already-retrieved external `mcp__*` tool for factual lookups -- this rule is specifically about checking the MCP server registry itself.""",
     "contacts": """\
 ## Contacts rules
 - Use `resolve_contact` to look up a contact's email or phone number by name. Searches the CardDAV address book and sent email history.
@@ -495,6 +538,16 @@ _DOMAIN_RULES = {
 ## Integration/API rules
 - To query or control a configured service integration (Home Assistant, Miniflux, Gitea, Linkding, Jellyfin, or any other registered service), use `api_call` with the integration name, HTTP method, path, and optional JSON body.
 - Do not use shell, curl, or `app_api` to reach a user's connected integration when `api_call` is available.""",
+    "system_diagnostics": """\
+## System/service diagnostics rules
+- For real host-service questions (is X hung/failing/crashed, check its logs, restart it, check its status), use `service_status` first to check real state, `read_systemd_logs` to see why, `check_service_dependencies` if the cause looks like an upstream/cascading failure, then `restart_service` only if a real problem is confirmed.
+- `restart_service` only ever accepts 4 real, allowlisted voice-pipeline services (Whisper/Piper) -- `service_status`/`read_systemd_logs`/`check_service_dependencies` accept any real, existing systemd unit on the host.
+- Do not use shell/bash to run `systemctl`/`journalctl` directly when these tools are available.""",
+    "container_management": """\
+## Container management rules
+- `container_status` accepts any real, existing container name (read-only) -- use it to check health before deciding whether `restart_container` is needed.
+- `restart_container` only ever accepts exactly 2 real, allowlisted, low-stakes containers: `odysseus-searxng-1`, `odysseus-ntfy-1`. This is a real, structural restriction -- it will refuse any other container, including Odysseus's own runtime container, no matter how the request is phrased. Do not suggest workarounds if it refuses.
+- Do not use shell/bash/docker CLI to check status or restart containers when these tools are available.""",
 }
 
 _DOMAIN_TOOL_MAP = {
@@ -509,12 +562,33 @@ _DOMAIN_TOOL_MAP = {
     "settings": {"manage_settings", "manage_endpoints", "manage_mcp", "manage_webhooks", "manage_tokens", "app_api"},
     "contacts": {"resolve_contact", "manage_contact"},
     "integrations": {"api_call"},
+    "system_diagnostics": {"restart_service", "read_systemd_logs", "service_status", "check_service_dependencies"},
+    "container_management": {"restart_container", "container_status"},
 }
 
 _WORKSPACE_TERMINUS_TOOLS = (
     _DOMAIN_TOOL_MAP["files"]
     | {"manage_skills", "ask_teacher", "web_search", "web_fetch", "ask_user", "update_plan"}
 )
+
+# Real, added 2026-09-16 (deliberately held from a late-night 09-13/09-15
+# session for a fresh start, per that session's own real conclusion):
+# extended-hours pricing awareness for the external `get_quotes` MCP tool.
+# Real, checked and confirmed directly before writing this: external MCP
+# tools use qualified names (`mcp__{server_id}__{tool_name}`) with a
+# server_id that could change if the server is ever re-registered, so a
+# static _DOMAIN_TOOL_MAP entry (built for fixed built-in tool names) isn't
+# robust here -- matched by suffix instead, inside this shared function,
+# rather than a separate check bolted onto _assemble_prompt, since both the
+# compact and non-compact paths already call this same function.
+_EXTENDED_HOURS_PRICE_RULE = (
+    "When using `get_quotes`, do not assume `last` represents a "
+    "regular-session price -- it may reflect extended-hours trading. "
+    "Surface this uncertainty when answering price questions, without "
+    "attempting timestamp/timezone inference or assuming fields like "
+    "`extended_price`/`market_status` exist."
+)
+
 
 def _domain_rules_for_tools(tool_names: set) -> list[str]:
     names = set(tool_names or set())
@@ -524,6 +598,8 @@ def _domain_rules_for_tools(tool_names: set) -> list[str]:
             rules.append(_DOMAIN_RULES[domain])
     if names & {"create_session", "list_sessions", "manage_session", "manage_documents", "manage_notes", "manage_calendar", "manage_tasks", "manage_skills", "manage_research"}:
         rules.append(_LINK_RULES)
+    if any(n.endswith("__get_quotes") for n in names):
+        rules.append(_EXTENDED_HOURS_PRICE_RULE)
     return rules
 
 # Each tool section is keyed by tool name(s) it covers.
@@ -569,6 +645,12 @@ Use this instead of `bash`, `curl`, `python`, `requests`, or scraping code for w
 <url or domain>
 ```
 Fetch and read the text content of a SPECIFIC URL the user names (e.g. "check example.com", "what does this page say <url>"). A bare domain like `example.com` works (defaults to https). Use this when you already have a concrete URL. For open-ended lookups use `web_search`, and for "research X" jobs use `trigger_research`.""",
+
+    "lookup_ticker": """\
+```lookup_ticker
+<ticker symbol>
+```
+Look up REAL, VERIFIED company identity and quote data for a ticker symbol. MANDATORY before stating what company a ticker represents, its price, or any other fact about it - do not answer from memory, especially for small/mid-cap tickers which are frequently confused with unrelated companies.""",
 
     "read_file": """\
 ```read_file
@@ -662,6 +744,10 @@ Generate an image. Line 1 = description, line 2 = model name, line 3 = WxH (e.g.
     "list_models": "- ```list_models``` — Show all available AI models across all endpoints. Use when user asks what models are available.",
     "manage_session": "- ```manage_session``` — Rename, archive, delete, fork, switch, or `list` chats (the UI calls them 'chats'; 'session' is internal). Line 1 = action (list/switch/rename/archive/unarchive/delete/important/unimportant/truncate/fork), Line 2 = exact chat id from `list_sessions` (or `current` where supported). For delete/archive/truncate, always list first and reuse the exact id; never invent placeholder ids. `switch`/`open` returns a clickable anchor link the user can tap to open the chat — use for \"open my X chat\".",
     "manage_memory": "- ```manage_memory``` — Manage the user's persistent memory (facts about the USER themselves, their preferences, context that persists across chats). Line 1 = action (list/add/edit/delete/search), rest = content. Use when user says 'remember this' about themselves, states identity facts like 'my name is <name>' / 'call me <name>' / 'I live in <place>', or asks about stored memories. DO NOT use for info about another person (their address, phone, email, birthday) — that goes in `manage_contact`. If the user pastes an address/phone with a name and says 'save this for <person>', use `manage_contact add` with the address arg, NOT manage_memory.",
+    "get_portfolio_context": "- ```get_portfolio_context``` — Fetch DK's real, current portfolio context (holdings, strategy, rules, thesis notes) from data/portfolio_context.md. No arguments. ALWAYS call this for any question about a specific position, balance, holding, or stored trading rule — even if you think you already know the answer, since this data updates over time and you do not have it pre-loaded. A ticker's absence from your own knowledge does NOT mean the position doesn't exist — check here first. This returns a large, complete reference document — after calling it, find and state the SPECIFIC fact the user actually asked about, not a general summary of everything in the document.",
+    "search_vault": "- ```search_vault``` — Search DK's real Obsidian vault (personal notes and reference material) for a query string. Argument: query (string, required). ALWAYS call this for any question about what the vault or a specific note/document says — never assume you lack access or answer from your own training knowledge. Returns matching file names and snippets, or an honest 'no matches' if nothing is found.",
+    "create_document_office": "- ```create_document_office``` — Create a real Word (.docx), PowerPoint (.pptx), Excel (.xlsx), or PDF file on disk. Args: format (docx/pptx/xlsx/pdf, required), filename (required), title, sections (list of {heading, text} for docx/pdf), slides (list of {title, text} for pptx), rows (list of lists for xlsx). ALWAYS use this instead of create_document when the user specifically asks for a Word doc, PowerPoint, spreadsheet, or PDF — create_document only makes a plain-text/code editor panel, not a real Office/PDF file. NEVER use bash/run_command/python/echo/redirection to write these files directly — that produces an invalid file with the right extension but corrupt content, which will appear to succeed but cannot actually be opened in Word/PowerPoint/Excel/a PDF reader.",
+    "skill_introspect": "- ```skill_introspect``` — Read-only lookup of the user's skill library. Args: action (list/view/view_ref/search, required), name (for view/view_ref), path (for view_ref), query (for search). ALWAYS available regardless of domain (trading, email, browser, etc), unlike manage_skills which only appears for workspace/file-related requests. If a relevant published skill might exist for the current task, check here BEFORE saying you don't know how to do something or lack a procedure — do not assume a skill is unavailable just because you don't see it in your current tool list. To create, edit, publish, or delete a skill, use manage_skills instead.",
     "manage_skills": "- ```manage_skills``` — Skill registry (SKILL.md format). Args (JSON): {\"action\": \"list|view|view_ref|search|add|edit|patch|publish|delete\", ...}. `list` returns the index of available skills (published + teacher-escalation drafts); `view name=foo` fetches the full SKILL.md; `view_ref name=foo path=...` loads a reference file under the skill directory. For `add`, provide an explicit kebab-case `name` and only report the exact returned name, because storage may normalize or dedupe it. Use this BEFORE doing domain work — there may already be a procedure (published or draft) that prescribes the correct steps. Drafts written by the teacher loop are authoritative guidance even though they're not yet published.",
     "manage_tasks": "- ```manage_tasks``` — Create and manage scheduled background tasks (recurring AI jobs). Args (JSON): {\"action\": \"list|create|edit|delete|pause|resume|run\", ...}",
     "manage_endpoints": "- ```manage_endpoints``` — Add, remove, or configure AI model API endpoints. Args (JSON): {\"action\": \"list|add|delete|enable|disable\", ...}. Use when user wants to add a new AI provider.",
@@ -894,7 +980,13 @@ _ADMIN_SCHEMA_NAMES = frozenset([
     "create_session", "list_sessions", "send_to_session", "pipeline",
     "ask_teacher", "list_models", "search_chats",
 ])
-_TOOL_SELECTION_TIMEOUT_SECONDS = 1.5
+# Real, raised 2026-08-10: 1.5s was too tight once real tool count grew past
+# ~150 (confirmed via logs: real reindex attempts were timing out and
+# silently skipping, leaving newly-added tools like search_rag and
+# get_transcript permanently missing from the retrieval index until the
+# next successful reindex). 5s is a real, deliberate tradeoff -- a slower
+# worst-case reindex, in exchange for it actually completing.
+_TOOL_SELECTION_TIMEOUT_SECONDS = 5.0
 
 
 def _is_ollama_openai_compat_url(endpoint_url: str) -> bool:
@@ -1364,6 +1456,31 @@ def _classify_agent_request(messages: List[Dict], last_user: str) -> Dict[str, o
     if has(r"\bapi[ _]call\b", r"\bintegrations?\b",
            r"\b(?:home ?assistant|miniflux|gitea|linkding|jellyfin)\b"):
         domains.add("integrations")
+    # Real, added 2026-09-05: same real class of bug as the #3794 fix
+    # above (api_call) -- confirmed directly, via the real
+    # [agent-intent] log, that queries like "check the recent logs for
+    # the ssh service" matched no existing domain, were classified
+    # low-signal, and never reached RAG-based tool retrieval at all,
+    # meaning restart_service/read_systemd_logs/service_status were
+    # only ever actually offered by accident (e.g. a service name like
+    # "jarvis-piper-server.service" happening to contain "server",
+    # matching the unrelated "cookbook" domain instead). Detect this
+    # real intent explicitly, independent of exact phrasing.
+    if has(r"\b(systemd|restart service|service (?:status|health|log|logs|"
+           r"dependenc\w*)|(?:log|logs) for.*service|"
+           r"is .*service (?:up|down|running|healthy)|"
+           r"hung service|crashed service|failing service|journalctl|"
+           r"service dependenc\w*|dependenc\w* (?:for|of) .*service|"
+           r"cascading failure|upstream (?:dependency|service|unit))\b"):
+        domains.add("system_diagnostics")
+    # Real, added 2026-09-05: same real bug class as system_diagnostics
+    # above -- without an explicit domain, container-related requests
+    # would only surface restart_container by accident, or fall to
+    # low_signal.
+    if has(r"\b(container|docker)\b.{0,20}\b(restart|status|logs?)\b",
+           r"\brestart\b.{0,20}\bcontainer\b",
+           r"\b(searxng|ntfy)\b"):
+        domains.add("container_management")
 
     low_signal = not continuation and not domains
     return {
@@ -1874,6 +1991,30 @@ def _normalize_ody_qwen_text_artifacts(text: str) -> str:
     return fixed
 
 
+def _dedupe_full_text(text: str) -> str:
+    """Detect and remove an exact, immediate self-repeat (the model
+    repeating its own just-generated answer verbatim, with nothing in
+    between) from a complete, accumulated response.
+
+    Real, added 2026-08-28, designed and unit-tested before integration:
+    checks split points from the middle of the text outward (so a
+    full-answer repeat is preferred over a shorter, coincidental phrase
+    match), and -- critically -- keeps the first occurrence PLUS any real,
+    legitimate content that follows the duplicate (e.g. a real trailing
+    note), rather than discarding everything after the detected repeat.
+    Requires a minimum length before checking, to avoid false-positiving
+    on short, legitimately-repeated phrases ("the the cat...").
+    """
+    n = len(text)
+    if n < 40:
+        return text
+    for half in range(n // 2, 19, -1):
+        first, second = text[:half], text[half:half * 2]
+        if first.strip() and first == second:
+            return first + text[half * 2:]
+    return text
+
+
 def _ody_qwen_terminal_tool_summary(tool_event: dict[str, Any]) -> str:
     """Return a deterministic user-facing answer for tools we can render safely."""
     tool_name = _resolved_tool_event_name(tool_event)
@@ -1906,6 +2047,50 @@ _FAKE_SUCCESS_RE = re.compile(
     r"\b(done|removed|deleted|sent|archived|unsubscribed|marked)\b",
     re.IGNORECASE,
 )
+
+# Real, added 2026-09-18: a real, direct, model-agnostic counterpart to
+# the existing _FAKE_SUCCESS_RE detector above -- confirmed directly,
+# live, this same session: gemma4-e2b-longctx answered "does
+# /home/dk/.bashrc exist?" with a confident, factually WRONG claim ("the
+# file does not exist") while genuinely never having called any real
+# filesystem tool at all (no tool_events this turn). Directly confirmed
+# the existing _FAKE_SUCCESS_RE mechanism does not cover this: it is
+# scoped only to _ody_qwen_finetune_model (models whose name starts with
+# "odysseus-qwen3"), which gemma4-e2b-longctx does not match. This is
+# real, deliberately logging-only (matching the pattern this observer
+# design was scoped to, and the same non-invasive design used throughout
+# the FrontierAgent observer suite built earlier this same night) --
+# it does NOT rewrite or block the response, only logs a real, direct
+# warning so this pattern's real frequency can be tracked before any
+# behavior-changing fix is considered.
+#
+# Real, direct bugs found and fixed before deployment via a real, live
+# unit test against the exact confirmed case: the query-regex originally
+# required "does/do", but the real query used "check if" -- broadened to
+# also match check/verify/is; the claim-regex originally matched bare
+# "exists" anywhere, causing a real false positive on unrelated text
+# ("rain exists in most models") -- tightened to require the claim
+# phrase to be genuinely anchored near a file/path/folder/directory
+# word, matching the real, confirmed phrasing ("the file ... does not
+# exist").
+_FILESYSTEM_QUERY_RE = re.compile(
+    r"\b(does|do|check|verify|confirm|is)\b.{0,40}\b(file|folder|directory|path)\b.{0,30}\bexist",
+    re.IGNORECASE,
+)
+_FILESYSTEM_CLAIM_RE = re.compile(
+    r"\b(file|folder|directory|path)\b.{0,60}\b(exists?|does not exist|"
+    r"doesn'?t exist|not found|no such file|is (?:not )?present)\b",
+    re.IGNORECASE,
+)
+
+
+
+def _looks_like_filesystem_query(text: str) -> bool:
+    return bool(_FILESYSTEM_QUERY_RE.search(text or ""))
+
+
+def _looks_like_filesystem_claim(text: str) -> bool:
+    return bool(_FILESYSTEM_CLAIM_RE.search(text or ""))
 
 
 def _looks_like_destructive_request(text: str) -> bool:
@@ -2540,7 +2725,24 @@ def _build_system_prompt(
         except Exception as _mcp_err:
             logger.debug(f"MCP description injection skipped: {_mcp_err}")
 
-    agent_msg = {"role": "system", "content": agent_prompt}
+    # Real, added 2026-09-13: applied fresh per-request (never merged into
+    # the cached base prompt above), so a rename takes effect on the very
+    # next message without needing a restart, and never leaks a stale name
+    # into another user's cached prompt in a multi-user setup.
+    _final_agent_prompt = agent_prompt
+    try:
+        _ai_name = (get_setting("ai_name", "") or "").strip()
+        if _ai_name:
+            _final_agent_prompt = (
+                f'Your name is "{_ai_name}". The user has chosen this name for '
+                f'you specifically; refer to yourself by it when asked your '
+                f'name or when introducing yourself, rather than any other '
+                f'name.\n\n' + agent_prompt
+            )
+    except Exception as _name_err:
+        logger.debug(f"ai_name injection skipped: {_name_err}")
+
+    agent_msg = {"role": "system", "content": _final_agent_prompt}
     insert_idx = 0
     for i, msg in enumerate(messages):
         if msg.get("role") == "system":
@@ -2693,6 +2895,27 @@ def _build_base_prompt(
         except Exception as _e:
             # Skill index is a soft enhancement — never fail prompt assembly on it.
             logger.debug(f"Skill-index injection skipped: {_e}")
+
+    # Real, minimal, added 2026-08-10: nudge the model to actually use
+    # retrieved tools rather than answer from memory. Confirmed via real,
+    # live testing tonight that the retrieval/selection system correctly
+    # offers relevant tools (e.g. search_rag) for real queries, but the
+    # local model (Qwen3-14B) often still answers from its own knowledge
+    # unless explicitly told to prefer a tool. Deliberately generic, not
+    # search_rag-specific -- the same pattern was seen with
+    # youtube_transcript. Gated on real MCP tools actually being present
+    # in this turn's set, not on every message.
+    if relevant_tools is not None and any(n.startswith("mcp__") for n in tool_names):
+        _nudge = (
+            "Tools are available for this request. If any retrieved tool can "
+            "provide factual information, documentation, or exact file "
+            "citations, prefer calling the appropriate tool rather than "
+            "answering from memory. When you use a tool, include the "
+            "returned source_path(s) in your answer. If the tool returns "
+            "nothing relevant, say \"I couldn't find a matching doc\" and "
+            "offer to search again.\n\n"
+        )
+        agent_prompt = _nudge + agent_prompt
 
     return agent_prompt, skill_index_block
 
@@ -3144,7 +3367,63 @@ async def stream_agent_loop(
     _t0 = time.time()
     _needs_admin = _detect_admin_intent(messages)
     _last_user = _extract_last_user_message(messages)
+    # Real, attempted 2026-09-17, reverted same session: a deterministic
+    # price-query interceptor (pre-fetch lookup_ticker, inject as context)
+    # was built here to fix confirmed unreliable model routing for price
+    # queries. Direct, repeated live testing found it fired inconsistently
+    # -- same code, same single worker process (confirmed only one),
+    # same exact query, sometimes entered this block, sometimes silently
+    # didn't, with zero exception raised either way. Root cause of the
+    # intermittency itself was NOT found (ruled out: stale build, log
+    # buffer/time-window visibility, multi-worker routing) before the
+    # decision was made to stop chasing it -- a non-deterministic
+    # "deterministic" fix defeats its own purpose. See jarvis-todo.md for
+    # the full investigation and the decision to pursue a simpler,
+    # non-agent-loop path for price queries instead.
     _ody_qwen_finetune_model = (model or "").lower().startswith("odysseus-qwen3")
+    # Real, added 2026-08-28: confirmed live, across multiple independent
+    # real agent trials, that this specific ticker-lookup LoRA sometimes
+    # repeats its own final answer sentence verbatim, immediately, with no
+    # separator. Confirmed this is a single-generation-round quirk (one
+    # real tool call, one real synthesis round each time), and confirmed
+    # via direct, careful reasoning before implementation that a
+    # stream-live-then-fix approach is fundamentally impossible: by the
+    # time enough content has accumulated to detect a duplicate, it has
+    # already been streamed to the user, and already-sent SSE tokens
+    # cannot be un-sent. Deliberately scoped to this model's own real,
+    # current name (not the odysseus-qwen3 prefix above, confirmed that
+    # no longer matches this model following an earlier, separate rename
+    # fix for a different bug).
+    _ody_ticker_model = "ticker" in (model or "").lower()
+    # Real, added 2026-09-02: the ticker LoRA's own duplication fix
+    # (see _ody_ticker_model's own comment above, and _dedup_buf below)
+    # is gated on this narrow, name-based check. A second, real,
+    # locally fine-tuned Odysseus adapter (jarvis-agent-behavior-lora-v1)
+    # was deployed with the same underlying streaming characteristics
+    # -- confirmed directly by reproducing the exact same verbatim-
+    # repeat bug for it, then tracing round_texts (clean, single copy)
+    # against the corrupted final content (duplicated), the same way
+    # this was originally confirmed for the ticker model -- but doesn't
+    # match "ticker" in its own name, so it fell through to the
+    # unfixed path and exhibited the identical, already-solved bug
+    # under a different name.
+    #
+    # Real, deliberate, additive design: a new, broader flag, not a
+    # change to _ody_ticker_model's own existing value or meaning --
+    # every current model's behavior is provably unchanged, since this
+    # new flag is true in every case the old one was, plus this one
+    # new case. Uses "-lora" as the broader signal (any locally
+    # fine-tuned, Unsloth-exported adapter deployed this way carries
+    # that suffix by convention) -- checked directly against every
+    # real, currently-registered Ollama model first: only the ticker
+    # model and this new one match; no generic base model does.
+    # Real, honest, known limitation: this is still a name-based
+    # heuristic, not a true capability check -- a future adapter
+    # deployed without "-lora" in its name would need either a
+    # naming-convention fix or a real capability flag (e.g., sourced
+    # from the Modelfile or a model-metadata table), which doesn't
+    # exist yet. Documented here rather than silently assumed solved.
+    _ody_dedup_fix_model = _ody_ticker_model or "-lora" in (model or "").lower()
     if _ody_qwen_finetune_model:
         try:
             temperature = min(float(temperature if temperature is not None else 0.2), 0.2)
@@ -3359,7 +3638,10 @@ async def stream_agent_loop(
                 if _retrieval_query:
                     try:
                         _relevant_tools = await asyncio.wait_for(
-                            asyncio.to_thread(tool_idx.get_tools_for_query, _retrieval_query, 8),
+                            asyncio.to_thread(
+                                tool_idx.get_tools_for_query, _retrieval_query, 8,
+                                None, _tool_cap_for_model(model),
+                            ),
                             timeout=_TOOL_SELECTION_TIMEOUT_SECONDS,
                         )
                         logger.info(f"[tool-rag] Retrieved tools for query: {sorted(_relevant_tools - ALWAYS_AVAILABLE)}")
@@ -3430,8 +3712,23 @@ async def stream_agent_loop(
             and not _active_document_relevant
             and not active_email
         ):
-            _relevant_tools = set(_WORKSPACE_TERMINUS_TOOLS)
-            logger.info("[tool-rag] Workspace file/terminal request; using Odysseus Terminus toolset")
+            _relevant_tools |= set(_WORKSPACE_TERMINUS_TOOLS)
+            logger.info("[tool-rag] Workspace file/terminal request; adding Odysseus Terminus toolset")
+            # Real, low-volume monitoring window (added 2026-08-14, remove
+            # after ~48h once confirmed no edge cases): this is exactly the
+            # site of the real bug fixed tonight (a destructive replacement
+            # that silently dropped ALWAYS_AVAILABLE tools). Only logs -- at
+            # WARNING, not INFO -- if the invariant this fix relies on ever
+            # doesn't hold, so it stays silent (and low-volume) on every
+            # normal request and only fires on a genuine edge case.
+            from src.tool_index import ALWAYS_AVAILABLE as _AA_CHECK
+            _missing_always_available = _AA_CHECK - _relevant_tools
+            if _missing_always_available:
+                logger.warning(
+                    f"[tool-rag] MONITORING: ALWAYS_AVAILABLE tools missing after "
+                    f"workspace-terminal override despite the union fix: "
+                    f"{sorted(_missing_always_available)}"
+                )
 
     # If this turn targets the open document, keep editing tools available
     # regardless of which selection path (RAG, keyword, caller-provided) ran.
@@ -3637,6 +3934,21 @@ async def stream_agent_loop(
         # deepseek-v2/v3/chat support tools via the cloud API; deepseek-r1
         # (reasoning model) does not — handled by the blocklist below.
         "deepseek-v", "deepseek-chat",
+        # Real, added 2026-09-24: Salesforce's xLAM-2 models are
+        # specifically fine-tuned for native, OpenAI-style function
+        # calling (the "fc" in the real model name, e.g.
+        # llama-xlam-2-8b-fc-r) -- confirmed directly, live: given the
+        # native tools= parameter, xLAM produces a correct tool call on
+        # the first try; given only the fenced-block prompt-text
+        # convention (the default for local/LM-Studio-served models),
+        # it repeatedly hallucinated calls to tools that don't exist
+        # (e.g. "date", "ntfy.sh") instead of reliably reading the
+        # prompt-described tools. This is genuinely the format it was
+        # trained on, not a broad exception -- kept as its own,
+        # narrowly-matched keyword rather than widening _API_HOSTS
+        # (which would affect every other model served through the same
+        # LM Studio endpoint, not just this one).
+        "xlam",
     ))
     # Models known to reject tool schemas at the Ollama/local level even when
     # the endpoint URL would otherwise enable native function calling.
@@ -3877,9 +4189,76 @@ async def stream_agent_loop(
     # so the user can resume instead of the turn silently stalling.
     _exhausted_rounds = False
 
+    # Real, added 2026-09-22: caps exact-duplicate tool calls (same tool,
+    # same arguments) within one real agent-loop request. Confirmed
+    # directly, live: qwen2.5:7b repeatedly re-toggled the same GEV layer
+    # (e.g. "ais-live-vessels") 6+ times in one real run, and separately
+    # toggled unrequested layers well beyond what the user asked for --
+    # a prompt-level rule addition was tried first and did not change
+    # this behavior across three real trials (0/16/21 calls). This is a
+    # deliberately narrow, code-level backstop: it only blocks an EXACT
+    # repeat of a call already made successfully this turn, not "was this
+    # tool/argument combination reasonable to call at all" -- that
+    # broader question is a real, separate, harder problem this does not
+    # attempt to solve.
+    _ody_seen_tool_calls: set = set()
+    # Real, added 2026-09-22: hard cap on total calls to any one
+    # tool within a turn, on top of the exact-duplicate blocker
+    # above. Confirmed directly, live: blocking exact duplicates
+    # alone did not stop the excess -- the model just tried
+    # different, still-unrequested layers instead (satellites,
+    # earthquakes, airspace, aircraft, ships), reaching 21 total
+    # calls in one real trial. 3 gives real headroom for a
+    # genuine multi-layer request while stopping runaway cases.
+    _ody_tool_call_counts: dict = {}
+    # Real, fixed 2026-09-22: this MUST match the real, full,
+    # MCP-prefixed tool_type seen at runtime (e.g.
+    # "mcp__e986afd1__gev_set_layer_visibility"), not the bare
+    # tool name -- confirmed directly, live, via debug logging,
+    # that the bare-name version below NEVER matched at all,
+    # meaning this entire cap mechanism silently did nothing
+    # since it was first written. Real, known fragility: this
+    # hardcoded server id ("e986afd1") breaks silently if the
+    # gods_eye_view MCP server is ever re-registered with a new one.
+    _ody_CAPPED_TOOLS = {"mcp__e986afd1__gev_set_layer_visibility": 3}
+    # Real, added 2026-09-22: confirmed directly, live, that
+    # disabling a capped tool for future rounds alone is not
+    # enough -- the model kept trying anyway (reaching round 16+,
+    # hitting the connection timeout still looping) rather than
+    # accepting the text instruction or the disabled schema. This
+    # flag forces the whole turn to end the round a cap is first
+    # hit, mirroring the existing real "budget_hit"/"_awaiting_user"
+    # break pattern already used elsewhere in this same loop.
+    _ody_force_stop_turn = False
+    # Real, added 2026-09-22: separate, general safeguard from the
+    # per-tool cap above. Confirmed directly, live: a real trial
+    # produced 20 straight rounds of gev_fly_to_location calls that
+    # ALL failed validation (null/malformed arguments every time,
+    # including the model echoing its own prior error text -- the
+    # literal string "DUPLICATE" -- back as a location query). Since
+    # the per-tool cap only increments on real SUCCESS, it never
+    # engaged at all here -- the count stayed at 0 the whole time.
+    # This tracks consecutive FAILURES across any/all tools, reset
+    # on any real success, and force-stops the turn once it gets
+    # unreasonably high -- independent of which specific tool is
+    # failing.
+    _ody_consecutive_failures = 0
+    _ODY_MAX_CONSECUTIVE_FAILURES = 5
+
     for round_num in range(1, max_rounds + 1):
         round_response = ""
         round_reasoning = ""  # reasoning_content deltas (DeepSeek-thinking, vLLM --reasoning-parser)
+        # Real, added 2026-08-28: holds this round's content for the ticker
+        # LoRA specifically (see _ody_ticker_model's own comment above) --
+        # not yielded live, not added to round_response/full_response until
+        # the round's natural end, where it's deduplicated and flushed once.
+        _dedup_buf = ""
+        # Catches untagged chain-of-thought that a model emits as plain
+        # content instead of a proper thinking delta or <think> block --
+        # buffers only the still-unclassified leading portion of the round
+        # (see ReasoningGate docstring); everything after it opens streams
+        # through with zero added overhead.
+        _reasoning_gate = ReasoningGate()
         native_tool_calls = []  # populated if model uses function calling
         # Reset doc streaming state per round
         _doc_acc = ""
@@ -4098,6 +4477,7 @@ async def stream_agent_loop(
                         # next request (DeepSeek requires this; harmless for
                         # other vendors). Regular content still flows into
                         # round_response unchanged.
+                        _gate_buffered = False
                         if data.get("thinking"):
                             round_reasoning += data["delta"]
                         else:
@@ -4108,10 +4488,42 @@ async def stream_agent_loop(
                             )
                             if _ody_qwen_finetune_model:
                                 _delta_text = _normalize_ody_qwen_text_artifacts(_delta_text)
-                            round_response += _delta_text
-                            full_response += _delta_text
-                            data["delta"] = _delta_text
-                        if not _ody_qwen_finetune_model or data.get("thinking"):
+                                # This model's content path is handled entirely
+                                # through the doc-streaming fence protocol below
+                                # (it never reaches the plain yield at the end of
+                                # this block anyway) -- leave it untouched by the
+                                # reasoning gate rather than mix two special cases.
+                                _safe_text = _delta_text
+                            else:
+                                # Buffers untagged chain-of-thought that a model
+                                # emits as plain content instead of a thinking
+                                # delta or <think> block. See ReasoningGate's
+                                # docstring in text_helpers.py for the design;
+                                # this only adds latency to the still-buffered
+                                # leading portion of a round, never the whole
+                                # response.
+                                _safe_text = _reasoning_gate.feed(_delta_text)
+                                _gate_buffered = not _safe_text
+                            if _ody_dedup_fix_model:
+                                # Real, added 2026-08-28: hold this model's
+                                # content back entirely rather than add to
+                                # round_response/full_response or yield it
+                                # here -- both happen once, together, at the
+                                # round's natural end (after deduplication),
+                                # so the user never sees a duplicate and
+                                # conversation history never records one
+                                # either. See _dedup_buf's own comment above.
+                                _dedup_buf += _safe_text
+                                data["delta"] = _safe_text
+                            else:
+                                round_response += _safe_text
+                                full_response += _safe_text
+                                data["delta"] = _safe_text
+                        # Real, added 2026-08-28: this model's content is
+                        # suppressed here entirely -- see the comment on
+                        # _dedup_buf above -- and flushed once, deduplicated,
+                        # at the round's natural end instead.
+                        if not _ody_dedup_fix_model and (not _ody_qwen_finetune_model or data.get("thinking")) and not _gate_buffered:
                             yield f"data: {json.dumps(data)}\n\n"
                         # Detect text-fence doc streaming. Normal agent prompts
                         # use ```create_document; the doc LoRA streaming path
@@ -4183,6 +4595,34 @@ async def stream_agent_loop(
                 yield chunk
             # Intercept [DONE] — don't forward until all rounds finish
 
+        # End of this round's stream: release whatever the reasoning gate
+        # was still holding (its own flush() rule: never swallow content it
+        # was never certain about, e.g. a long final paragraph with no
+        # blank-line boundary -- see ReasoningGate.flush() docstring).
+        _gate_tail = _reasoning_gate.flush()
+        if _gate_tail and _ody_dedup_fix_model:
+            # Real, added 2026-08-28: this model's content still goes
+            # through the same reasoning gate above -- whatever it was
+            # still holding also needs to join the dedup buffer, not be
+            # added to round_response/yielded directly the normal way.
+            _dedup_buf += _gate_tail
+        elif _gate_tail:
+            round_response += _gate_tail
+            full_response += _gate_tail
+            yield f"data: {json.dumps({'delta': _gate_tail})}\n\n"
+
+        # Real, added 2026-08-28: flush this model's buffered content now,
+        # once, deduplicated -- see _dedup_buf's own comment near its
+        # initialization above for the full design and why full buffering
+        # (rather than live streaming) is the only way to guarantee a
+        # duplicate never reaches the user. Designed and unit-tested before
+        # integration against the real, actual observed failure shape.
+        if _ody_dedup_fix_model and _dedup_buf:
+            _deduped = _dedupe_full_text(_dedup_buf)
+            round_response += _deduped
+            full_response += _deduped
+            yield f"data: {json.dumps({'delta': _deduped})}\n\n"
+
         logger.info(
             "[agent-timing] round_stream_done round=%s elapsed=%.3fs text_chars=%s tool_calls=%s first_event=%s first_token=%s",
             round_num,
@@ -4207,6 +4647,24 @@ async def stream_agent_loop(
             is_api_model=(_is_api_model and not guide_only),
             allow_fenced_for_api=_ody_doc_finetune_mode,
         )
+
+        # Real, observed failure mode (confirmed via direct testing: qwen3:14b
+        # produces zero text AND zero tool calls on round 1 for certain prompts,
+        # 60-90% of the time on 2 real eval scenarios). Route this into the
+        # existing, already-proven force-answer salvage path below rather than
+        # building a separate retry mechanism -- reuses tested logic instead
+        # of adding new, parallel complexity to this already-large function.
+        if (
+            round_num == 1
+            and not tool_blocks
+            and not native_tool_calls
+            and not _strip_think_blocks(strip_tool_blocks(round_response)).strip()
+        ):
+            logger.info(
+                "[agent] round 1 produced no text and no tool calls -- routing to force-answer salvage"
+            )
+            _force_answer = True
+
         if _ody_doc_stream_create_mode and tool_blocks:
             create_idx = next(
                 (idx for idx, block in enumerate(tool_blocks) if block.tool_type == "create_document"),
@@ -4625,6 +5083,43 @@ async def stream_agent_loop(
                 _ody_notes_finetune_mode
                 and block.tool_type in {"manage_notes", "manage_calendar", "manage_tasks"}
             )
+            # Real, added 2026-09-22: normalize (tool, arguments) into a
+            # stable key -- confirmed directly the same real repeated call
+            # sometimes arrives with JSON keys in a different order (e.g.
+            # {"layerId":..,"enabled":..} vs {"enabled":..,"layerId":..}),
+            # so a raw string compare alone would miss real duplicates.
+            try:
+                _ody_call_key = (block.tool_type, json.dumps(json.loads(block.content), sort_keys=True))
+            except Exception:
+                _ody_call_key = (block.tool_type, block.content.strip())
+            _ody_is_dupe = _ody_call_key in _ody_seen_tool_calls
+            _ody_cap = _ody_CAPPED_TOOLS.get(block.tool_type)
+            _ody_over_cap = (
+                _ody_cap is not None
+                and _ody_tool_call_counts.get(block.tool_type, 0) >= _ody_cap
+            )
+            # Real, fixed 2026-09-22: this must be independent of the
+            # if/elif messaging chain below. Confirmed directly, live,
+            # that the original version -- setting this only inside the
+            # "elif _ody_over_cap" branch -- almost never actually fired,
+            # because a call that is both over-cap AND an exact duplicate
+            # (the common real case once a model starts repeating failed
+            # attempts) always hit the earlier "elif _ody_is_dupe" branch
+            # first, so this code was unreachable in that case. Real,
+            # observed result of that bug: a live trial reached round 10
+            # with a repeatedly-blocked-as-duplicate call that was ALSO
+            # over cap the whole time, without this ever triggering --
+            # the turn only ended when Odysseus's separate, pre-existing
+            # max_rounds/round-exhaustion limit finally cut it off, not
+            # this mechanism. Rather than leaving the tool available and
+            # rejecting it every time, disable it for future rounds (the
+            # real, existing disabled_tools set already used to rebuild
+            # the schema list each round) and force the whole turn to
+            # end, regardless of whether this specific call also happens
+            # to be a duplicate.
+            if _ody_over_cap:
+                disabled_tools.add(block.tool_type)
+                _ody_force_stop_turn = True
             if tool_policy and tool_policy.blocks(block.tool_type) and not _ody_clamped_tool_allowed:
                 desc = f"{block.tool_type}: BLOCKED"
                 result = {
@@ -4633,6 +5128,30 @@ async def stream_agent_loop(
                     "blocked": True,
                 }
                 logger.info("Tool blocked before start by policy: %s", block.tool_type)
+            elif _ody_is_dupe:
+                desc = f"{block.tool_type}: DUPLICATE"
+                result = {
+                    "error": (
+                        f"Skipped: this exact {block.tool_type} call (same arguments) already "
+                        "succeeded earlier this turn. If you need to do something different, "
+                        "use different arguments; otherwise this action is already done."
+                    ),
+                    "exit_code": 1,
+                    "blocked": True,
+                }
+                logger.info("Tool call skipped as an exact duplicate: %s", block.tool_type)
+            elif _ody_over_cap:
+                desc = f"{block.tool_type}: CALL_LIMIT_REACHED"
+                result = {
+                    "error": (
+                        f"Skipped: {block.tool_type} has already been called {_ody_cap} times "
+                        "this turn. Stop calling this tool -- only do what the user explicitly "
+                        "asked for, and finish your reply now."
+                    ),
+                    "exit_code": 1,
+                    "blocked": True,
+                }
+                logger.info("Tool call skipped, per-turn cap reached: %s", block.tool_type)
             else:
                 yield (
                     f'data: {json.dumps({"type": "tool_start", "tool": block.tool_type, "command": cmd_display, "full_command": full_command, "round": round_num})}\n\n'
@@ -4674,6 +5193,12 @@ async def stream_agent_loop(
                             f'data: {json.dumps({"type": "tool_progress", "tool": block.tool_type, "round": round_num, **evt})}\n\n'
                         )
                     desc, result = await _tool_task
+                    if not result.get("error"):
+                        _ody_seen_tool_calls.add(_ody_call_key)
+                        if block.tool_type in _ody_CAPPED_TOOLS:
+                            _ody_tool_call_counts[block.tool_type] = (
+                                _ody_tool_call_counts.get(block.tool_type, 0) + 1
+                            )
                 finally:
                     # If the SSE client disconnects (or this generator is
                     # otherwise closed) while we're awaiting a progress event
@@ -5065,6 +5590,45 @@ async def stream_agent_loop(
             if block.tool_type in _VERIFIER_EFFECTFUL_TOOLS:
                 _effectful_used = True
 
+            # Real, added 2026-09-22: general, tool-agnostic safeguard.
+            # Reset on any real success; increment on any failure
+            # (policy-blocked, duplicate, over-cap, or a genuine
+            # execution/validation error -- result["error"] is set
+            # consistently across all of those real paths). Force-stops
+            # the turn once too many failures happen in a row, regardless
+            # of which specific tool keeps failing -- confirmed directly
+            # this is needed since the per-tool cap above only tracks
+            # successes and never engages during an all-failures loop.
+            # Real, fixed 2026-09-22: genuine MCP tool results use
+            # {"stdout", "stderr", "exit_code"} -- confirmed directly,
+            # live, via debug logging, that they do NOT have an "error"
+            # key at all. Only the synthetic results this file
+            # constructs itself (policy-blocked/duplicate/over-cap) use
+            # "error". Checking result.get("error") alone silently
+            # missed every genuine MCP validation failure -- exit_code
+            # is the real, universal indicator across both shapes.
+            # Real, fully validated 2026-09-22 via a direct, deterministic
+            # E2E test (a temporary forced-failure injector, since
+            # removed): confirmed the complete real path end to end --
+            # failure count 1..5 -> threshold reached -> force_stop_turn
+            # set -> stop block entered -> yield statement reached ->
+            # (separately, downstream in chat_routes.py's own consumer)
+            # the yielded delta shape recognized -> client receives the
+            # stop message. That downstream piece needed its own real
+            # fix (this file's yield used {"type": "delta", "content":
+            # ...} where the real consumer only recognizes a bare
+            # {"delta": ...} shape) -- see this same file's own stop-yield
+            # site below for that fix's details.
+            _ody_result_failed = bool(result.get("error")) or (
+                isinstance(result, dict) and result.get("exit_code") not in (0, None)
+            )
+            if _ody_result_failed:
+                _ody_consecutive_failures += 1
+                if _ody_consecutive_failures >= _ODY_MAX_CONSECUTIVE_FAILURES:
+                    _ody_force_stop_turn = True
+            else:
+                _ody_consecutive_failures = 0
+
             formatted = format_tool_result(desc, result)
             tool_results.append(formatted)
             tool_result_texts.append(formatted)
@@ -5083,6 +5647,31 @@ async def stream_agent_loop(
 
         # If budget was hit, stop the loop
         if budget_hit:
+            break
+
+        # Real, added 2026-09-22: a per-turn tool-call cap was hit this
+        # round -- stop the whole turn now rather than let the model keep
+        # trying blocked/disabled calls in further rounds (confirmed live
+        # this happens otherwise). Tell the user plainly what happened.
+        if _ody_force_stop_turn:
+            _ody_stop_msg = (
+                "\n\n(Stopped: reached the per-turn limit on repeated tool "
+                "calls. The requested action(s) above were completed; "
+                "additional, unrequested calls were blocked.)"
+            )
+            full_response += _ody_stop_msg
+            # Real, fixed 2026-09-22: the real, consuming code in
+            # chat_routes.py checks "if \"delta\" in data" -- a literal,
+            # top-level "delta" key -- and falls through an explicit
+            # allowlist of recognized event types otherwise, silently
+            # dropping anything that matches neither. Confirmed directly
+            # this file's own established, correct shape for every real
+            # text delta is bare {"delta": text}, not {"type": "delta",
+            # "content": text} -- the shape used here originally, which
+            # matched neither check and was silently discarded every
+            # time, despite the yield statement itself executing
+            # correctly (confirmed via direct debug-log instrumentation).
+            yield f'data: {json.dumps({"delta": _ody_stop_msg})}\n\n'
             break
 
         # ask_user posed a question — stop here and wait for the user's choice.
@@ -5162,6 +5751,41 @@ async def stream_agent_loop(
             and _looks_like_success_claim(full_response)
         ):
             full_response = "I couldn't make that change because no matching tool action completed."
+    # Real, added 2026-09-18: a real, model-agnostic, logging-only
+    # detector for the filesystem-claim-without-a-tool-call pattern
+    # confirmed directly, live, this same session (gemma4-e2b-longctx
+    # confidently, wrongly claimed a real, existing file did not exist,
+    # having genuinely never called any filesystem tool at all this
+    # turn). Deliberately does NOT rewrite/block the response yet --
+    # only logs a real, direct warning, so this pattern's real frequency
+    # can be tracked before any behavior-changing fix is considered.
+    if (
+        not tool_events
+        and _looks_like_filesystem_query(_last_user)
+        and _looks_like_filesystem_claim(full_response)
+    ):
+        logger.warning(
+            "[agent] filesystem hallucination overridden: model=%r made a "
+            "real filesystem claim with zero tool_events this turn -- "
+            "user_query=%r original_response_snippet=%r",
+            model, _last_user[:200], full_response[:200],
+        )
+        # Real, upgraded 2026-09-18 (round 2): from logging-only to a
+        # real, deterministic code-level override -- confirmed directly
+        # this same session that prompt-level guidance alone is
+        # insufficient (the existing "files" domain rule pack already
+        # says "Use file tools for real disk files", and the model
+        # still ignored it). This mirrors the exact same real pattern
+        # already proven in the _ody_qwen_finetune_model block just
+        # above: detect the bad response, then replace it with an
+        # honest failure message, rather than relying on the model to
+        # follow instructions. This is a real, deterministic Python
+        # if-condition, not prompt text the model could ignore.
+        full_response = (
+            "I need to actually check the filesystem to answer that "
+            "accurately, and I wasn't able to complete that check this "
+            "turn. Please try asking again."
+        )
     _response_before_tool_summary = full_response
     if tool_events:
         for _ev in reversed(tool_events):
@@ -5201,14 +5825,156 @@ async def stream_agent_loop(
                     full_response = _email_summary
                 break
 
+    # Real, added 2026-08-17: holdings-claim verification. Checks the
+    # model's OWN final text for a specific-ticker share-count claim and
+    # compares it against src/portfolio_parser.py's real, direct parse of
+    # data/portfolio_context.md. Runs regardless of whether a tool was
+    # called -- added specifically because the confirmed failure case
+    # (qwen3-14b-longctx, "17 shares" for KTOS) never called a tool at
+    # all, so any check gated on tool_events would never fire for it.
+    #
+    # Honest, deliberate design choice: this APPENDS a correction rather
+    # than replacing the claim. Confirmed directly earlier tonight (the
+    # reminder-message experiment) that this streaming architecture can
+    # only add to what's already been shown to the user, not erase it --
+    # attempting a silent replacement here would repeat that same,
+    # already-documented failure.
+    # Real, honest status 2026-08-17: attempted a live-brokerage-data
+    # version of this check (calling public_com directly before trusting
+    # the static document), after confirming the document-only version
+    # below can "correct" a genuinely right answer into a wrong one
+    # (real case: MP, model said 20 correctly, document said stale 11).
+    # Reverted that attempt: it caused a real, structural async crash
+    # (RuntimeError: "Attempted to exit cancel scope in a different task
+    # than it was entered in", confirmed via live container logs) when
+    # calling mcp.call_tool() from this specific streaming-generator
+    # context. Not safely fixable with confidence tonight. Back to the
+    # simpler, document-only version below -- known-imperfect (can be
+    # wrong if the document itself is stale) but at least reliably does
+    # something rather than silently failing.
+    # Real, updated 2026-08-17: now consults get_freshness_recommendation()
+    # -- a fast, real, SYNCHRONOUS lookup against data/holdings_freshness.json
+    # (no network call, safe here) -- to decide between three real, distinct
+    # correction qualities rather than always using the same generic,
+    # hedged language regardless of what's actually known:
+    #   - "trust_document": a recent, real live check confirms the document
+    #     is accurate -- use confident, non-hedged language.
+    #   - "append_note" (freshness data says stale): a recent, real live
+    #     check found the document itself is wrong -- cite the REAL, live
+    #     number from the freshness record, not the known-stale document.
+    #   - "needs_live_check": no recent freshness data -- fall back to the
+    #     original, generic hedged language (unchanged from before).
+    _holdings_correction = None
+    try:
+        import re as _hc_re
+        # Real, critical fix, added 2026-09-02: confirmed directly, via
+        # live debug capture, that the model itself sometimes learns to
+        # generate its own version of this exact "(Note: the stored
+        # reference document lists...)" sentence -- unsurprising, since
+        # this same code has been generating this pattern in real,
+        # historical conversations that then became real training data.
+        # The model has no real way to read the actual, current
+        # portfolio file itself, so its own version is unreliable --
+        # confirmed live: one real capture showed the model claiming
+        # "8 shares of RGTI, pending 1 more" (actually IONQ's real
+        # numbers, not RGTI's), immediately followed by this code's own,
+        # correct, deterministic note ("5 shares... 3 more") -- both
+        # left visible together, contradicting each other in the same
+        # real response. Strip any such model-generated instance before
+        # this function's own real, deterministic check runs, so at
+        # most one note -- the real, correct one -- ever survives.
+        _hc_model_note_re = _hc_re.compile(
+            r"\n*\(Note: the stored reference document lists[^)]*\)",
+        )
+        full_response = _hc_model_note_re.sub("", full_response or "")
+        _candidates = _hc_re.findall(r"\b[A-Z]{2,5}\b", full_response or "")
+        if _candidates:
+            from src.portfolio_parser import parse_portfolio_context, get_freshness_recommendation
+            with open("data/portfolio_context.md", "r", encoding="utf-8") as _hc_f:
+                _hc_parsed = parse_portfolio_context(_hc_f.read())
+            for _ticker in _candidates:
+                if _ticker not in _hc_parsed.confirmed_holdings:
+                    continue
+                _real_shares = _hc_parsed.confirmed_holdings[_ticker]
+                _real_str = f"{_real_shares:g}"
+                for _m in _hc_re.finditer(_hc_re.escape(_ticker), full_response):
+                    _window = full_response[max(0, _m.start() - 40):_m.end() + 40]
+                    _num_matches = _hc_re.findall(r"\b(\d+(?:\.\d+)?)\b", _window)
+                    for _claimed in _num_matches:
+                        if _claimed == _real_str:
+                            break
+                    else:
+                        if _num_matches:
+                            _fresh = get_freshness_recommendation(_ticker, _real_shares)
+                            _pending_buy = _hc_parsed.pending_qty_for(_ticker, "BUY")
+                            if _fresh["recommendation"] == "trust_document":
+                                _holdings_correction = (
+                                    f"\n\n(Note: confirmed {_real_str} shares of {_ticker}, "
+                                    f"verified against live brokerage data as of "
+                                    f"{_fresh['last_checked'][:10]}.)"
+                                )
+                            elif _fresh["recommendation"] == "append_note" and _fresh.get("last_checked"):
+                                # Real, live-verified data exists and disagrees with the
+                                # document too -- read the actual live qty from the
+                                # freshness record itself, don't just re-cite the
+                                # document we now know is stale.
+                                import json as _hc_json
+                                try:
+                                    with open("data/holdings_freshness.json") as _hc_ff:
+                                        _live_qty = _hc_json.load(_hc_ff)[_ticker]["qty_at_check"]
+                                    _holdings_correction = (
+                                        f"\n\n(Note: live brokerage data as of "
+                                        f"{_fresh['last_checked'][:10]} showed {_live_qty:g} "
+                                        f"shares of {_ticker} -- the stored reference document "
+                                        f"({_real_str} shares) is confirmed out of date.)"
+                                    )
+                                except Exception:
+                                    _fresh["recommendation"] = "needs_live_check"  # real, honest fallback if the file read fails here
+                            if _fresh["recommendation"] == "needs_live_check":
+                                _holdings_correction = (
+                                    f"\n\n(Note: the stored reference document lists {_real_str} "
+                                    f"shares of {_ticker}"
+                                    + (f", with a separate, unexecuted pending buy order for {_pending_buy:g} more" if _pending_buy else "")
+                                    + ". This document may not reflect the most recent trades -- "
+                                    "ask for live verification if this matters for a real decision.)"
+                                )
+                    break
+                if _holdings_correction:
+                    break
+    except Exception:
+        pass  # real, deliberate: never let verification break the real response
+
+    if _holdings_correction:
+        full_response = full_response + _holdings_correction
+
     if (
-        tool_events
-        and full_response.strip()
-        and full_response.strip() != (_response_before_tool_summary or "").strip()
-        and full_response.strip() not in (_response_before_tool_summary or "")
+        full_response.strip()
+        and (
+            (tool_events and full_response.strip() != (_response_before_tool_summary or "").strip()
+             and full_response.strip() not in (_response_before_tool_summary or ""))
+            or _holdings_correction
+        )
     ):
-        _final_delta = full_response.strip()
-        yield f"data: {json.dumps({'delta': _final_delta})}\n\n"
+        # Real, fixed 2026-08-28: for the ticker LoRA specifically, the main
+        # answer was already streamed once by the dedup-buffer fix earlier
+        # in this same function (see _ody_ticker_model/_dedup_buf) -- this
+        # pre-existing block previously re-yielded the ENTIRE full_response
+        # whenever tool_events were present, which for this model meant
+        # the already-shown answer appeared a second time, immediately
+        # followed by the real holdings correction note, looking exactly
+        # like the verbatim-repeat bug already fixed elsewhere. Confirmed
+        # this precisely via a temporary, reverted debug log tracing
+        # _dedup_buf's own clean, single-copy state at flush time against
+        # the corrupted final content -- the duplicate was introduced here,
+        # not in the dedup fix itself. For this model, yield only the new
+        # holdings-correction text (the genuinely new content), never the
+        # whole response again.
+        if _ody_dedup_fix_model and tool_events:
+            _final_delta = _holdings_correction or ""
+        else:
+            _final_delta = _holdings_correction if (_holdings_correction and not tool_events) else full_response.strip()
+        if _final_delta:
+            yield f"data: {json.dumps({'delta': _final_delta})}\n\n"
 
     # --- Final metrics ---
     total_duration = time.time() - total_start

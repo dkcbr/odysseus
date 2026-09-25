@@ -10,6 +10,18 @@ from datetime import datetime
 
 logger = logging.getLogger(__name__)
 
+
+class MemoryStoreUnreadable(RuntimeError):
+    """memory.json exists on disk but could not be read or parsed.
+
+    "The contents are unknown" is categorically different from "there are no
+    memories". A read-modify-write caller that conflates the two appends to an
+    empty view and then persists it, destroying the whole store — the writes
+    are atomic, so the loss is durable. Raised by
+    :meth:`MemoryManager.load_all_for_update` so those callers fail closed.
+    """
+
+
 def tokenize(text: str) -> List[str]:
     """Simple tokenizer that splits on whitespace and removes punctuation."""
     return [word.strip('.,!?";') for word in text.split()]
@@ -84,6 +96,59 @@ class MemoryManager:
                         
         return memories
         
+    def process_correction_command(self, message: str) -> Tuple[bool, str]:
+        """Real, deterministic, model-independent detection of an explicit
+        correction command (e.g. "Correction: always answer in bullet
+        points"). Added 2026-08-17 after confirming directly, across 4
+        real trials on 2 different models, that relying on model
+        initiative to call manage_memory with category="correction" does
+        not work reliably (0/4, even with an explicit persona instruction).
+        This bypasses the model entirely, matching the same real, already-
+        proven pattern process_inline_memory_command uses below.
+
+        Real, deliberate validation, not just a bare regex match:
+        - Requires an explicit "correction:" (or close variant) prefix --
+          does not try to infer intent from arbitrary phrasing.
+        - Rejects captures that are too short (<10 chars) or too long
+          (>300 chars) to avoid saving noise or entire pasted documents.
+        - Rejects captures that are just filler ("I misspoke", "that was
+          wrong", "never mind") with no concrete, sentence-length content
+          -- a real, actionable correction should read as an instruction,
+          not an acknowledgment.
+
+        Returns (is_correction, extracted_text). Real, honest limitation:
+        this only catches messages that use one of these explicit prefixes
+        -- it will not detect a correction phrased as "actually I prefer
+        X" without the prefix. That's a deliberate, conservative choice:
+        false negatives (missing a correction) are much safer than false
+        positives (saving something that was never meant to be a
+        permanent rule) for a category that gets injected into every
+        future conversation.
+        """
+        pattern = r'^(?:correction|note for (?:future|next time)|remember this rule|always remember)[:\-]?\s+(.+)$'
+        match = re.match(pattern, message.strip(), re.IGNORECASE)
+        if not match:
+            return False, ""
+
+        candidate = match.group(1).strip()
+
+        if len(candidate) < 10 or len(candidate) > 300:
+            return False, ""
+
+        trivial_phrases = {
+            "i misspoke", "that was wrong", "never mind", "forget that",
+            "ignore that", "my mistake", "sorry", "nothing", "n/a",
+        }
+        if candidate.lower().rstrip(".!") in trivial_phrases:
+            return False, ""
+
+        # Real, basic secret-pattern guard -- don't save something that
+        # looks like it might contain an API key, password, or similar.
+        if re.search(r'\b(?:api[_\- ]?key|password|secret|token)\b', candidate, re.IGNORECASE):
+            return False, ""
+
+        return True, candidate
+
     def process_inline_memory_command(self, message: str) -> Tuple[bool, str]:
         """
         Check if a message is an inline memory command (e.g. "remember: X").
@@ -110,21 +175,69 @@ class MemoryManager:
             with open(self.memory_file, 'w', encoding='utf-8') as f:
                 json.dump([], f, ensure_ascii=False, indent=2)
     
-    def load_all(self) -> List[Dict]:
-        """Load all memory entries from JSON file (unfiltered)."""
+    def _read_entries(self) -> List[Dict]:
+        """Parse the store, or raise :class:`MemoryStoreUnreadable`.
+
+        Returns ``[]`` only when the file genuinely does not exist. Every other
+        failure mode raises, so callers can tell "no memories" apart from
+        "couldn't read the memories".
+        """
         if not os.path.exists(self.memory_file):
             return []
 
         try:
             with open(self.memory_file, "r", encoding="utf-8") as f:
                 data = json.load(f)
-                if isinstance(data, list):
-                    return self._validate_entries(data)
-        except (json.JSONDecodeError, PermissionError) as e:
-            logger.error("Error loading memory.json: %s", e)
-            return self._migrate_from_legacy()
+        except OSError as e:
+            # PermissionError is an OSError (a scanner holding the file, a
+            # permissions problem, bad media).
+            raise MemoryStoreUnreadable(
+                f"cannot read {self.memory_file}: {e}"
+            ) from e
+        except json.JSONDecodeError as e:
+            # This is the branch that actually destroyed stores: the file reads
+            # back fine, so nothing stops the save that follows. A truncated
+            # memory.json is reachable because core/database.py rewrites it with
+            # a plain open(..,"w") + json.dump during migration.
+            #
+            # Preserved behaviour: a corrupt store still gets one shot at the
+            # pre-JSON memory.txt migration. Only raise when that finds nothing,
+            # so we never report "empty" for a store we simply failed to parse.
+            legacy = self._migrate_from_legacy()
+            if legacy:
+                return legacy
+            raise MemoryStoreUnreadable(
+                f"{self.memory_file} is not valid JSON: {e}"
+            ) from e
 
-        return []
+        if not isinstance(data, list):
+            raise MemoryStoreUnreadable(
+                f"{self.memory_file} is not a JSON array (got {type(data).__name__})"
+            )
+        return self._validate_entries(data)
+
+    def load_all(self) -> List[Dict]:
+        """Load all memory entries from JSON file (unfiltered).
+
+        Lenient by design: this feeds display, search, and context-injection
+        paths, so an unreadable store degrades to an empty list rather than
+        breaking chat. Never build a value from this that you intend to save
+        back — use :meth:`load_all_for_update` for that.
+        """
+        try:
+            return self._read_entries()
+        except MemoryStoreUnreadable as e:
+            logger.error("Error loading memory.json: %s", e)
+            return []
+
+    def load_all_for_update(self) -> List[Dict]:
+        """Load for a read-modify-write cycle.
+
+        Propagates :class:`MemoryStoreUnreadable` instead of degrading to ``[]``
+        so a caller can never append to an empty view and persist it over a
+        store that was only temporarily unreadable (issue #5673).
+        """
+        return self._read_entries()
 
     def load(self, owner: str = None) -> List[Dict]:
         """Load memory entries, optionally filtered by owner."""
@@ -135,7 +248,12 @@ class MemoryManager:
 
     def claim_ownerless(self, owner: str):
         """Assign all ownerless memory entries to the given owner."""
-        entries = self.load_all()
+        try:
+            entries = self.load_all_for_update()
+        except MemoryStoreUnreadable as e:
+            # Skip the sweep rather than rewrite the store from an unknown view.
+            logger.error("Skipping ownerless claim, memory store unreadable: %s", e)
+            return
         changed = False
         claimed = 0
         for entry in entries:
@@ -235,7 +353,12 @@ class MemoryManager:
         if not ids:
             return
         id_set = set(ids)
-        entries = self.load_all()
+        try:
+            entries = self.load_all_for_update()
+        except MemoryStoreUnreadable as e:
+            # Best-effort counter; never worth rewriting the store blind.
+            logger.error("Skipping uses bump, memory store unreadable: %s", e)
+            return
         changed = False
         for e in entries:
             if e.get("id") in id_set:
@@ -291,6 +414,17 @@ class MemoryManager:
     def get_relevant_memories(self, query: str, memories: list, threshold: float = 0.05, max_items: int = 8):
         """Get memories that are relevant to the query based on text similarity and semantic keyword matching."""
         if not memories or not query.strip():
+            return []
+
+        # Memory hygiene: exclude superseded facts from automatic retrieval.
+        # Convention: prefix the fact text with "[SUPERSEDED]" (case-insensitive,
+        # optional leading whitespace) when a fact is replaced by newer info but
+        # kept for historical record. Superseded facts are never auto-injected
+        # into chat context; they remain visible to explicit manage_memory
+        # search/list calls, since those read the raw store directly rather
+        # than going through this function.
+        memories = [m for m in memories if not m.get("text", "").lstrip().upper().startswith("[SUPERSEDED")]
+        if not memories:
             return []
             
         # Define keyword categories for semantic matching

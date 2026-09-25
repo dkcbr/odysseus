@@ -1,0 +1,11 @@
+{
+  "name": "gods-eye-view-mcp",
+  "version": "0.1.0",
+  "type": "module",
+  "private": true,
+  "description": "MCP server wrapping God's Eye View's new server-side Agent Bus, so Odysseus can control the running globe directly.",
+  "main": "server.js",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0"
+  }
+}

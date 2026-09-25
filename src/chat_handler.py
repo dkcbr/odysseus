@@ -329,6 +329,31 @@ class ChatHandler:
 
     async def handle_memory_command(self, session, message: str) -> Optional[str]:
         """Process inline memory commands. Returns response string or None."""
+        # Real, checked first: explicit correction commands, added
+        # 2026-08-17 as a deterministic, model-independent alternative
+        # to relying on the model to call manage_memory with
+        # category="correction" (confirmed unreliable, 0/4 real trials).
+        is_correction, correction_text = self.memory_manager.process_correction_command(
+            message
+        )
+        if is_correction and correction_text:
+            mem = self.memory_manager.load()
+            if not self.memory_manager.find_duplicates(correction_text, mem):
+                new_entry = self.memory_manager.add_entry(correction_text, category="correction")
+                mem.append(new_entry)
+                self.memory_manager.save(mem)
+
+            session.add_message(ChatMessage("user", message))
+            session.add_message(
+                ChatMessage("assistant", f"Saved as a correction (always included in future context): {correction_text}")
+            )
+
+            from src.database import update_session_last_accessed
+
+            update_session_last_accessed(session.id)
+            self.session_manager.save_sessions()
+            return f"Saved as a correction (always included in future context): {correction_text}"
+
         is_memory_cmd, memory_text = self.memory_manager.process_inline_memory_command(
             message
         )

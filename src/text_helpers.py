@@ -56,12 +56,12 @@ _PROMPT_ECHO_RES = (
 _REASONING_PREFIX_RE = re.compile(
     r"^\s*(?:"
     r"the user (?:wants|is|asks|needs|wrote|said|told|messaged|requested)|"
-    r"i (?:need|should|have|'ll|will|am going)(?: to)? (?:write|draft|reply|respond|read|check|look|review|consider|think|provide|generate|produce|craft|compose|acknowledge|summarize|answer|give|keep|aim|make|address|focus|use|just|simply|analyze|format|create|build|note|decide)|"
+    r"(?:i|we) (?:need|should|have|'ll|will|am going|are going)(?: to)? (?:write|draft|reply|respond|read|check|look|review|consider|think|provide|generate|produce|craft|compose|acknowledge|summarize|answer|give|keep|aim|make|address|focus|use|just|simply|analyze|format|create|build|note|decide)|"
     r"let me (?:think|look|see|check|read|review|consider|draft|write|analyze|format|summarize|create|produce|craft|note|extract|identify|figure)|"
     r"looking at (?:the|this|that)|"
-    r"(?:okay|alright|hmm|right|so|well|first|next|now)[,.]?\s+(?:the|i|let|so|now|this|here)|"
+    r"(?:okay|alright|hmm|right|so|well|first|next|now)[,.]?\s+(?:the|i|we|let|so|now|this|here)|"
     r"based on (?:the|this|what|context)|"
-    r"to (?:draft|write|reply|respond|summarize|answer)"
+    r"(?:to|we should) (?:draft|write|reply|respond|summarize|answer)"
     r")\b",
     re.IGNORECASE,
 )
@@ -187,6 +187,133 @@ def strip_think(text: str, *, prose: bool = False, prompt_echo: bool = True) -> 
     if prose:
         out = _strip_reasoning_prose(out)
     return out.strip()
+
+
+
+
+# --- Streaming-safe version of the reasoning-prose heuristic -----------------
+#
+# `_strip_reasoning_prose` above needs the *complete* text: it splits on
+# blank-line paragraph boundaries and only strips a leading contiguous run
+# of paragraphs that look like reasoning. That's fine for a value that's
+# already fully assembled (a saved message, a synthesis result) but doesn't
+# help a live token-by-token stream: by the time a paragraph is complete
+# enough to classify, an unbuffered stream has already rendered it on the
+# user's screen.
+#
+# `ReasoningGate` is a small, explicit state machine a caller can feed
+# incoming deltas into. It buffers only the leading, still-unclassified
+# portion of a round; the moment it either (a) sees a paragraph that is
+# NOT reasoning-prefixed, or (b) hits a size safety-cap with no paragraph
+# boundary at all, it opens permanently and stops buffering for the rest
+# of the round -- matching `_strip_reasoning_prose`'s own "only a LEADING
+# run, and never touch a single-paragraph response" behavior, so a normal
+# long-form single-paragraph answer is delayed by at most SAFETY_CAP_CHARS
+# worth of tokens, not the whole round.
+class ReasoningGate:
+    """Feed streamed content deltas in; get back what's now safe to show.
+
+    Usage per round:
+        gate = ReasoningGate()
+        for delta in stream:
+            safe_text = gate.feed(delta)
+            if safe_text:
+                yield safe_text
+        tail = gate.flush()  # call once at end-of-round
+        if tail:
+            yield tail
+    """
+
+    # Cap on how much of a round we'll hold back looking for a paragraph
+    # boundary before giving up and treating it as ordinary content. Keeps
+    # the worst case (a long single-paragraph answer with no blank line)
+    # bounded to a fraction of a second of added latency rather than the
+    # whole round.
+    # Fast path: the longest real match against _REASONING_PREFIX_RE is ~25
+    # chars (verified empirically against every alternative in the pattern);
+    # re.match only looks from the start, so once the buffer has more
+    # characters than any alternative could possibly need, a non-match is
+    # final -- more text arriving later cannot turn it into a match. 80 is a
+    # generous margin over the observed ~25. This is what keeps a normal
+    # short answer (no blank line at all, e.g. "The answer is 42.") from
+    # being held hostage until end-of-round: it opens within ~80 characters
+    # instead of waiting for a paragraph boundary that may never come.
+    EARLY_CHECK_CHARS = 80
+    # Only reached if the early check DID look like reasoning (rare) and no
+    # paragraph boundary has shown up yet -- last-resort valve so a model
+    # that writes one long reasoning-flavored paragraph with no blank line
+    # can't stall the round indefinitely.
+    SAFETY_CAP_CHARS = 2000
+    # Cap on how many LEADING paragraphs we'll drop as reasoning before
+    # giving up and flushing everything -- bounds worst-case delay even
+    # for a model that writes several short reasoning paragraphs in a row,
+    # and avoids ever fully swallowing a round (see flush()).
+    MAX_STRIPPED_PARAGRAPHS = 4
+
+    def __init__(self) -> None:
+        self._buffer = ""
+        self._stripped = 0
+        self._open = False
+        self._early_checked = False
+
+    def feed(self, delta: str) -> str:
+        """Feed one content delta. Returns text that's now safe to show
+        immediately (may be "" if still buffering, or may be more than
+        just `delta` once the gate opens and flushes what it was holding)."""
+        if self._open:
+            return delta
+        self._buffer += delta
+        while not self._open:
+            m = re.search(r"\n\s*\n", self._buffer)
+            if m is None:
+                if (not self._early_checked and self._stripped == 0
+                        and len(self._buffer) >= self.EARLY_CHECK_CHARS):
+                    self._early_checked = True
+                    if not _REASONING_PREFIX_RE.match(self._buffer):
+                        # Doesn't look like reasoning at all -- most common
+                        # case, open immediately rather than waiting for a
+                        # blank line that a short/normal answer may never have.
+                        self._open = True
+                        out, self._buffer = self._buffer, ""
+                        return out
+                    # Does look like reasoning so far -- fall through to the
+                    # larger safety cap below while we wait for a boundary.
+                if len(self._buffer) < self.SAFETY_CAP_CHARS:
+                    return ""  # keep waiting
+                # Safety valve: never found a boundary, stop holding it up.
+                self._open = True
+                out, self._buffer = self._buffer, ""
+                return out
+            paragraph, rest = self._buffer[:m.start()], self._buffer[m.end():]
+            if _REASONING_PREFIX_RE.match(paragraph) and self._stripped < self.MAX_STRIPPED_PARAGRAPHS:
+                self._stripped += 1
+                self._early_checked = False  # re-arm the fast path for the next paragraph
+                self._buffer = rest  # drop the reasoning paragraph, keep looking
+                continue
+            # Not reasoning (or we've stripped enough already) -- open the
+            # gate and release everything held so far, boundary included,
+            # in one go. Everything after this call passes straight through.
+            self._open = True
+            out, self._buffer = self._buffer, ""
+            return out
+        return ""  # unreachable, keeps type-checkers happy
+
+    def flush(self) -> str:
+        """Call once at end-of-round for whatever's still buffered.
+
+        Mirrors `_strip_reasoning_prose`'s own rule: a response that is
+        ENTIRELY leading reasoning paragraphs with nothing after them is
+        not stripped down to nothing -- that would silently swallow the
+        whole answer. So if everything we held turned out to be
+        reasoning-prefixed with no boundary ever found, we hand it all
+        back here rather than drop it.
+        """
+        if self._open or not self._buffer:
+            self._open = True
+            return ""
+        out, self._buffer = self._buffer, ""
+        self._open = True
+        return out
 
 
 # Back-compat alias for the deep-research code path. Keeps existing imports

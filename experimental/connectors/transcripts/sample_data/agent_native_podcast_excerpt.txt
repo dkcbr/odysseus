@@ -1,0 +1,67 @@
+
+Chapter 1: Intro
+0:000 secondsreally important thing about open [music] claw which is soul.md. So it's like the soul of your agent that's going to help you run your company. For
+0:077 secondsexample, what I believe will happen in the future is that even before you build a website, you're going to build that agent [music] that's going to help you build a company. Most of the world still
+0:1414 secondsthinks about agents as something you prompt. Can we sort of automate even the prompting such that the agent can be doing useful work for me while I'm not
+0:2222 secondsin the computer? Today I'm having a conversation with GMO Roush, the CEO of a multi-billion dollar company, Versell.
+0:2929 secondsAnd today we're talking about agents, specifically how companies are [music] using agents within their business. In this video, we talk about Verscell's
+0:3737 secondsinternal agent that almost 1,000 people use within the company. We also talk about whether companies need one god
+0:4444 secondsagent or a team of many agents. We also talk about the challenges of setting up agents right now and how to get started
+0:5151 secondsbuilding agents that actually improve your business workflows. We also talk about open- source models like Kimmy K3 and a lot more. My goal with this
+1:001 minuteconversation is to answer [music] the following question. How do we as business operators, employees, and individuals use AI agents to [music] be
+1:081 minute, 8 secondsmore productive? And if you like videos like these, please consider hitting that like button and subscribing to this podcast. It helps me out a ton. Let's dive in.
+1:201 minute, 20 secondsGMO, thank you so much for joining me on this on this episode of Agent Native. It's great to be here.
+Chapter 2: The State of Agent Adoption
+1:271 minute, 27 secondsMy first question to you is, you know, obviously we have all these models coming out, right? You we have Kimmy models from China, models built in the US, Claude, Fable, now Claude, Opus 5.
+1:381 minute, 38 secondsUm, we have all these different platforms people can use. And my audience are most people are business operators. They work in a big company.
+1:461 minute, 46 secondsThey want to use agents in their business to become more efficient and to become like a better team. Where are
+1:541 minute, 54 secondscompanies at in terms of implementing AI agents in their business?
+1:581 minute, 58 secondsYeah. When I think about we can call it the agentic revolution. Um just like any new platform that has hit the internet
+2:072 minutes, 7 secondsor the software landscape, you think about the killer apps, right? when the personal computer came out, you know, what were the killer apps? The word
+2:142 minutes, 14 secondsprocessor, uh, you know, um, uh, for some of us playing video games on our personal computers and things like that.
+2:222 minutes, 22 secondsThen mobile came along, right? And, um, I think the killer app of mobile in many ways was um, you know, not only
+2:302 minutes, 30 secondsshrinking interfaces from things that we used to use and putting them in a smaller screen, but enabling entire new use cases.
+2:382 minutes, 38 secondsAnd I think with agents we see a similar thing. So number one clearly one of the killer apps of agents is uh building software
+2:472 minutes, 47 secondsand building software or you know what you could call coding agents happens to be a core capability of solving a number
+2:552 minutes, 55 secondsof knowledge worker tasks because when you think about okay I'm I'm preparing a presentation for somebody
+3:023 minutes, 2 secondsyou occasionally will say well we have to do some data science over here in order to then you know get a report or
+3:103 minutes, 10 secondsget some data back and put it into a slide or you'll say I'll automate a bunch of different steps and summarize some documents and then I'll put some
+3:183 minutes, 18 secondsother information into a slide and and so I think clearly one of the foundational parts of this uh new period of time where we do a lot of our work
+3:263 minutes, 26 secondsincreasingly with agents is coding as a capability and I think that's this has transformed everyone's jobs right you
+3:333 minutes, 33 secondscan think of it as a number of sort of um levels of expertise I guess when it comes to coding so there are people like
+3:403 minutes, 40 secondsmyself that can do agentic engineering meaning you know I've been programming for 20 years and now if I sit down and and face a really hard engineering task
+3:493 minutes, 49 secondsI will use a coding agent to enhance my engineering then there's this new emergence of what you would call vibe coding right which is everybody building
+3:593 minutes, 59 secondsa prototype of software or even a full stack application depending on sort of where your ambitions are and maybe even
+4:064 minutes, 6 secondshow ambitious the application itself is and so you have products like Vzero and uh lovable and things like this that
+4:134 minutes, 13 secondsare making it more um I guess they're democratizing building software or even building uh the the creative act or
+4:224 minutes, 22 secondsenhancing the creative act of coming up with new software.
+4:264 minutes, 26 secondsI also think agents are uh one of the killer apps is what I would call the run your company better agent or um the um
+4:364 minutes, 36 secondsknowledge base plus data analysis plus um uh project management agent. the the
+4:444 minutes, 44 secondssort of brain agent that uh sits alongside of you and disseminates
+4:524 minutes, 52 secondsknowledge, business intelligence, even day-to-day tasks like you know who should I talk to within the company that
+4:594 minutes, 59 secondsis an expert in a certain task like navigating the org chart, navigating the what is to many overwhelming amounts of
+5:075 minutes, 7 secondsinformation that reside in the internal systems uh of a sort of think of this as like making the
+5:155 minutes, 15 secondscompany's backend more efficient. And as I mentioned, I think coding is this omniresent capability. So to give you a
+5:235 minutes, 23 secondsconcrete example from within Verscell, what we noticed pretty quickly is that um anybody that's helping a customer,
+5:325 minutes, 32 secondsanybody that's trying to close a sale, anybody that's even building new software needs to needs to ask questions
+5:395 minutes, 39 secondsabout, you know, what are our customers doing? When did they first reach out?
+5:455 minutes, 45 secondsHow much um uh time do we spend with them? How much do they use our platform?
+5:505 minutes, 50 secondsHow many SQS of our of Verscell does this customer use? And so this internal brain agent has sort of emerged as uh I
+5:585 minutes, 58 secondsthink one of the killer apps of AI. And maybe for a lot of people this still seems foreign like what are you talking about? There's an agent that can run my
+6:046 minutes, 4 secondscompany. Uh so excited to make that more of a thing.
+6:086 minutes, 8 secondsIt all sounds like amazing in theory, right? Like the this brain agent that everyone at a company can talk to. It
+6:146 minutes, 14 secondskind of understands kind of the SOPs and the rules of the company, the best practices, that type of thing. And I've been trying to implement this, you know,
+6:226 minutes, 22 secondsI have a nineperson marketing team now that like helps me create content on my channels, on other channels. And my
+6:306 minutes, 30 secondsquestion to you is like, you know, for me, when I use AI personally, I'm inside codeex. That's just the tool that I've been using because I think it's good for
+6:386 minutes, 38 secondsknowledge work because I can ask it to create basically any type of document or something and it'll kind of open up in the side window. But what I can't figure
+6:476 minutes, 47 secondsout personally is like how do I enable this for a team? You know, if I were to onboard someone new and I want them to
+6:546 minutes, 54 secondshave access to my skills and but also like a lot of my skills involve my personal connections like my personal
+Chapter 11: Closing Thoughts: Owning Your Own Intelligence
+53:0553 minutes, 5 secondsAnyway, I really appreciate uh you joining. Um I think you guys are going to do great. I one thing I didn't realize is how much business owners
+53:1453 minutes, 14 secondsdon't want to get locked in to a certain provider. I mean, you know, like Claude Tag is their kind of I don't want to say it's their version of V, but it's like kind of an agent you can add to Slack.
+53:2353 minutes, 23 secondsand so many people are resistant to it because they don't want to get locked into only Claude's models. Um, so I think that is something that you guys will have going for you. That's really cool.
+53:3253 minutes, 32 secondsAnd it goes beyond, you know, the the model. I think it's not about having Claude in your workspace. It's about having an intelligence of your own, right?
+53:4053 minutes, 40 secondsSo there's almost like an element of like baptizing your agents like this is our agent. This is our company. It's, you know, I actually liken it to the web
+53:4953 minutes, 49 secondsbecause the web was all about I own my domain name. Mhm. I'm the I'm the king of my own domain.
+53:5553 minutes, 55 secondsUh and I think we're now seeing we're living through the version of that for the intelligence age.
+54:0254 minutes, 2 seconds100%. Yeah, I agree. I thank you so much for coming on. This was this was a lot of fun. Let's do it sometime soon.
