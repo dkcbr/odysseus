@@ -815,6 +815,49 @@ class Memory(Base):
         Index('ix_memories_session', 'session_id', 'timestamp'),  # Composite for session-based queries
     )
 
+
+class RejectedMemory(Base):
+    """
+    Real, added 2026-09-25: durable telemetry for memory-add attempts
+    rejected by the code-level inferred-pattern guard in
+    ai_interaction.py's do_manage_memory (_looks_like_inferred_pattern).
+
+    Built directly to support the "measure recurrence" step of a
+    staged hardening plan: container logs alone are ephemeral (rotate,
+    get lost across restarts) and hard to query/aggregate over time.
+    This table is the durable, queryable record of what got rejected,
+    when, and why -- not a mechanism that itself changes save behavior.
+    No FK/cascade on session_id (unlike Memory.session_id above,
+    deliberately): a rejected attempt is telemetry that should outlive
+    the session it happened in, not be cleaned up alongside it.
+    """
+    __tablename__ = "rejected_memories"
+
+    id = Column(String, primary_key=True, index=True)
+
+    # The actual candidate text that was rejected, and what it would
+    # have been categorized as, had it been saved.
+    text = Column(Text, nullable=False)
+    category = Column(String, nullable=True)
+
+    # Which specific check fired and why (e.g. "raw coordinate pattern",
+    # "third-person tool-usage-frequency inference") -- the exact reason
+    # string _looks_like_inferred_pattern returned, so different failure
+    # shapes can be told apart later without re-parsing free text.
+    reason = Column(String, nullable=False)
+
+    # Context, deliberately no FK -- see docstring above.
+    session_id = Column(String, nullable=True, index=True)
+    owner = Column(String, nullable=True, index=True)
+
+    timestamp = Column(DateTime, default=utcnow_naive)
+
+    __table_args__ = (
+        Index('ix_rejected_memories_time', 'timestamp'),
+        Index('ix_rejected_memories_reason', 'reason', 'timestamp'),
+    )
+
+
 def _migrate_add_last_message_at_column():
     """Add last_message_at to sessions + backfill from the latest message
     timestamp per session (fallback to last_accessed / created_at when a
