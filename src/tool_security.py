@@ -14,24 +14,26 @@ logger = logging.getLogger(__name__)
 # (tool_schemas), and the non-admin blocklist below all derive from this set,
 # so a tool added to the email server can't become reachable under its bare
 # name without also being blocked for non-admins.
-BUILTIN_EMAIL_TOOLS = frozenset({
-    "list_email_accounts",
-    "list_emails",
-    "read_email",
-    "search_emails",
-    "scan_email_unsubscribes",
-    "unsubscribe_email",
-    "send_email",
-    "reply_to_email",
-    "draft_email",
-    "draft_email_reply",
-    "ai_draft_email_reply",
-    "archive_email",
-    "delete_email",
-    "mark_email_read",
-    "bulk_email",
-    "download_attachment",
-})
+BUILTIN_EMAIL_TOOLS = frozenset(
+    {
+        "list_email_accounts",
+        "list_emails",
+        "read_email",
+        "search_emails",
+        "scan_email_unsubscribes",
+        "unsubscribe_email",
+        "send_email",
+        "reply_to_email",
+        "draft_email",
+        "draft_email_reply",
+        "ai_draft_email_reply",
+        "archive_email",
+        "delete_email",
+        "mark_email_read",
+        "bulk_email",
+        "download_attachment",
+    }
+)
 
 
 # Tools regular/public users must not execute directly. These either expose
@@ -142,27 +144,62 @@ PLAN_MODE_READONLY_TOOLS = {
 # here — read-only tools are covered by the allowlist. Keep in sync when adding
 # new mutating tools.
 _PLAN_MODE_KNOWN_MUTATORS = {
-    "write_file", "edit_file", "apply_patch", "todowrite",
-    "create_document", "edit_document", "update_document",
-    "suggest_document", "manage_documents", "create_session", "manage_session",
-    "send_to_session", "pipeline", "manage_memory", "manage_skills",
-    "manage_tasks", "manage_notes", "manage_endpoints", "manage_mcp",
-    "manage_webhooks", "manage_tokens", "manage_settings", "manage_contact",
-    "manage_calendar", "api_call", "app_api", "ui_control",
-    "send_email", "reply_to_email", "bulk_email", "delete_email",
-    "archive_email", "mark_email_read", "unsubscribe_email",
+    "write_file",
+    "edit_file",
+    "apply_patch",
+    "todowrite",
+    "create_document",
+    "edit_document",
+    "update_document",
+    "suggest_document",
+    "manage_documents",
+    "create_session",
+    "manage_session",
+    "send_to_session",
+    "pipeline",
+    "manage_memory",
+    "manage_skills",
+    "manage_tasks",
+    "manage_notes",
+    "manage_endpoints",
+    "manage_mcp",
+    "manage_webhooks",
+    "manage_tokens",
+    "manage_settings",
+    "manage_contact",
+    "manage_calendar",
+    "api_call",
+    "app_api",
+    "ui_control",
+    "send_email",
+    "reply_to_email",
+    "bulk_email",
+    "delete_email",
+    "archive_email",
+    "mark_email_read",
+    "unsubscribe_email",
     # The draft tools create documents and download_attachment writes to
     # disk — mutating. They have no native schemas (yet), so without these
     # static entries plan-mode safety for their bare fence tags would depend
     # entirely on the MCP read-only inventory being present and current.
-    "draft_email", "draft_email_reply", "ai_draft_email_reply",
+    "draft_email",
+    "draft_email_reply",
+    "ai_draft_email_reply",
     "download_attachment",
-    "download_model", "serve_model",
-    "stop_served_model", "cancel_download", "adopt_served_model", "serve_preset",
-    "generate_image", "edit_image", "trigger_research", "manage_research",
+    "download_model",
+    "serve_model",
+    "stop_served_model",
+    "cancel_download",
+    "adopt_served_model",
+    "serve_preset",
+    "generate_image",
+    "edit_image",
+    "trigger_research",
+    "manage_research",
     # Shell is never read-only-safe; block it explicitly so it stays out of plan
     # mode even if the schema list fails to load.
-    "bash", "python",
+    "bash",
+    "python",
     # Controls shell processes (kill); plan mode can't run bash anyway.
     "manage_bg_jobs",
 }
@@ -186,8 +223,7 @@ def plan_mode_disabled_tools() -> Set[str]:
         from src.tool_schemas import FUNCTION_TOOL_SCHEMAS
 
         all_names = {
-            (t.get("function") or {}).get("name")
-            for t in FUNCTION_TOOL_SCHEMAS
+            (t.get("function") or {}).get("name") for t in FUNCTION_TOOL_SCHEMAS
         }
         all_names.discard(None)
     except Exception as exc:
@@ -215,7 +251,7 @@ def email_tool_policy_names(tool_name: str) -> frozenset:
     if tool_name in BUILTIN_EMAIL_TOOLS:
         return frozenset((tool_name, f"mcp__email__{tool_name}"))
     if tool_name.startswith("mcp__email__"):
-        bare = tool_name[len("mcp__email__"):]
+        bare = tool_name[len("mcp__email__") :]
         if bare in BUILTIN_EMAIL_TOOLS:
             return frozenset((tool_name, bare))
     return frozenset((tool_name,))
@@ -250,6 +286,26 @@ def owner_is_admin_or_single_user(owner: Optional[str]) -> bool:
     defense-in-depth for callers that bypass it (e.g. trusted loopback).
     """
     try:
+        # Real, added 2026-09-25: found and fixed live while
+        # investigating why Claude Sonnet 5 had zero access to any
+        # genuine MCP-server-sourced tool (public_com, gods_eye_view,
+        # etc.) despite the servers themselves being confirmed healthy
+        # and correctly connected. Root-caused precisely: internal
+        # loopback requests (the agent's own tool-layer calls, and this
+        # investigation's own test calls) carry the reserved pseudo-
+        # username core.middleware.INTERNAL_TOOL_USER ("internal-tool"),
+        # which require_admin() already explicitly, correctly trusts
+        # (core/middleware.py) -- but this function did not, so
+        # blocked_tools_for_owner() treated every internal-tool call as
+        # an untrusted public user and hid all MCP schemas. Internal
+        # loopback calls are by definition trusted, in-process
+        # machinery, not the public/external user this blocking logic
+        # exists to protect against.
+        from core.middleware import INTERNAL_TOOL_USER
+
+        if owner == INTERNAL_TOOL_USER:
+            return True
+
         from src.auth_helpers import _auth_disabled
 
         if _auth_disabled():
