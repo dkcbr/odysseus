@@ -5645,6 +5645,25 @@ async def stream_agent_loop(
             ):
                 _ody_doc_tool_completed = True
 
+            # Real, added 2026-09-26: the real, root-cause bug behind
+            # this whole mechanism's confirmed unreliability. Both
+            # _ody_force_stop_turn set-sites above live INSIDE this
+            # same for-loop over tool_blocks, but the only check for it
+            # (below, "a per-turn tool-call cap was hit") sits AFTER
+            # the loop -- so setting the flag partway through a round's
+            # own batch never stopped the REST of that SAME round's
+            # blocks from still executing; it only prevented a NEXT
+            # round from starting. Confirmed directly by tracing the
+            # loop boundaries: this exactly explains the real, observed
+            # failure (11-16+ calls still happening despite the flag
+            # correctly being set) -- qwen2.5:7b's real over-cap batches
+            # were arriving as many tool_blocks within a single round,
+            # not spread across rounds. Mirrors the existing, already
+            # correct budget_hit pattern immediately below, which sets
+            # its flag AND breaks in the same spot for the same reason.
+            if _ody_force_stop_turn:
+                break
+
         # If budget was hit, stop the loop
         if budget_hit:
             break
