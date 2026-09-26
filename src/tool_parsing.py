@@ -760,6 +760,24 @@ def _extract_tool_content(tool_type: str, args: dict) -> str:
     return content
 
 
+def _looks_like_xlam_tool_call_blob(value) -> bool:
+    """Return True for xLAM's raw bare JSON-array tool-call format leaked
+    as text -- the counterpart to _looks_like_openai_tool_call_blob for
+    pattern 4e. Real, added 2026-09-25 alongside the multi-call fix: used
+    by _strip_xlam_tool_call_json so display stripping recognizes the
+    exact same shape the parser above now fully extracts, instead of only
+    ever removing the first entry's worth (or nothing at all, which was
+    the prior gap -- xLAM's raw JSON was never stripped from displayed
+    text before this, single call or not)."""
+    if isinstance(value, list):
+        return bool(value) and all(_looks_like_xlam_tool_call_blob(item) for item in value)
+    if not isinstance(value, dict):
+        return False
+    return isinstance(value.get("name"), str) and bool(value["name"].strip()) and (
+        "arguments" in value
+    )
+
+
 def _xlam_call_to_block(value) -> Optional[ToolBlock]:
     """Real, added 2026-09-22: Salesforce xLAM-family models (Llama-xLAM-2,
     xLAM-2-*-fc-r, etc.) are natively trained on a bare JSON-array
@@ -774,6 +792,11 @@ def _xlam_call_to_block(value) -> Optional[ToolBlock]:
     own vLLM serving docs). This mirrors _raw_openai_tool_call_to_block's
     real, established shape for a different raw-JSON leak (pattern 4d)
     rather than inventing a new approach.
+
+    Converts exactly ONE dict entry to a block; a list argument here still
+    only returns its first valid entry (kept for any direct callers of a
+    single item). For the top-level array xLAM actually emits, use
+    _xlam_calls_to_blocks below, which does not discard the rest.
     """
     if isinstance(value, list):
         for item in value:
@@ -803,23 +826,90 @@ def _xlam_call_to_block(value) -> Optional[ToolBlock]:
     return ToolBlock(tool_type, str(_extract_tool_content(tool_type, args) or ""))
 
 
-def _parse_xlam_tool_call_json(text: str) -> Optional[ToolBlock]:
-    """Real, added 2026-09-22: find and parse xLAM's own native bare
-    JSON-array tool-call format leaked into plain assistant text. See
-    _xlam_call_to_block's own docstring for the full, real context.
+def _xlam_calls_to_blocks(value) -> List[ToolBlock]:
+    """Real bug fix, 2026-09-25: xLAM's own documented template ("make
+    calls in a single JSON array ... additional parallel tool calls as
+    needed") is genuinely honored by the model -- confirmed live against
+    llama-xlam-2-8b-fc-r under LM Studio: a two-action prompt ("get
+    quotes for Apple and Microsoft, then show one year of price history
+    for Apple") produced a real, correctly-formed two-entry array, both
+    entries valid. The bug was entirely on our side: _xlam_call_to_block's
+    list branch above returns only the FIRST entry it can turn into a
+    block and silently drops the rest, so Odysseus only ever executed
+    action one and then treated the turn as finished -- matching the
+    exact reported symptom ("always stops there with a text summary"),
+    even though the model had already named the second action too. This
+    is the multi-entry counterpart: every valid entry in the array
+    becomes its own block, in order, none discarded.
+    """
+    items = value if isinstance(value, list) else [value]
+    blocks: List[ToolBlock] = []
+    for item in items:
+        block = _xlam_call_to_block(item)
+        if block:
+            blocks.append(block)
+    return blocks
+
+
+def _parse_xlam_tool_call_json(text: str) -> List[ToolBlock]:
+    """Real, added 2026-09-22, updated 2026-09-25 to stop dropping every
+    call after the first: find and parse xLAM's own native bare
+    JSON-array tool-call format leaked into plain assistant text, and
+    return ALL of the tool calls it contains, not just one. See
+    _xlam_calls_to_blocks's own docstring for the real, live-confirmed
+    bug this fixes.
     """
     if not isinstance(text, str) or '"name"' not in text or '"arguments"' not in text:
-        return None
+        return []
     decoder = json.JSONDecoder()
     for match in re.finditer(r"[\[{]", text):
         try:
             parsed, _end = decoder.raw_decode(text[match.start():])
         except json.JSONDecodeError:
             continue
-        block = _xlam_call_to_block(parsed)
-        if block:
-            return block
-    return None
+        blocks = _xlam_calls_to_blocks(parsed)
+        if blocks:
+            return blocks
+    return []
+
+
+def _strip_xlam_tool_call_json(text: str) -> str:
+    """Strip xLAM's raw bare JSON-array tool-call leak from display text.
+
+    Real, added 2026-09-25: mirrors _strip_raw_openai_tool_call_json for
+    pattern 4e. Before this, xLAM's leaked JSON (single call or the
+    multi-call array now fully parsed above) was recognized and executed
+    but never removed from the persisted/displayed assistant text -- the
+    raw '[{"name": ...}]' payload rendered as prose to the user.
+    """
+    if not isinstance(text, str) or '"name"' not in text or '"arguments"' not in text:
+        return text
+    decoder = json.JSONDecoder()
+    pieces = []
+    pos = 0
+    changed = False
+    for match in re.finditer(r"[\[{]", text):
+        start = match.start()
+        if start < pos:
+            continue
+        try:
+            parsed, rel_end = decoder.raw_decode(text[start:])
+        except json.JSONDecodeError:
+            continue
+        end = start + rel_end
+        if not _looks_like_xlam_tool_call_blob(parsed):
+            continue
+        pieces.append(text[pos:start])
+        pos = end
+        changed = True
+        while pos < len(text) and text[pos] in " \t\r\n":
+            pos += 1
+        if pos < len(text) and text[pos] == "]":
+            pos += 1
+    if not changed:
+        return text
+    pieces.append(text[pos:])
+    return "".join(pieces)
 
 
 def _parse_raw_openai_tool_call_json(text: str) -> Optional[ToolBlock]:
@@ -1485,9 +1575,9 @@ def parse_tool_blocks(text: str, skip_fenced: bool = False) -> List[ToolBlock]:
     # shape under both Ollama and LM Studio -- see _xlam_call_to_block's
     # own docstring for the full real context.
     if not blocks:
-        block = _parse_xlam_tool_call_json(text)
-        if block:
-            blocks.append(block)
+        xlam_blocks = _parse_xlam_tool_call_json(text)
+        if xlam_blocks:
+            blocks.extend(xlam_blocks)
 
     # Pattern 6: local text-model web_search call leaked as prose + bare JSON.
     if not blocks and not skip_fenced:
@@ -1537,6 +1627,7 @@ def strip_tool_blocks(text: str, skip_fenced: bool = False) -> str:
     cleaned = _GEMMA_TOOL_CALL_RE.sub('', cleaned)
     cleaned = _strip_delimited(cleaned, _FUNCTION_MODEL_OPEN_RE, _FUNCTION_MODEL_CLOSE_RE)
     cleaned = _strip_raw_openai_tool_call_json(cleaned)
+    cleaned = _strip_xlam_tool_call_json(cleaned)
     cleaned = _QWEN_ROLE_MARKER_RE.sub('', cleaned)
     cleaned = _QWEN_BARE_MARKER_RE.sub(' ', cleaned)
     if not skip_fenced:
