@@ -158,6 +158,47 @@ def test_bare_ticker_shorthand_still_respects_the_stoplist():
     assert detect_price_query("CEO") is None
 
 
+# Real, added 2026-09-27: "how much is TSLA" (no asset word, so neither
+# the keyword nor adjacency check above matches) was found live to fall
+# through to the model's own tool judgment, which produced two different
+# prices for the same ticker in the same session minutes apart --
+# genuinely inconsistent, not just slow. Adds one narrow prefix rather
+# than the broad "what is"/"where is"/"check" prefix set an earlier,
+# unsafe draft of this fix proposed.
+def test_detects_how_much_is_ticker_phrasing():
+    assert detect_price_query("how much is TSLA") == "TSLA"
+    assert detect_price_query("How much is AAPL?") == "AAPL"
+    assert detect_price_query("HOW MUCH IS KTOS") == "KTOS"
+
+
+def test_how_much_is_does_not_fire_on_non_ticker_answers():
+    # The exact negative case flagged as worth guarding against: an
+    # ordinary question that happens to share the same prefix but isn't
+    # a price question at all must not misfire.
+    assert detect_price_query("how much is a dog") is None
+    assert detect_price_query("how much is too much") is None
+    assert detect_price_query("how much is this going to cost") is None
+
+
+def test_how_much_is_ticker_still_respects_case_and_stoplist():
+    # Same two guards as the bare-shorthand check: the ticker itself
+    # must be typed in caps (an earlier draft of this fix lowercased the
+    # whole message before matching, which would have broken this), and
+    # the stoplist still applies so "DK" doesn't misfire as Delek US
+    # Holdings.
+    assert detect_price_query("how much is tsla") is None
+    assert detect_price_query("how much is DK") is None
+    assert detect_price_query("how much is IT") is None
+
+
+def test_how_much_is_ticker_does_not_double_up_with_existing_checks():
+    # These are already covered by the keyword/adjacency checks above --
+    # confirms the new prefix check doesn't need to (and structurally
+    # can't, being end-anchored) handle them itself.
+    assert detect_price_query("how much is TSLA worth") == "TSLA"
+    assert detect_price_query("how much is TSLA stock") == "TSLA"
+
+
 def test_answer_price_query_surfaces_the_tools_own_real_error():
     async def _run():
         fake_result = {

@@ -998,6 +998,31 @@ _TICKER_ASSET_ADJACENT_RE = re.compile(
 # letters, not stoplisted) would misfire into a spurious price lookup.
 _BARE_TICKER_ONLY_RE = re.compile(r"^([A-Z]{2,5})[?!.\s]*$")
 
+# Real, added 2026-09-27: confirmed live that "how much is TSLA" (no
+# asset word, so the adjacency check above doesn't match; not the whole
+# message, so the bare-shorthand check above doesn't match either) still
+# fell through to the model's own tool judgment, which was inconsistent
+# across runs (two different prices for the same ticker minutes apart in
+# the same session). Adds one narrow, specific prefix -- "how much is"
+# -- rather than the broad, unsafe prefix set an earlier draft of this
+# fix proposed (a plain "what is"/"where is"/"check" prefix list, which
+# would have intercepted ordinary sentences like "what is your name" or
+# "where is the bathroom"). "how much is" alone is already a strong,
+# distinctive price-question signal on its own, without needing a second
+# keyword.
+#
+# The prefix itself is case-insensitive (people don't reliably capitalize
+# "How much is") via an inline, SCOPED flag -- (?i:...) only applies
+# inside that group. The ticker capture group is deliberately left
+# OUTSIDE that scope so it stays case-sensitive, matching this file's
+# existing convention (a bug already caught and fixed once before: a
+# whole-pattern re.IGNORECASE let "The stock market crashed" match "The"
+# as a ticker). End-anchored so "how much is TSLA worth"/"...TSLA stock"
+# (both already covered by the keyword/adjacency checks above) don't
+# double up here, and so "how much is TSLA doing this week" doesn't
+# misfire on a sentence that isn't actually a bare price question.
+_HOW_MUCH_IS_TICKER_RE = re.compile(r"^(?i:how\s+much\s+is)\s+([A-Z]{2,5})[?!.\s]*$")
+
 
 def detect_price_query(message: str) -> Optional[str]:
     """Real, direct, deterministic check: does this message contain both
@@ -1016,6 +1041,12 @@ def detect_price_query(message: str) -> Optional[str]:
     m = _TICKER_ASSET_ADJACENT_RE.search(text)
     if m:
         token = (m.group(1) or m.group(2)).upper()
+        if token not in _TICKER_STOPLIST:
+            return token
+        return None
+    m = _HOW_MUCH_IS_TICKER_RE.match(text)
+    if m:
+        token = m.group(1).upper()
         if token not in _TICKER_STOPLIST:
             return token
         return None
