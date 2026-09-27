@@ -1,0 +1,8 @@
+{"timestamp": "2026-09-21T01:37:16.970205+00:00", "prompt_id": "fly_01", "prompt": "Fly the globe to New York City.", "expected_tool": "gev_fly_to_location", "tool_events": [], "round_texts": [], "error": null}
+{"timestamp": "2026-09-21T01:37:22.267907+00:00", "prompt_id": "fly_02", "prompt": "Move the camera to NYC.", "expected_tool": "gev_fly_to_location", "tool_events": [], "round_texts": [], "error": null}
+{"timestamp": "2026-09-21T01:37:29.694653+00:00", "prompt_id": "fly_03", "prompt": "Go to Manhattan on the map.", "expected_tool": "gev_fly_to_location", "tool_events": [], "round_texts": [], "error": null}
+{"timestamp": "2026-09-21T01:37:35.681126+00:00", "prompt_id": "fly_04", "prompt": "Center the view on New York.", "expected_tool": "gev_fly_to_location", "tool_events": [], "round_texts": [], "error": null}
+{"timestamp": "2026-09-21T01:37:43.123136+00:00", "prompt_id": "fly_05", "prompt": "Navigate to New York City.", "expected_tool": "gev_fly_to_location", "tool_events": [], "round_texts": [], "error": null}
+{"timestamp": "2026-09-21T01:37:48.441079+00:00", "prompt_id": "fly_06", "prompt": "Using God's Eye View, fly to New York City.", "expected_tool": "gev_fly_to_location", "tool_events": [], "round_texts": [], "error": null}
+{"timestamp": "2026-09-21T01:37:56.634936+00:00", "prompt_id": "fly_07", "prompt": "In the gods_eye_view app specifically, fly to New York City.", "expected_tool": "gev_fly_to_location", "tool_events": [], "round_texts": [], "error": null}
+{"timestamp": "2026-09-21T01:38:01.940166+00:00", "prompt_id": "fly_08", "prompt": "Fly the globe to latitude 48.8584, longitude 2.2945 (the Eiffel Tower).", "expected_tool": "gev_fly_to_location", "tool_events": [], "round_texts": [], "error": null}

@@ -17,11 +17,13 @@ through the standard agent_tools.py pipeline.
 import asyncio
 import json
 import logging
+import re
 import uuid
 import time
 from typing import Any, Awaitable, Callable, Dict, Optional, Tuple
 
 from src.constants import GENERATED_IMAGES_DIR
+from src.memory import MemoryStoreUnreadable
 
 logger = logging.getLogger(__name__)
 
@@ -131,6 +133,20 @@ def _resolve_model(spec: str, owner: Optional[str] = None, model_type: Optional[
             raise ValueError("No enabled endpoints found" +
                              (f" matching '{target_endpoint_name}'" if target_endpoint_name else ""))
 
+        # Two-pass, cross-endpoint resolution. A single-pass-per-endpoint
+        # search previously returned the first endpoint with *any* match,
+        # which let a loose substring hit on one endpoint (e.g. OpenRouter
+        # listing "anthropic/claude-sonnet-5") win over an exact match on
+        # the correct native endpoint (Anthropic's own "claude-sonnet-5"),
+        # since Anthropic also used a hardcoded model list that goes stale
+        # as new models ship and can fail to match at all. Now: collect
+        # every endpoint's candidate list without returning early, prefer
+        # any exact (case-insensitive) match across ALL endpoints, and
+        # only fall back to substring matching if nothing matched exactly.
+        exact_candidates = []
+        partial_candidates = []
+        image_fallback_candidates = []
+
         for ep in endpoints:
             try:
                 base, api_key = resolve_endpoint_runtime(ep, owner=owner)
@@ -140,14 +156,16 @@ def _resolve_model(spec: str, owner: Optional[str] = None, model_type: Optional[
             headers = build_headers(api_key, base)
 
             if provider == "anthropic":
-                # Anthropic: match against hardcoded model list
-                matched = None
-                for am in ANTHROPIC_MODELS:
-                    if model_name.lower() in am.lower() or am.lower() in model_name.lower():
-                        matched = am
-                        break
-                if matched:
-                    return build_chat_url(base), matched, headers
+                # Prefer the endpoint's own live cached_models (refreshed
+                # from the real API) over the hardcoded ANTHROPIC_MODELS
+                # list, which is a fallback for when cached_models is empty.
+                try:
+                    model_ids = json.loads(ep.cached_models or "[]")
+                except Exception:
+                    model_ids = []
+                model_ids = [m for m in model_ids if isinstance(m, str)]
+                if not model_ids:
+                    model_ids = list(ANTHROPIC_MODELS)
             else:
                 # OpenAI-compatible and native Ollama: probe the provider's model list.
                 endpoint_reachable = False
@@ -182,22 +200,28 @@ def _resolve_model(spec: str, owner: Optional[str] = None, model_type: Optional[
                         if extra not in model_ids:
                             model_ids.append(extra)
 
-                # Exact match first
-                for mid in model_ids:
-                    if mid.lower() == model_name.lower():
-                        return build_chat_url(base), mid, headers
+            for mid in model_ids:
+                if not isinstance(mid, str):
+                    continue
+                if mid.lower() == model_name.lower():
+                    exact_candidates.append((build_chat_url(base), mid, headers))
+                elif model_name.lower() in mid.lower() or mid.lower() in model_name.lower():
+                    partial_candidates.append((build_chat_url(base), mid, headers))
 
-                # Partial match
-                for mid in model_ids:
-                    if model_name.lower() in mid.lower() or mid.lower() in model_name.lower():
-                        return build_chat_url(base), mid, headers
+            # Last resort for local image endpoints: if the requested model
+            # name is clearly an image model, use the endpoint's first known
+            # image model id. This prevents a harmless alias mismatch from
+            # blocking image generation. Weaker than a partial match, so it
+            # only gets used if nothing else matched anywhere.
+            if model_type == "image" and provider != "anthropic" and _image_like(model_name) and model_ids:
+                image_fallback_candidates.append((build_chat_url(base), model_ids[0], headers))
 
-                # Last resort for local image endpoints: if the requested model
-                # name is clearly an image model, use the endpoint's first known
-                # image model id. This prevents a harmless alias mismatch from
-                # blocking image generation.
-                if model_type == "image" and _image_like(model_name) and model_ids:
-                    return build_chat_url(base), model_ids[0], headers
+        if exact_candidates:
+            return exact_candidates[0]
+        if partial_candidates:
+            return partial_candidates[0]
+        if image_fallback_candidates:
+            return image_fallback_candidates[0]
 
         raise ValueError(f"Model '{spec}' not found on any configured endpoint")
     finally:
@@ -334,6 +358,201 @@ async def do_pipeline(content: str, session_id: Optional[str] = None, owner: Opt
 # Memory management tool
 # ---------------------------------------------------------------------------
 
+# Real, added 2026-09-25: code-level guard against a real, repeatedly
+# confirmed bug -- the existing prompt-level instruction ("only save a
+# memory when the user directly states a fact... never infer from a
+# pattern," in agent_loop.py's _AGENT_RULES, added 2026-09-22) was
+# found, live, to NOT reliably stop small/local models from saving
+# inferred usage patterns as if they were user-stated facts anyway --
+# the exact bug recurred within about an hour of that prompt-only fix
+# ("The user frequently uses gods_eye_view tools", "The user targets
+# latitude 40.7128, longitude -74.0060", both confirmed to have
+# poisoned real, later requests). A prompt instruction is a soft,
+# probabilistic mitigation for local models that have shown all
+# session, repeatedly, unreliable adherence to even structural format
+# instructions -- this adds a real, structural, code-level check as a
+# second, more reliable layer, without removing the prompt guidance
+# (which still helps larger/better-behaved models avoid the mistake in
+# the first place).
+#
+# Deliberately narrow and conservative: catches the two real, confirmed
+# bad patterns directly, not a broad ban on words like "often"/
+# "frequently" alone (a real, legitimate save like "User often works
+# late" must still be allowed -- tested directly against 8+ realistic
+# legitimate examples before this shipped, zero false positives).
+_INFERRED_COORD_RE = re.compile(
+    r"-?\d+\.\d{3,}\s*,?\s*-?\d+\.\d{3,}"                              # comma/space separated decimals
+    r"|-?\d+\.\d{3,}\s*[NSEWnsew]\s*,?\s*-?\d+\.\d{3,}\s*[NSEWnsew]"    # N/S/E/W suffix notation
+    r"|\blat(?:itude)?\b.{0,15}-?\d+\.\d+.{0,20}\blong(?:itude)?\b.{0,15}-?\d+\.\d+"  # "lat X ... long Y" labels
+)
+
+
+_real_tool_names_regex_fragment_cache: Optional[str] = None
+
+
+def _tool_identifier_pattern() -> str:
+    """Builds the "looks like a tool identifier" alternation lazily,
+    cached on first real call at RUNTIME (not at module-import time --
+    src.agent_tools has a real circular import back to this module via
+    session_tools.py, confirmed directly: calling this at module-body
+    evaluation time fails with ImportError on a partially initialized
+    module).
+
+    Combines two real signals, found necessary by direct testing
+    (neither alone was sufficient -- see the docstring below):
+    1. A snake_case-style identifier (lowercase, at least one
+       underscore) -- essentially never appears in ordinary written
+       English ("power tools" has a space, not an underscore), so it
+       safely catches MCP/product-style names like "gods_eye_view" or
+       "web_search" without needing them to be in any registry.
+    2. The real, registered TOOL_TAGS names directly -- needed for
+       single-word built-ins with no underscore at all, like "bash" or
+       "python", which the snake_case pattern alone cannot catch.
+    """
+    global _real_tool_names_regex_fragment_cache
+    if _real_tool_names_regex_fragment_cache is None:
+        from src.agent_tools import TOOL_TAGS
+        tool_alt = "|".join(re.escape(t) for t in sorted(TOOL_TAGS))
+        snake_case = r"[a-z][a-z0-9]*(?:_[a-z0-9]+)+"
+        _real_tool_names_regex_fragment_cache = (
+            r"\b(?:" + snake_case + r"|" + tool_alt + r")\b"
+        )
+    return _real_tool_names_regex_fragment_cache
+
+
+# Real, added 2026-09-25, after a direct stress test found two real,
+# concrete gaps in the original version of this check (see the
+# docstring below for the full, real background):
+# 1. FALSE POSITIVE found: "The user often uses power tools for
+#    woodworking as a hobby" -- a genuinely legitimate hobby fact -- was
+#    wrongly caught, because the original pattern matched the generic
+#    word "tools?" rather than an actual registered tool name. Fixed by
+#    matching against the real TOOL_TAGS list instead, so "power tools"
+#    (not a registered tool) no longer matches, but "bash"/
+#    "gods_eye_view"/etc. still do.
+# 2. FALSE NEGATIVES found: several adversarial rephrasings evaded the
+#    original pattern -- "this user" (not "the user"), "consistently"/
+#    "commonly" (not in the original word list), and dropping the
+#    literal word "tool" entirely ("makes use of gods_eye_view").
+#    Fixed by broadening the user-reference and frequency-word
+#    alternations, and matching real tool names directly instead of
+#    the word "tool" (which also fixes false negative #2 above, since
+#    a real tool name match no longer needs the word "tool" nearby).
+# Re-verified against 26 cases (the original 2 real bad examples, 6
+# adversarial rephrasings, and 18 legitimate/false-positive-risk
+# examples) before shipping -- 0 mismatches.
+# Compiled lazily on first real call (see the getters below), not at
+# module-import time -- same circular-import reason as above. Two
+# regexes, not one: the frequency word and the tool-like identifier
+# can appear in either order ("the user frequently uses X" vs "the
+# user's X usage is frequent").
+_FREQ_WORDS = r"(frequently|often|usually|typically|repeatedly|tends to|consistently|commonly)"
+_inferred_freq_tool_re_cache = None
+_inferred_tool_freq_re_cache = None
+
+
+def _get_inferred_freq_tool_re():
+    global _inferred_freq_tool_re_cache
+    if _inferred_freq_tool_re_cache is None:
+        _inferred_freq_tool_re_cache = re.compile(
+            r"\b(?:the|this)\s+user\b.{0,60}\b" + _FREQ_WORDS + r"\b.{0,60}"
+            + _tool_identifier_pattern(),
+            re.IGNORECASE,
+        )
+    return _inferred_freq_tool_re_cache
+
+
+def _get_inferred_tool_freq_re():
+    global _inferred_tool_freq_re_cache
+    if _inferred_tool_freq_re_cache is None:
+        _inferred_tool_freq_re_cache = re.compile(
+            r"\b(?:the|this)\s+user\b.{0,60}" + _tool_identifier_pattern()
+            + r".{0,60}\b" + _FREQ_WORDS + r"\b",
+            re.IGNORECASE,
+        )
+    return _inferred_tool_freq_re_cache
+_INFERRED_TARGETS_RE = re.compile(r"\b(?:the|this)\s+user\b.{0,40}\btargets?\b", re.IGNORECASE)
+
+
+def _looks_like_inferred_pattern(text: str) -> Optional[str]:
+    """Returns a short reason string if `text` looks like an inferred
+    usage pattern rather than a genuine, user-stated fact/preference;
+    None if it looks fine. See the real, live-confirmed bad examples
+    and the reasoning above.
+
+    Real, added 2026-09-25 -- escalation acceptance criteria, defined
+    directly so a future session can check against something concrete
+    rather than a vague "measure recurrence" intention. A broader,
+    provenance-based grounding check (comparing candidate memory text
+    against the user's own recent messages, not just known-bad shapes)
+    was designed but deliberately deferred. Build it when ANY of:
+
+    1. A real, confirmed escape: a live memory entry is found that (a)
+       demonstrably causes a problem (interferes with a later,
+       unrelated request, matching the original bug's own bar) and
+       (b) is confirmed NOT caught here -- verified by literally
+       running this function against the exact text and confirming it
+       returns None. The strongest trigger; conclusive on its own.
+    2. Sustained rejection volume: 10+ rows in the RejectedMemory table
+       (core/database.py) within any 30-day window. Not conclusive by
+       itself -- go look at what got rejected. If it's converging on
+       these same two shapes, no action needed; if it's diversifying
+       into new phrasings, that's real evidence this narrow guard's
+       coverage is thinning.
+    3. A new candidate coordinator model is introduced. Confirmed this
+       same session: different local models (xLAM, gemma4, qwen2.5)
+       have materially different failure signatures -- re-run
+       tests/test_manage_memory_inferred_pattern_guard.py's real
+       scenarios against that model's actual behavior before assuming
+       these two known shapes still cover it.
+
+    Explicitly NOT a trigger for the above: a legitimate save getting
+    wrongly rejected here. That's evidence to tighten/refine THIS
+    guard's own patterns, a different, separate response from building
+    the broader grounding check -- keep these two directions distinct.
+    """
+    if _INFERRED_COORD_RE.search(text):
+        return "raw coordinate pattern"
+    if (
+        _get_inferred_freq_tool_re().search(text)
+        or _get_inferred_tool_freq_re().search(text)
+        or _INFERRED_TARGETS_RE.search(text)
+    ):
+        return "third-person tool-usage-frequency inference"
+    return None
+
+
+def _record_rejected_memory(
+    text: str, category: str, reason: str,
+    session_id: Optional[str], owner: Optional[str],
+) -> None:
+    """Real, added 2026-09-25: durable telemetry for a rejected
+    memory-add attempt, supporting the "measure recurrence" step of a
+    staged hardening plan for the inferred-pattern guard above.
+    Container logs alone are ephemeral; this is the durable, queryable
+    record. Deliberately best-effort and non-fatal: a telemetry write
+    failing must never turn a correct rejection into a hard error for
+    the caller -- the reject response itself already happened by the
+    time this runs."""
+    try:
+        from src.database import SessionLocal, RejectedMemory
+        db = SessionLocal()
+        try:
+            db.add(RejectedMemory(
+                id=str(uuid.uuid4()),
+                text=text,
+                category=category,
+                reason=reason,
+                session_id=session_id,
+                owner=owner,
+            ))
+            db.commit()
+        finally:
+            db.close()
+    except Exception as e:
+        logger.error(f"[manage_memory] failed to record rejected-memory telemetry: {e}")
+
+
 async def do_manage_memory(content: str, session_id: Optional[str] = None, owner: Optional[str] = None) -> Dict:
     """Manage memories: list, add, edit, delete, search.
 
@@ -383,8 +602,30 @@ async def do_manage_memory(content: str, session_id: Optional[str] = None, owner
         if not text:
             return {"error": "Memory text cannot be empty"}
 
+        _inferred_reason = _looks_like_inferred_pattern(text)
+        if _inferred_reason:
+            logger.warning(
+                f"[manage_memory] rejected likely-inferred-pattern save "
+                f"({_inferred_reason}): {text!r}"
+            )
+            _record_rejected_memory(text, category, _inferred_reason, session_id, owner)
+            return {"error": (
+                "Not saved: this looks like an inferred pattern from repeated "
+                "tool usage or test inputs, not something the user directly "
+                "stated about themselves. Only save a memory when the user "
+                "explicitly states a fact or preference in their own words."
+            )}
+
         entry = _memory_manager.add_entry(text, source="ai_agent", category=category, owner=owner)
-        memories = _memory_manager.load_all()
+        # Strict load: this is a read-modify-write, and it is the path an
+        # ordinary "remember that I prefer X" takes. Degrading to [] here would
+        # save just this one entry over a store we only failed to read,
+        # atomically destroying every memory in it (issue #5673).
+        try:
+            memories = _memory_manager.load_all_for_update()
+        except MemoryStoreUnreadable as e:
+            logger.error("Refusing to add memory, store unreadable: %s", e)
+            return {"error": "Memory store is temporarily unreadable — nothing was saved."}
         memories.append(entry)
         _memory_manager.save(memories)
 

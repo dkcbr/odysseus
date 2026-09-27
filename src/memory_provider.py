@@ -157,7 +157,11 @@ class NativeMemoryProvider(MemoryProvider):
         if metadata:
             entry["metadata"] = dict(metadata)
 
-        memories = self.memory_manager.load_all()
+        # Strict load: read-modify-write. `load_all` degrades an unreadable
+        # store to [], which would save this single entry over everything
+        # already stored (issue #5673). The provider API has no error channel,
+        # so MemoryStoreUnreadable propagates to the caller.
+        memories = self.memory_manager.load_all_for_update()
         memories.append(entry)
         self.memory_manager.save(memories)
 
@@ -184,6 +188,12 @@ class NativeMemoryProvider(MemoryProvider):
                 memory_id = result.get("memory_id")
                 entry = by_id.get(memory_id) if memory_id else result
                 if not entry:
+                    continue
+                # Memory hygiene: exclude superseded facts from vector-based
+                # recall too, same convention as the fallback path in
+                # memory.py (facts prefixed "[SUPERSEDED]" stay in the store
+                # for history/audit but are never auto-injected into chat).
+                if entry.get("text", "").lstrip().upper().startswith("[SUPERSEDED"):
                     continue
                 if owner is not None and entry.get("owner") != owner:
                     continue
@@ -223,7 +233,10 @@ class NativeMemoryProvider(MemoryProvider):
         ]
 
     async def delete(self, memory_id: str, *, owner: Optional[str] = None) -> bool:
-        memories = self.memory_manager.load_all()
+        # Strict load for the same reason: `remaining` is derived from this
+        # list and saved back, so it must never be built from a store we
+        # failed to read.
+        memories = self.memory_manager.load_all_for_update()
         remaining = []
         deleted_id = None
 

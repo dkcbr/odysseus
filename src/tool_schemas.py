@@ -93,6 +93,133 @@ FUNCTION_TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
+            "name": "lookup_ticker",
+            "description": "Look up REAL, VERIFIED company identity and quote data for a stock/crypto ticker symbol via Financial Modeling Prep. MANDATORY: call this before stating what company a ticker represents, its price, or any other fact about it - never answer from memory. Small and mid-cap tickers are frequently confused with unrelated companies when answered from memory (e.g. TMC has been misidentified as an unrelated medical-communications company when it is actually a deep-sea mining company; MP has been misidentified as an oil refiner when it is a rare-earth miner) - this tool exists specifically to prevent that. If the tool errors (no API key configured, ticker not found), tell the user real data isn't available rather than guessing.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "symbol": {"type": "string", "description": "The ticker symbol to look up, e.g. KTOS"}
+                },
+                "required": ["symbol"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "restart_service",
+            "description": "Restart one of 4 real, allowlisted, user-level host services (Whisper speech-to-text or Piper text-to-speech) via a real, separate, narrow, host-level restart agent -- use this if a voice-pipeline service appears hung, unresponsive, or is reported as failing. Never attempts anything beyond these 4 exact services; any other request is rejected. Not for restarting Odysseus itself or any container/system-level service.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "service": {
+                        "type": "string",
+                        "enum": [
+                            "jarvis-piper-server.service",
+                            "jarvis-whisper-bridge.service",
+                            "jarvis-whisper-server-container.service",
+                            "jarvis-whisper-server.service"
+                        ],
+                        "description": "The exact real service name to restart."
+                    }
+                },
+                "required": ["service"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "read_systemd_logs",
+            "description": "Read recent, real log entries for any real, existing systemd service on the host, via a real, separate, host-level log agent -- use this to diagnose why a service is failing, hung, or misbehaving, including Odysseus/container/system-level services (broader scope than restart_service, which only covers 4 voice-pipeline services). Read-only; never modifies or restarts anything. Rejects a service name that doesn't actually exist on the host.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "service": {
+                        "type": "string",
+                        "description": "The exact real systemd service/unit name (e.g. 'ssh', 'docker', 'jarvis-piper-server.service')."
+                    },
+                    "lines": {
+                        "type": "integer",
+                        "description": "Number of recent log lines to return (default 50, max 500)."
+                    }
+                },
+                "required": ["service"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "service_status",
+            "description": "Read the current, real systemd state for any real, existing service on the host -- whether it's active/failed/running, its process ID, memory usage, restart count, and when it last started. Use this to check a service's health before deciding whether restart_service or read_systemd_logs is actually needed. Same broad scope as read_systemd_logs. Read-only, never modifies anything.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "service": {
+                        "type": "string",
+                        "description": "The exact real systemd service/unit name (e.g. 'ssh', 'docker', 'jarvis-piper-server.service')."
+                    }
+                },
+                "required": ["service"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "check_service_dependencies",
+            "description": "Show the real systemd dependency tree (Requires/Wants/After/Before, direct and indirect) for any real, existing service on the host -- use this to diagnose cascading failures, e.g. a service failing because an upstream dependency is inactive or missing, not because of a problem in the service itself. Pairs with service_status and read_systemd_logs to complete the diagnose-then-act loop. Same broad scope as those two. Read-only, never modifies anything.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "service": {
+                        "type": "string",
+                        "description": "The exact real systemd service/unit name (e.g. 'ssh', 'docker', 'jarvis-piper-server.service')."
+                    }
+                },
+                "required": ["service"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "restart_container",
+            "description": "Restart one of exactly 2 real, explicitly allowlisted, low-stakes Docker containers (odysseus-searxng-1, odysseus-ntfy-1). This is a real, structural restriction, not a suggestion -- no other container, including Odysseus's own runtime container, can ever be restarted through this tool, regardless of how the request is phrased.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "container": {
+                        "type": "string",
+                        "enum": ["odysseus-searxng-1", "odysseus-ntfy-1"],
+                        "description": "The exact real container name to restart."
+                    }
+                },
+                "required": ["container"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "container_status",
+            "description": "Read the current, real Docker state for any real, existing container on the host -- running/exited, uptime, restart count, health, image, last start time. Read-only, no side effects, so unlike restart_container this accepts any real container name, not just the 2-container restart allowlist. Use this to check a container's health before deciding whether restart_container is actually needed or appropriate.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "container": {
+                        "type": "string",
+                        "description": "The exact real container name (e.g. 'odysseus-searxng-1', 'odysseus-chromadb-1')."
+                    }
+                },
+                "required": ["container"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "read_file",
             "description": "Read a file from disk. Optionally read a line range with offset/limit for large files.",
             "parameters": {
@@ -173,6 +300,37 @@ FUNCTION_TOOL_SCHEMAS = [
                     "content": {"type": "string", "description": "File content to write"}
                 },
                 "required": ["path", "content"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "propose_write",
+            "description": "Preview a file write as a diff WITHOUT writing to disk. Returns a commit_token \u2014 pass it to commit_write to actually apply the change.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "File path to write to"},
+                    "content": {"type": "string", "description": "Proposed file content"}
+                },
+                "required": ["path", "content"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "commit_write",
+            "description": "Apply a write previously previewed with propose_write. Requires the exact path, content, and commit_token returned by propose_write \u2014 the token is one-time-use and expires after 5 minutes.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "File path to write to (must match the propose_write call)"},
+                    "content": {"type": "string", "description": "File content (must match the propose_write call)"},
+                    "commit_token": {"type": "string", "description": "Token returned by propose_write for this exact path+content"}
+                },
+                "required": ["path", "content", "commit_token"]
             }
         }
     },
@@ -435,6 +593,51 @@ FUNCTION_TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
+            "name": "get_portfolio_context",
+            "description": "Fetch DK's real, current portfolio context (holdings, strategy, rules, thesis notes) from data/portfolio_context.md. ALWAYS call this for any question about a specific position, balance, holding, or stored trading rule -- never assume you already know the answer, since this file updates over time and you do not have it pre-loaded. This returns a large, complete reference document -- after calling it, find and state the SPECIFIC fact the user actually asked about (e.g. one ticker's share count), not a general summary of everything in the document.",
+            "parameters": {
+                "type": "object",
+                "properties": {},
+                "required": []
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "search_vault",
+            "description": "Search DK's real Obsidian vault (personal notes and reference material, e.g. book summaries in Thesis/) for a query string. ALWAYS call this for any question about what the vault, notes, or a specific document says -- never assume you don't have access or answer from your own training knowledge, since this searches DK's own, real, current notes. Returns matching file names and snippets. If no matches are found, say so honestly rather than guessing at content.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "The search term or phrase to look for across the vault's markdown files."}
+                },
+                "required": ["query"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "create_document_office",
+            "description": "Create a real Word (.docx), PowerPoint (.pptx), Excel (.xlsx), or PDF file on disk, using real document-format libraries (python-docx/python-pptx/openpyxl/reportlab) -- not the generic create_document editor panel, which cannot produce real Office/PDF files. ALWAYS use this when the user asks for a Word document, PowerPoint, spreadsheet, or PDF specifically (as opposed to a plain-text or code document, which still uses create_document). NEVER use bash/run_command/python/echo/redirection to create these files directly -- writing plain text to a .docx/.pptx/.xlsx/.pdf-named file produces an invalid, corrupt file that appears to succeed but cannot actually be opened by Word/PowerPoint/Excel/a PDF reader. This tool is the only correct way to create these 4 formats.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "format": {"type": "string", "enum": ["docx", "pptx", "xlsx", "pdf"], "description": "Which real file format to create."},
+                    "filename": {"type": "string", "description": "Filename without a path, e.g. 'weekly_report.docx'. Will be saved under the user's uploads folder."},
+                    "title": {"type": "string", "description": "Document title (used by docx and pdf)."},
+                    "sections": {"type": "array", "description": "For docx/pdf: list of {heading, text} objects.", "items": {"type": "object", "properties": {"heading": {"type": "string"}, "text": {"type": "string"}}}},
+                    "slides": {"type": "array", "description": "For pptx: list of {title, text} objects, one per slide.", "items": {"type": "object", "properties": {"title": {"type": "string"}, "text": {"type": "string"}}}},
+                    "rows": {"type": "array", "description": "For xlsx: list of rows, each a list of cell values.", "items": {"type": "array"}}
+                },
+                "required": ["format", "filename"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "manage_memory",
             "description": "Manage the user's memory system: list, add, edit, delete, or search memories. Memories persist across sessions.",
             "parameters": {
@@ -444,8 +647,23 @@ FUNCTION_TOOL_SCHEMAS = [
                                "description": "The action to perform"},
                     "text": {"type": "string", "description": "Memory text (for add/edit) or search query (for search)"},
                     "memory_id": {"type": "string", "description": "Memory ID (for edit/delete)"},
-                    "category": {"type": "string", "enum": ["fact", "event", "contact", "preference"],
-                                 "description": "Memory category (for add/list filter)"}
+                    "category": {"type": "string", "enum": ["fact", "event", "contact", "preference", "correction"],
+                                 "description": "Memory category (for add/list filter). Use 'correction' when the user explicitly corrects a mistake or states a lasting behavioral preference for how you should act -- this category is always included in future context, unlike other categories which are only included when relevant to the current request."}
+                },
+                "required": ["action"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "zeus",
+            "description": "Read-only diagnostic access to the Zeus host via its dedicated, allowlisted HTTP agent (no shell, no sudo). Currently supports action=uname (OS/kernel info), action=uptime (real uptime in seconds, human-readable, and boot time), action=df (real root filesystem usage: total/used/free bytes and percent used), action=health (checks whether the agent process itself is reachable, independent of authentication -- use this first if any other action fails, to tell a down agent apart from a bad token), action=ps (top 20 real running processes on Zeus by memory usage: pid, name, rss_kb, state), and action=journal_tail (real, most recent 30 systemd journal entries across the whole system: timestamp, unit, priority, message).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "action": {"type": "string", "enum": ["uname", "uptime", "df", "health", "ps", "journal_tail"],
+                               "description": "The allowlisted Zeus agent action to call"}
                 },
                 "required": ["action"]
             }
@@ -685,6 +903,34 @@ FUNCTION_TOOL_SCHEMAS = [
                     "problem": {"type": "string", "description": "Describe the problem or question you need help with"}
                 },
                 "required": ["problem"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "skill_introspect",
+            "description": (
+                "Read-only lookup of the user's skill library -- ALWAYS available, "
+                "regardless of domain (trading, email, browser, etc), unlike "
+                "manage_skills which only appears for workspace/file-related requests. "
+                "Use 'list' to see what skills exist, 'view' to load a specific skill's "
+                "full procedure, 'view_ref' for a sub-file, 'search' to find a relevant "
+                "skill by keyword. If a relevant published skill exists for the current "
+                "task, ALWAYS check it here before saying you don't know how to do something "
+                "or that you lack a procedure -- do not assume a skill is unavailable just "
+                "because you don't see it in your current tool list. To create, edit, "
+                "publish, or delete a skill, use manage_skills instead."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "action": {"type": "string", "enum": ["list", "view", "view_ref", "search"], "description": "list = name+description summary; view = full SKILL.md; view_ref = sub-file under the skill dir; search = relevance match on published skills."},
+                    "name": {"type": "string", "description": "Slug/name of the skill. Required for view/view_ref."},
+                    "path": {"type": "string", "description": "Sub-path under the skill directory for view_ref (e.g. 'references/example.md')."},
+                    "query": {"type": "string", "description": "Search text (for search)."}
+                },
+                "required": ["action"]
             }
         }
     },
@@ -1290,6 +1536,40 @@ FUNCTION_TOOL_SCHEMAS = [
                     "job_id": {"type": "string", "description": "Background job id (required for output/kill; from action='list')"},
                 },
                 "required": ["action"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "ha_state",
+            "description": "Read the real, current state of one allowlisted Home Assistant entity via the real Zeus host agent -- never talks to Home Assistant directly. Read-only, never modifies anything. The agent enforces its own, real, live entity allowlist independently of this description -- it is not fixed and can grow over time, so do not assume this tool's own text lists every entity that is actually allowed. If you know or can infer a real entity_id relevant to the question (e.g. a real domain like climate./light./binary_sensor. plus a plausible, specific name), try it directly rather than assuming it must be rejected -- a disallowed entity_id returns a clear, real error naming the exact entity_id that failed, which is the authoritative source of truth, not this description.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "entity_id": {
+                        "type": "string",
+                        "description": "The exact, real Home Assistant entity_id to read (e.g. climate.nest_thermostat, binary_sensor.verizon_internet_gateway_wan_status). The real, current allowlist is enforced live by the agent, not fixed here -- try the entity_id that best matches the question."
+                    }
+                },
+                "required": ["entity_id"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "ha_control",
+            "description": "Call one allowlisted Home Assistant service (e.g. set a thermostat's temperature, turn a light or switch on/off) against one allowlisted entity, via the real Zeus host agent -- never talks to Home Assistant directly. Mutating. The agent enforces its own, real, live entity AND domain+service allowlists independently of this description -- neither is fixed here, and both can grow over time. If a real, plausible entity_id/domain/service combination matches the request, try it directly rather than assuming it must be rejected -- a disallowed request returns a clear, real error naming exactly what failed, which is the authoritative source of truth, not this description.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "entity_id": {"type": "string", "description": "The exact, real Home Assistant entity_id to act on (e.g. climate.nest_thermostat). The real, current allowlist is enforced live by the agent, not fixed here."},
+                    "domain": {"type": "string", "description": "The Home Assistant service domain, e.g. 'light' or 'switch'."},
+                    "service": {"type": "string", "description": "The service to call within that domain, e.g. 'turn_on', 'turn_off', 'toggle'."},
+                    "data": {"type": "object", "description": "Optional extra service data (e.g. brightness, color). Omit for a plain on/off/toggle call."}
+                },
+                "required": ["entity_id", "domain", "service"]
             }
         }
     },

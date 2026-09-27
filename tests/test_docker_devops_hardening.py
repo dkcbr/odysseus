@@ -31,6 +31,22 @@ def _compose_env_names(path: Path) -> set[str]:
     return {entry.split("=", 1)[0] for entry in env}
 
 
+def _service_mounts_host_docker_socket(volumes) -> bool:
+    """True if any volume entry for a service references the real host
+    Docker socket path, in either short ("src:dst:mode" string) or long
+    (mapping with source/target keys) compose volume syntax."""
+    for entry in volumes or []:
+        if isinstance(entry, str):
+            if "/var/run/docker.sock" in entry:
+                return True
+        elif isinstance(entry, dict):
+            if "/var/run/docker.sock" in str(entry.get("source", "")) or (
+                "/var/run/docker.sock" in str(entry.get("target", ""))
+            ):
+                return True
+    return False
+
+
 def _upload_limit_env_names() -> set[str]:
     source = (ROOT / "src" / "upload_limits.py").read_text(encoding="utf-8")
     return set(re.findall(r'"(ODYSSEUS_[A-Z_]*BYTES)"', source)) | {
@@ -56,9 +72,34 @@ def test_compose_files_forward_every_upload_limit_env_var():
 
 
 def test_default_compose_files_do_not_mount_host_docker_socket():
+    """The odysseus service itself must never get a raw host Docker socket
+    mount (root-equivalent to the host access) in any default compose file.
+
+    Deliberately scoped to the odysseus service's own volumes, not a
+    whole-file text search: docker-socket-proxy (added 2026-08-24)
+    legitimately mounts the real socket, read-only, specifically so that
+    nothing else -- including odysseus itself -- ever needs to. A
+    whole-file search can't distinguish that safe, scoped proxy pattern
+    from an actual regression in the odysseus service itself, which is
+    the one that would actually matter. See test_docker_socket_proxy_is_
+    read_only_and_not_published below for a real check on the proxy's own
+    posture."""
     for path in COMPOSE_FILES:
-        text = path.read_text(encoding="utf-8")
-        assert "/var/run/docker.sock" not in text, path.name
+        compose = yaml.safe_load(path.read_text(encoding="utf-8"))
+        service = compose.get("services", {}).get("odysseus", {})
+        assert not _service_mounts_host_docker_socket(service.get("volumes")), path.name
+
+
+def test_docker_socket_proxy_is_read_only_and_not_published():
+    """The one legitimate real socket mount (docker-socket-proxy in the
+    base compose file) must stay read-only and must never be published to
+    the host -- the two properties that keep it safe. Only the base file
+    is checked: the GPU overlay files don't define this service at all."""
+    compose = yaml.safe_load((ROOT / "docker-compose.yml").read_text(encoding="utf-8"))
+    proxy = compose["services"]["docker-socket-proxy"]
+
+    assert "/var/run/docker.sock:/var/run/docker.sock:ro" in proxy["volumes"]
+    assert not proxy.get("ports"), "docker-socket-proxy must not publish ports to the host"
 
 
 def test_host_docker_overlay_mounts_socket_and_adds_docker_group():

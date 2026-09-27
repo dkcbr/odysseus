@@ -5,9 +5,12 @@ import re
 import difflib
 import fnmatch
 import shutil
+import hashlib
+import secrets
+import time
 from typing import Optional, Dict, Any, Tuple, List
 
-from src.constants import MAX_READ_CHARS, MAX_DIFF_LINES, MAX_OUTPUT_CHARS
+from src.constants import MAX_READ_CHARS, MAX_DIFF_LINES, MAX_OUTPUT_CHARS, DATA_DIR
 
 _CODENAV_SKIP_DIRS = frozenset({
     ".git", ".hg", ".svn", "node_modules", "venv", ".venv", "__pycache__",
@@ -85,6 +88,7 @@ class EditFileTool:
             return {"error": "edit_file: path required", "exit_code": 1}
         try:
             path = _resolve_tool_path(raw_path)
+            _reject_if_sensitive_write(path)
         except ValueError as e:
             return {"error": f"edit_file: {e}", "exit_code": 1}
         if old == "":
@@ -180,6 +184,40 @@ class ReadFileTool:
             data = data[:MAX_READ_CHARS] + f"\n... [truncated at {MAX_READ_CHARS} chars]"
         return {"output": data, "exit_code": 0}
 
+# ---------------------------------------------------------------------------
+# Sensitive-write gating: files that store real app secrets or the agent
+# capability policy itself live inside DATA_DIR (the always-on default
+# allowlist root) and are NOT covered by _is_sensitive_path's dotfile-style
+# denylist (.ssh, .env, id_rsa, ...). Direct write_file/edit_file/apply_patch
+# to these is rejected; propose_write/commit_write remains the sanctioned
+# path (diff-preview + one-time token), and is intentionally NOT gated here.
+# ---------------------------------------------------------------------------
+SENSITIVE_WRITE_GATING_ENABLED = True
+_SENSITIVE_WRITE_PATHS = frozenset(os.path.realpath(p) for p in (
+    os.path.join(DATA_DIR, ".app_key"),
+    os.path.join(DATA_DIR, "app.db"),
+    os.path.join(DATA_DIR, "auth.json"),
+    os.path.join(DATA_DIR, "integrations.json"),
+    os.path.join(DATA_DIR, "agent_capabilities.json"),
+))
+
+
+class SensitiveWritePathError(ValueError):
+    """Raised when a direct write/edit/patch targets a protected file."""
+
+
+def _reject_if_sensitive_write(resolved_path: str) -> None:
+    if not SENSITIVE_WRITE_GATING_ENABLED:
+        return
+    rp = os.path.realpath(resolved_path)
+    if rp in _SENSITIVE_WRITE_PATHS:
+        raise SensitiveWritePathError(
+            f"direct writes to {rp} are restricted -- call propose_write with "
+            '{"path": "' + rp + '", "content": "..."} to preview the diff and '
+            "get a commit_token, then commit_write with that token to apply it"
+        )
+
+
 class WriteFileTool:
     async def execute(self, content: str, ctx: dict) -> dict:
         from src.tool_execution import _resolve_tool_path, _resolve_search_root, _truncate
@@ -203,6 +241,7 @@ class WriteFileTool:
                 pass
         try:
             path = _resolve_tool_path(raw_path)
+            _reject_if_sensitive_write(path)
         except ValueError as e:
             return {"error": f"write_file: {e}", "exit_code": 1}
         try:
@@ -229,6 +268,122 @@ class WriteFileTool:
         if diff:
             result["diff"] = diff
         return result
+
+_COMMIT_TOKEN_TTL = 300  # 5 minutes
+_commit_tokens: Dict[str, Tuple[str, str, float]] = {}  # token -> (path, body_sha256, expiry)
+
+
+def _make_commit_token(path: str, body: str) -> str:
+    token = secrets.token_urlsafe(24)
+    _commit_tokens[token] = (path, hashlib.sha256(body.encode()).hexdigest(), time.time() + _COMMIT_TOKEN_TTL)
+    return token
+
+
+def _check_commit_token(token: str, path: str, body: str) -> Tuple[bool, str]:
+    entry = _commit_tokens.get(token)
+    if entry is None:
+        return False, "invalid or already-used commit token"
+    tok_path, tok_digest, expiry = entry
+    del _commit_tokens[token]  # one-time use, regardless of outcome below
+    if time.time() > expiry:
+        return False, "commit token expired \u2014 call propose_write again"
+    if tok_path != path or tok_digest != hashlib.sha256(body.encode()).hexdigest():
+        return False, "commit token does not match this path/content \u2014 call propose_write again"
+    return True, ""
+
+
+class ProposeWriteTool:
+    """Compute the diff for a prospective write WITHOUT touching disk.
+    Returns a one-time commit_token that CommitWriteTool needs to actually apply it."""
+    async def execute(self, content: str, ctx: dict) -> dict:
+        from src.tool_execution import _resolve_tool_path
+        lines = content.split("\n", 1)
+        raw_path = lines[0].strip()
+        body = lines[1] if len(lines) > 1 else ""
+        _stripped = content.strip()
+        if _stripped.startswith("{"):
+            try:
+                _a = json.loads(_stripped)
+                if isinstance(_a, dict) and "path" in _a:
+                    raw_path = str(_a.get("path", "")).strip()
+                    body = str(_a.get("content", ""))
+            except (json.JSONDecodeError, TypeError, ValueError):
+                pass
+        try:
+            path = _resolve_tool_path(raw_path)
+        except ValueError as e:
+            return {"error": f"propose_write: {e}", "exit_code": 1}
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                old = f.read()
+        except (FileNotFoundError, IsADirectoryError, UnicodeDecodeError, OSError):
+            old = ""
+        token = _make_commit_token(path, body)
+        result = {
+            "output": f"Proposed write to {path} ({len(body)} bytes, unwritten). "
+                       f"Call commit_write with this commit_token within 5 min to apply it.",
+            "exit_code": 0,
+            "commit_token": token,
+        }
+        diff = _unified_diff(old, body, path)
+        if diff:
+            result["diff"] = diff
+        return result
+
+
+class CommitWriteTool:
+    """Apply a write previously proposed via propose_write. Requires a matching,
+    unexpired, one-time commit_token. Re-resolves the path a second time
+    immediately before writing, independent of the token, so a bug in the
+    token/proposal step alone can't bypass path containment."""
+    async def execute(self, content: str, ctx: dict) -> dict:
+        from src.tool_execution import _resolve_tool_path
+        _stripped = content.strip()
+        try:
+            args = json.loads(_stripped) if _stripped.startswith("{") else {}
+        except (json.JSONDecodeError, TypeError):
+            args = {}
+        raw_path = str(args.get("path", "")).strip()
+        body = str(args.get("content", ""))
+        token = str(args.get("commit_token", "")).strip()
+        if not raw_path:
+            return {"error": "commit_write: path required", "exit_code": 1}
+        if not token:
+            return {"error": "commit_write: commit_token required (call propose_write first)", "exit_code": 1}
+        try:
+            path = _resolve_tool_path(raw_path)  # 2nd independent resolution
+        except ValueError as e:
+            return {"error": f"commit_write: {e}", "exit_code": 1}
+        ok, reason = _check_commit_token(token, path, body)
+        if not ok:
+            return {"error": f"commit_write: {reason}", "exit_code": 1}
+
+        def _write():
+            old = ""
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    old = f.read()
+            except (FileNotFoundError, IsADirectoryError, UnicodeDecodeError, OSError):
+                old = ""
+            d = os.path.dirname(path)
+            if d:
+                os.makedirs(d, exist_ok=True)
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(body)
+            return old, len(body)
+
+        try:
+            old_content, size = await asyncio.to_thread(_write)
+        except PermissionError:
+            return {"error": f"commit_write: {path}: permission denied", "exit_code": 1}
+        except OSError as e:
+            return {"error": f"commit_write: {path}: {e}", "exit_code": 1}
+        diff = _unified_diff(old_content, body, path)
+        result = {"output": f"Committed {size} bytes to {path}", "exit_code": 0}
+        if diff:
+            result["diff"] = diff
+        return result
+
 
 class ApplyPatchTool:
     async def execute(self, content: str, ctx: dict) -> dict:
@@ -260,6 +415,7 @@ class ApplyPatchTool:
             prepared = []
             for op in ops:
                 path = _resolve_tool_path(op["path"])
+                _reject_if_sensitive_write(path)
                 kind = op["kind"]
                 if kind == "add":
                     if os.path.exists(path):

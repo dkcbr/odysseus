@@ -2,23 +2,35 @@
 """MCP (Model Context Protocol) server management routes."""
 import json
 import os
+import time
+from datetime import datetime
 import uuid
 import urllib.parse
 import html
 from pathlib import Path
 from fastapi import APIRouter, Form, HTTPException, Request
 from fastapi.responses import RedirectResponse, HTMLResponse
+from pydantic import BaseModel
 import logging
 import httpx
 
-from core.database import McpServer, SessionLocal
+from core.database import McpServer, PendingApproval, SessionLocal
 from core.middleware import require_admin
+from src.agents.capabilities import is_tool_allowed
 from src.constants import DATA_DIR, MCP_OAUTH_DIR
 from src.mcp_manager import McpManager
+from routes.agent_dashboard import record_agent_call
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/mcp", tags=["mcp"])
+
+
+class McpCallRequest(BaseModel):
+    server: str
+    tool: str
+    arguments: dict = {}
+    agent: str | None = None
 
 
 def _mcp_oauth_base_dir() -> Path:
@@ -364,6 +376,11 @@ def setup_mcp_routes(mcp_manager: McpManager):
                 raise HTTPException(404, "Server not found")
 
             await mcp_manager.disconnect_server(server_id)
+            # Real, added 2026-08-24: unlike a routine disconnect/reconnect,
+            # this server is being permanently removed -- clean up its
+            # dedicated stdio actor task too, so it doesn't linger for a
+            # server_id that no longer exists at all.
+            await mcp_manager.cleanup_connection_actor(server_id)
 
             db.delete(srv)
             db.commit()
@@ -422,6 +439,191 @@ def setup_mcp_routes(mcp_manager: McpManager):
             return {"id": server_id, "disabled_count": len(disabled)}
         finally:
             db.close()
+
+    @router.patch("/servers/{server_id}/approval-required-tools")
+    async def update_approval_required_tools(server_id: str, request: Request):
+        """Bulk update the approval-required tools list for a server -- a
+        real, added 2026-08-09 third tool state between enabled/disabled
+        (see PendingApproval / call_tool()'s enforcement check). Same
+        shape and pattern as update_disabled_tools above.
+
+        Expects JSON body: {"approval_required": ["tool_name_1", ...]}
+        """
+        require_admin(request)
+        db = SessionLocal()
+        try:
+            srv = db.query(McpServer).filter(McpServer.id == server_id).first()
+            if not srv:
+                raise HTTPException(404, "Server not found")
+
+            body = await request.json()
+            approval_required = body.get("approval_required", [])
+            if not isinstance(approval_required, list):
+                raise HTTPException(400, "approval_required must be a list of tool names")
+
+            srv.approval_required_tools = json.dumps(approval_required) if approval_required else None
+            db.commit()
+
+            return {"id": server_id, "approval_required_count": len(approval_required)}
+        finally:
+            db.close()
+
+    @router.get("/approvals")
+    async def list_pending_approvals(request: Request, status: str = "pending"):
+        """List approval-gated tool calls. Real, added 2026-08-09. Defaults
+        to pending only; pass status=all for the full history."""
+        require_admin(request)
+        db = SessionLocal()
+        try:
+            q = db.query(PendingApproval)
+            if status != "all":
+                q = q.filter(PendingApproval.status == status)
+            rows = q.order_by(PendingApproval.created_at.desc()).limit(200).all()
+            return {
+                "approvals": [
+                    {
+                        "id": r.id,
+                        "server_id": r.server_id,
+                        "server_name": r.server_name,
+                        "tool_name": r.tool_name,
+                        "arguments": json.loads(r.arguments),
+                        "status": r.status,
+                        "created_at": r.created_at.isoformat() if r.created_at else None,
+                        "resolved_at": r.resolved_at.isoformat() if r.resolved_at else None,
+                        "result": json.loads(r.result) if r.result else None,
+                    }
+                    for r in rows
+                ]
+            }
+        finally:
+            db.close()
+
+    @router.post("/approvals/{approval_id}/approve")
+    async def approve_pending_approval(approval_id: str, request: Request):
+        """Approve a staged tool call and actually execute it now. Real,
+        added 2026-08-09. Re-enters call_tool() with _skip_approval_gate=True
+        so the same tool call that would otherwise loop back into another
+        pending approval instead genuinely runs this time -- the single,
+        real execution path, not a reimplementation of it here."""
+        require_admin(request)
+        resolved_by = getattr(request.state, "current_user", None)
+        db = SessionLocal()
+        try:
+            approval = db.query(PendingApproval).filter(PendingApproval.id == approval_id).first()
+            if not approval:
+                raise HTTPException(404, "Approval not found")
+            if approval.status != "pending":
+                raise HTTPException(400, f"Approval already {approval.status}")
+
+            qualified_name = f"mcp__{approval.server_id}__{approval.tool_name}"
+            result = await mcp_manager.call_tool(
+                qualified_name, json.loads(approval.arguments), _skip_approval_gate=True
+            )
+
+            approval.status = "approved"
+            approval.resolved_at = datetime.utcnow()
+            approval.resolved_by = resolved_by
+            approval.result = json.dumps(result)
+            db.commit()
+
+            return {"id": approval_id, "status": "approved", "result": result}
+        finally:
+            db.close()
+
+    @router.post("/approvals/{approval_id}/reject")
+    async def reject_pending_approval(approval_id: str, request: Request):
+        """Reject a staged tool call -- it never executes. Real, added
+        2026-08-09."""
+        require_admin(request)
+        resolved_by = getattr(request.state, "current_user", None)
+        db = SessionLocal()
+        try:
+            approval = db.query(PendingApproval).filter(PendingApproval.id == approval_id).first()
+            if not approval:
+                raise HTTPException(404, "Approval not found")
+            if approval.status != "pending":
+                raise HTTPException(400, f"Approval already {approval.status}")
+
+            approval.status = "rejected"
+            approval.resolved_at = datetime.utcnow()
+            approval.resolved_by = resolved_by
+            db.commit()
+
+            return {"id": approval_id, "status": "rejected"}
+        finally:
+            db.close()
+
+    @router.post("/call")
+    async def call_mcp_tool(request: Request, body: McpCallRequest):
+        """Directly invoke a single MCP tool and return its result - a real,
+        general-purpose test/automation surface for any connected server.
+
+        Body (JSON): {"server": "<server name or id>", "tool": "<tool name>",
+                      "arguments": {...}}
+
+        Resolves "server" against both the DB id and the human-readable name,
+        since either is natural to type. Delegates to the same McpManager.call_tool()
+        the agent loop itself uses, so results here match real chat behavior.
+
+        Built-in servers (memory, rag, image_gen, email, builtin_browser) are
+        registered directly via mcp_manager.connect_server() at startup and
+        never get a McpServer DB row, so they fall through to a second,
+        in-memory lookup here - checked by real server_id via
+        get_server_status(), or by real display name via get_all_tools(),
+        both genuine public methods on mcp_manager (no private attribute
+        access). This does NOT add built-ins to the DB or change how they're
+        registered; it only extends this endpoint's server resolution.
+        """
+        require_admin(request)
+
+        db = SessionLocal()
+        try:
+            srv = (
+                db.query(McpServer).filter(McpServer.id == body.server).first()
+                or db.query(McpServer).filter(McpServer.name == body.server).first()
+            )
+        finally:
+            db.close()
+
+        if srv is not None:
+            resolved_id = srv.id
+            resolved_name = srv.name
+        else:
+            # Fall back to the in-memory registry for built-in servers.
+            resolved_id = None
+            resolved_name = None
+            status = mcp_manager.get_server_status(body.server)
+            if status and status.get("status") not in (None, "disconnected"):
+                resolved_id = body.server
+                resolved_name = status.get("name", body.server)
+            else:
+                for tool in mcp_manager.get_all_tools():
+                    if tool.get("server_name") == body.server:
+                        resolved_id = tool["server_id"]
+                        resolved_name = tool["server_name"]
+                        break
+
+        if resolved_id is None:
+            raise HTTPException(404, f"No MCP server found matching '{body.server}' (checked DB, id, and name)")
+
+        if body.agent is not None and not is_tool_allowed(body.agent, body.tool, resolved_name):
+            blocked_result = {
+                "error": "Tool not allowed",
+                "server": body.server,
+                "tool": body.tool,
+                "agent": body.agent,
+                "allowed": False,
+            }
+            record_agent_call(resolved_name, body.tool, body.arguments,
+                              {"exit_code": 1, "error": "blocked: not allowed for this agent role"}, 0.0)
+            return blocked_result
+
+        qualified_name = f"mcp__{resolved_id}__{body.tool}"
+        _start = time.monotonic()
+        result = await mcp_manager.call_tool(qualified_name, body.arguments, agent_name=body.agent)
+        _duration_ms = (time.monotonic() - _start) * 1000
+        record_agent_call(resolved_name, body.tool, body.arguments, result, _duration_ms)
+        return result
 
     # ── OAuth flow for Google MCP servers ──────────────────────────
 

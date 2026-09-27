@@ -87,6 +87,24 @@ def _configured_endpoint_kind(url: str) -> Optional[str]:
         return None
 
 
+def _is_ollama_endpoint(url: str) -> bool:
+    """Real, targeted helper added 2026-08-16: True if this endpoint is
+    genuinely Ollama (port 11434 or "ollama" in hostname -- same signal
+    already used elsewhere in this file to detect Ollama specifically).
+    Distinguishes Ollama from other local backends like llama.cpp/vLLM,
+    where a low context value reported via /v1/models usually reflects
+    the model file's own arbitrary embedded default, not a deliberate
+    user-configured serving limit the way llama.cpp's --max-model-len
+    or vLLM's --max-model-len genuinely are.
+    """
+    try:
+        parsed = urlparse(url)
+        host = (parsed.hostname or "").lower()
+        return parsed.port == 11434 or "ollama" in host
+    except Exception:
+        return False
+
+
 def is_local_endpoint(url: str) -> bool:
     """Check if URL points to a local/private/tailscale address."""
     kind = _configured_endpoint_kind(url)
@@ -155,6 +173,16 @@ KNOWN_CONTEXT_WINDOWS = {
     'gemini-1.5-pro': 1048576,
     'gemini-1.5-flash': 1048576,
     'gemma-4': 262144,
+    # Real, added 2026-08-12: Ollama's actual model name for this family is
+    # "gemma4" (no hyphen, e.g. "gemma4:e2b") -- the substring match above
+    # never fires for it, silently falling through to DEFAULT_CONTEXT/None
+    # and leaving Ollama's own bare default (confirmed directly: 4096) in
+    # place instead of the model's real, much larger capacity. Marketed at
+    # 128K-256K depending on variant; capped by OLLAMA_MAX_PRACTICAL_CONTEXT
+    # (40960) at the call site regardless, matching qwen3's real ceiling on
+    # this deployment's hardware -- not independently verified for gemma4
+    # specifically, just given the same practical cap other local models get.
+    'gemma4': 262144,
     'gemma-3': 128000,
     'gemma-2': 8192,
 
@@ -181,7 +209,15 @@ KNOWN_CONTEXT_WINDOWS = {
     'llama-3': 131072,
 
     # --- Qwen ---
-    'qwen3': 131072,
+    # Real, corrected 2026-08-10: was 131072, which is wrong for the
+    # real, actual qwen3:14b model this deployment runs (confirmed via
+    # direct, empirical testing against the live Ollama instance --
+    # requesting anything above 40960 gets silently capped back down to
+    # 40960 by Ollama itself, the model's genuine native architectural
+    # ceiling, not a VRAM constraint). Other real qwen3 sizes/configs
+    # may genuinely differ; this key matches by substring, so it's
+    # scoped to what's actually been verified for this deployment.
+    'qwen3': 40960,
     'qwen2.5': 131072,
     'qwen2': 32768,
     'qwq': 32768,
@@ -204,6 +240,12 @@ KNOWN_CONTEXT_WINDOWS = {
 
     # --- Microsoft ---
     'phi-4': 16000,
+    # Real, added 2026-08-16: Ollama's actual model name is "phi4" (no
+    # hyphen, e.g. "phi4:latest") -- same real bug pattern as the
+    # "gemma-4"/"gemma4" mismatch fixed 2026-08-12. Confirmed directly:
+    # context_length was silently 4096 (Ollama's bare default) instead
+    # of this model's real 16K native max.
+    'phi4': 16000,
     'phi-3': 128000,
 
     # --- Nvidia ---
@@ -462,9 +504,19 @@ def _query_context_length(endpoint_url: str, model: str) -> Tuple[int, bool]:
 
     # For local/self-hosted endpoints, trust the API value (user set --max-model-len)
     # For cloud APIs, use the larger value (API can report low defaults)
+    #
+    # Real, added exception 2026-08-16: Ollama specifically is excluded from
+    # the "trust the lower local value" branch. Confirmed directly (phi4,
+    # gemma4): Ollama's /v1/models often reports a model file's own small,
+    # arbitrary embedded default (e.g. 4096) that reflects nothing about
+    # deliberate user configuration -- unlike llama.cpp's --max-model-len or
+    # vLLM's --max-model-len, which this branch was designed to respect.
+    # Trusting Ollama's low default here silently discarded correct, larger
+    # known-table values for two real models before this was found.
     if api_ctx and known:
         _is_local = is_local_endpoint(endpoint_url)
-        if _is_local and api_ctx < known:
+        _is_ollama = _is_ollama_endpoint(endpoint_url)
+        if _is_local and not _is_ollama and api_ctx < known:
             logger.info(f"Local endpoint reports {api_ctx} for {model} (known max: {known}) — using API value")
             return api_ctx, True
         result = max(api_ctx, known)

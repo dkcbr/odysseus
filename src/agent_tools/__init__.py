@@ -21,7 +21,12 @@ logger = logging.getLogger(__name__)
 
 from .subprocess_tools import BashTool, PythonTool
 from .web_tools import WebSearchTool, WebFetchTool
-from .filesystem_tools import ReadFileTool, WriteFileTool, EditFileTool, ApplyPatchTool, LsTool, GlobTool, GrepTool, GetWorkspaceTool
+from .finance_tools import TickerLookupTool
+from .systemctl_tools import RestartServiceTool
+from .ha_tools import HAStateTool, HAControlTool
+from .systemd_logs_tools import ReadSystemdLogsTool, ServiceStatusTool, CheckServiceDependenciesTool
+from .container_tools import RestartContainerTool, ContainerStatusTool
+from .filesystem_tools import ReadFileTool, WriteFileTool, EditFileTool, ApplyPatchTool, LsTool, GlobTool, GrepTool, GetWorkspaceTool, ProposeWriteTool, CommitWriteTool
 from .coding_tools import TodoWriteTool
 from .document_tools import CreateDocumentTool, UpdateDocumentTool, EditDocumentTool, SuggestDocumentTool, ManageDocumentTool
 from .interaction_tools import AskUserTool, UpdatePlanTool
@@ -34,14 +39,27 @@ from .admin_tools import (
     do_manage_tokens, do_manage_settings,
 )
 
+from .zeus_tools import ZeusTool
+
 TOOL_HANDLERS = {
     "bash": BashTool().execute,
     "python": PythonTool().execute,
     "web_search": WebSearchTool().execute,
     "web_fetch": WebFetchTool().execute,
+    "lookup_ticker": TickerLookupTool().execute,
+    "restart_service": RestartServiceTool().execute,
+    "ha_state": HAStateTool().execute,
+    "ha_control": HAControlTool().execute,
+    "read_systemd_logs": ReadSystemdLogsTool().execute,
+    "service_status": ServiceStatusTool().execute,
+    "check_service_dependencies": CheckServiceDependenciesTool().execute,
+    "restart_container": RestartContainerTool().execute,
+    "container_status": ContainerStatusTool().execute,
     "read_file": ReadFileTool().execute,
     "write_file": WriteFileTool().execute,
     "edit_file": EditFileTool().execute,
+    "propose_write": ProposeWriteTool().execute,
+    "commit_write": CommitWriteTool().execute,
     "apply_patch": ApplyPatchTool().execute,
     "todowrite": TodoWriteTool().execute,
     "ls": LsTool().execute,
@@ -63,6 +81,7 @@ TOOL_HANDLERS = {
     "list_sessions": ListSessionsTool().execute,
     "send_to_session": SendToSessionTool().execute,
     "manage_session": ManageSessionTool().execute,
+    "zeus": ZeusTool().execute,
 }
 # Config/integration admin tools (manage_endpoints/mcp/webhooks/tokens/settings).
 TOOL_HANDLERS.update(ADMIN_TOOL_HANDLERS)
@@ -76,8 +95,8 @@ SHELL_TIMEOUT = 60
 PYTHON_TIMEOUT = 30
 
 # Tool types that trigger execution
-TOOL_TAGS = {"bash", "python", "web_search", "web_fetch", "read_file", "write_file", "edit_file",
-             "apply_patch", "todowrite",
+TOOL_TAGS = {"bash", "python", "web_search", "web_fetch", "lookup_ticker", "restart_service", "ha_state", "ha_control", "read_systemd_logs", "service_status", "check_service_dependencies", "restart_container", "container_status", "read_file", "write_file", "edit_file",
+             "apply_patch", "todowrite", "get_portfolio_context", "create_document_office",
              "grep", "glob", "ls", "get_workspace", "manage_bg_jobs",
              "create_document", "update_document", "edit_document",
              "search_chats",
@@ -86,12 +105,12 @@ TOOL_TAGS = {"bash", "python", "web_search", "web_fetch", "read_file", "write_fi
              "pipeline",
              "manage_session", "manage_memory", "list_models",
              "ui_control", "generate_image", "ask_user", "update_plan",
-             "manage_tasks", "api_call", "ask_teacher", "manage_skills",
+             "manage_tasks", "api_call", "ask_teacher", "manage_skills", "skill_introspect",
              "suggest_document",
              "manage_endpoints", "manage_mcp", "manage_webhooks",
              "manage_tokens", "manage_documents", "manage_settings",
              "manage_notes", "manage_calendar",
-             "resolve_contact", "manage_contact",
+             "resolve_contact", "manage_contact", "zeus",
              # Email tool names come from BUILTIN_EMAIL_TOOLS (unioned below)
              # so the fence regex, dispatch, and non-admin blocklist all cover
              # the same set.

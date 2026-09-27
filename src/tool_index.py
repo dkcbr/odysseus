@@ -37,6 +37,32 @@ ALWAYS_AVAILABLE = frozenset({
     # of topic. Without this, RAG drops it and the agent falls back to
     # app_api /api/memory/add which fails with 422 on first attempt.
     "manage_memory",
+    # Portfolio context, ticker lookups, and document creation are similarly
+    # ambient -- none reliably map to a domain keyword RAG can match on.
+    # Re-applied 2026-08-13 after an earlier, uncommitted version of this
+    # exact change was lost to a concurrent git checkout from another
+    # session (see 703c5b7c) -- committing this one immediately.
+    "get_portfolio_context",
+    "search_vault",
+    "lookup_ticker",
+    "create_document_office",
+    # Read-only skill introspection -- ambient for the same reason as the
+    # above: a domain-specific request (trading, email, etc) never
+    # triggers _WORKSPACE_TERMINUS_TOOLS (where the write-capable
+    # manage_skills lives), so without this the model can know a relevant
+    # published skill exists but have no way to actually read its
+    # procedure. See odysseus issue #10/#11 -- added 2026-08-16.
+    "skill_introspect",
+    # Real, live-caught gap, 2026-09-11: a direct "what's the WAN status of
+    # the router in Home Assistant?" question got a generic non-answer
+    # ("depends on router configuration...") instead of a real tool call --
+    # confirmed directly, separately, that ha_state itself works correctly
+    # when called directly. Same root cause and same fix as skill_introspect
+    # above: a home-infrastructure query never maps to whatever domain
+    # keyword RAG tool-selection matches on, so the model never even sees
+    # ha_state/ha_control as options unless they're ambient like this.
+    "ha_state",
+    "ha_control",
     # Ask the user a multiple-choice question for a decision/clarification.
     # Always reachable so the agent can pause and ask at any point.
     "ask_user",
@@ -50,7 +76,7 @@ ASSISTANT_ALWAYS_AVAILABLE = frozenset({
     "list_email_accounts", "list_emails", "read_email", "scan_email_unsubscribes", "unsubscribe_email", "send_email", "reply_to_email",
     "bulk_email", "archive_email", "delete_email", "mark_email_read",
     "manage_calendar", "manage_notes", "manage_tasks",
-    "manage_memory", "web_search", "read_file",
+    "manage_memory", "web_search", "read_file", "zeus",
     "create_document", "update_document",
     "resolve_contact", "search_chats",
     "api_call",  # For Miniflux/Gitea/Linkding/etc. integrations
@@ -91,6 +117,7 @@ BUILTIN_TOOL_DESCRIPTIONS: Dict[str, str] = {
     "list_models": "List all available AI models and their endpoints.",
     "manage_session": "Chat management: rename, archive, delete, or fork chats (the UI calls these 'chats'; internally 'sessions'). Use for 'rename my chats', 'rename this chat', 'archive/delete a chat'.",
     "manage_memory": "Memory management: list, add, edit, delete, or search persistent memories. For facts about the USER (their name, preferences, where they live). NOT for info about ANOTHER person — addresses, phones, emails belonging to a contact go in manage_contact, not memory.",
+    "zeus": "Read-only diagnostic access to the Zeus host via its dedicated agent (no shell/sudo). Currently supports action=uname (OS/kernel info), action=uptime (uptime seconds, human-readable, boot time), action=df (root filesystem usage: total/used/free bytes, percent used), action=health (agent reachability check, unauthenticated -- use first if uname/uptime/df fail, to distinguish a down agent from a bad token), action=ps (top 20 real processes by memory: pid, name, rss_kb, state), and action=journal_tail (most recent 30 real systemd journal entries system-wide: timestamp, unit, priority, message). Do not attempt other actions -- the agent will reject them.",
     "manage_skills": "Skill management: add, update, publish, or search reusable skills/presets.",
     "manage_tasks": "Scheduled task management: list, create, edit, delete, pause, resume, or run cron tasks.",
     "manage_endpoints": "Endpoint management: list, add, delete, enable, or disable model API endpoints.",
@@ -140,6 +167,19 @@ BUILTIN_TOOL_DESCRIPTIONS: Dict[str, str] = {
     "edit_image": "Edit an image in the gallery: upscale (increase resolution), remove background (rembg), inpaint (fill selected area), or harmonize (blend edits). Specify image ID and action.",
     "trigger_research": "Start a deep research job on any topic — appears in the Deep Research sidebar, streams progress, produces a detailed report. Use for 'research X', 'look into Y', 'do deep research on Z', 'investigate'. NOT a scheduled task — it runs now and surfaces in the sidebar.",
     "manage_bg_jobs": "Inspect and control detached background `bash` jobs (the ones started with a `#!bg` marker). action='list' shows this chat's jobs (id/status/age/command); action='output' returns a job's captured output so far (check on a long-running job, or re-read a finished one); action='kill' stops a runaway job by id. Use for 'is the background job done', 'check on that job', 'show the build output', 'kill the background job', 'stop the bg task'. output/kill need a job_id from list.",
+    "propose_write": "Preview a file write as a diff WITHOUT writing to disk. Returns a commit_token -- pass it to commit_write to actually apply the change. Use before writing to sensitive paths (data/agent_capabilities.json, data/app.db, data/auth.json, data/integrations.json, data/.app_key), which reject direct write_file calls.",
+    "commit_write": "Apply a write previously previewed with propose_write. Requires the exact path, content, and commit_token returned by propose_write -- the token is single-use and expires after 5 minutes.",
+    "lookup_ticker": "Look up REAL, VERIFIED company identity and quote data for a stock/crypto ticker symbol via Financial Modeling Prep. MANDATORY: call this before stating what company a ticker represents, its price, or any other fact about it - never answer from memory. Small and mid-cap tickers are frequently confused with unrelated companies when answered from memory (e.g. TMC has been misidentified as an unrelated medical-communications company when it is actually a deep-sea mining company; MP has been misidentified as an oil refiner when it is a rare-earth miner) - this tool exists specifically to prevent that. If the tool errors (no API key configured, ticker not found), tell the user real data isn't available rather than guessing.",
+    "restart_service": "Restart one of 4 real, allowlisted, user-level host services (Whisper speech-to-text: jarvis-whisper-bridge.service, jarvis-whisper-server-container.service, jarvis-whisper-server.service; Piper text-to-speech: jarvis-piper-server.service) via a real, separate, narrow, host-level restart agent. Use if a voice-pipeline service appears hung, unresponsive, or is reported as failing -- not for restarting Odysseus itself or any container/system-level service.",
+    "read_systemd_logs": "Read recent, real log entries for any real, existing systemd service on the host (broad scope -- not limited to the voice-pipeline services restart_service covers). Use to diagnose why any real service, including Odysseus/container/system-level ones, is failing, hung, or misbehaving. Read-only, never modifies or restarts anything.",
+    "service_status": "Read the current, real systemd state (active/failed/running, PID, memory, restart count, last start time) for any real, existing service on the host -- same broad scope as read_systemd_logs. Use to check a service's health before deciding whether it actually needs restart_service or deeper log inspection. Read-only, never modifies anything.",
+    "check_service_dependencies": "Show the real systemd dependency tree (Requires/Wants/After/Before) for any real, existing service on the host -- same broad scope as service_status/read_systemd_logs. Use to diagnose cascading failures, e.g. a service failing because an upstream dependency is inactive, not because of the service itself. Read-only, never modifies anything.",
+    "restart_container": "Restart one of exactly 2 real, explicitly allowlisted, low-stakes Docker containers (odysseus-searxng-1, odysseus-ntfy-1) via the real docker-socket-proxy. A real, structural restriction -- no other container, including Odysseus's own runtime, can ever be restarted through this tool.",
+    "container_status": "Read the current, real Docker state (running/exited, uptime, restart count, health, image) for any real, existing container on the host -- broader scope than restart_container since this is read-only. Use to check a container's health before deciding whether it actually needs restart_container.",
+    "get_portfolio_context": "Fetch DK's real, current portfolio context (holdings, strategy, rules, thesis notes). ALWAYS call for any question about a specific position, balance, holding, or stored trading rule — never assume you already know the answer. Answer the specific fact asked, not a general summary.",
+    "search_vault": "Search DK's real Obsidian vault (personal notes, e.g. book summaries) for a query string. ALWAYS call for any question about what the vault or notes say — never assume you lack access or answer from training knowledge.",
+    "create_document_office": "Create a real Word (.docx), PowerPoint (.pptx), Excel (.xlsx), or PDF file. ALWAYS call this for requests to create a Word document, presentation, spreadsheet, or PDF specifically — the generic create_document tool cannot produce real Office/PDF files. NEVER use bash/run_command/echo to write these files directly, that produces an invalid file that appears to work but cannot be opened.",
+    "skill_introspect": "Read-only lookup of the user's skill library. ALWAYS available regardless of domain. Use 'list'/'search' to check whether a relevant published skill exists, 'view' to read its full procedure. Check this BEFORE saying you don't know how to do something or lack a procedure — do not assume no skill exists just because you don't see it offered directly.",
 }
 
 
@@ -346,6 +386,20 @@ class ToolIndex:
 
     # Keyword hints: if the query mentions these words, force-include the tools.
     _KEYWORD_HINTS = {
+        # Real, added 2026-09-20: the new gods_eye_view MCP server (5
+        # tools, registered same session) was found live-failing this
+        # exact class of bug -- a real user query ("fly the God's Eye
+        # View globe to Rio de Janeiro and turn on the flights layer")
+        # never made the top-k=8 RAG cutoff at all, and the model
+        # (gemma4-e2b-longctx) correctly reported it had no relevant
+        # tools rather than hallucinating one. Same root cause and same
+        # fix shape as the earlier get_quotes force-include gap.
+        frozenset({"globe", "god's eye", "gods eye", "god's eye view",
+                   "gev", "fly to", "zoom in on", "outline", "annotate the map",
+                   "aircraft layer", "flights layer", "vessels layer",
+                   "satellites layer", "cctv layer", "military layer"}):
+            {"gev_fly_to_location", "gev_set_layer_visibility",
+             "gev_track_entity", "gev_annotate_map", "gev_clear_annotations"},
         # NOTE: "tell" was removed from this set. It fired on any "tell me ..."
         # request (e.g. "visit <url> and tell me the title"), force-including the
         # whole email toolset and crowding out the relevant tools — the model then
@@ -515,13 +569,114 @@ class ToolIndex:
             {"create_document", "edit_document", "update_document"},
     }
 
+    # Real, added 2026-09-16, price-query keyword force-include. Ticker
+    # symbols deliberately NOT included here (an earlier proposal suggested
+    # hardcoding a few, e.g. "aapl"/"msft"/"tsla") -- DK holds many more
+    # tickers than any short, static list could cover, and it would need
+    # manual updates every time a new position is opened. Matched on
+    # word boundaries, same convention as _KEYWORD_HINTS below.
+    _PRICE_QUERY_RE = re.compile(
+        r"\b(?:price|quote|trading at|worth|stock price)\b", re.I,
+    )
+    # Real, added 2026-09-16: bare-ticker detection, a real, separate,
+    # narrower gap found directly by regex-testing the price-keyword
+    # pattern above against realistic phrasings the previous evening --
+    # "AAPL" alone matched none of those keywords at all. Case-SENSITIVE
+    # on purpose (not re.I): tickers are conventionally typed in all-caps
+    # when someone means the symbol specifically ("AAPL", not "aapl" or
+    # a normal lowercase sentence), and dropping that signal would make
+    # this fire on ordinary words constantly. Still needs a stoplist for
+    # real, common all-caps acronyms/words that would otherwise
+    # false-positive -- deliberately NOT a hardcoded list of DK's own
+    # current holdings (same real "unscalable, goes stale" reasoning
+    # already rejected for the price-keyword fix).
+    # Real, live-caught bug fixed 2026-09-24: "DK" -- the user's own real
+    # name/initials, appearing constantly in ordinary messages -- is ALSO
+    # a real, valid stock ticker (Delek US Holdings). Confirmed directly:
+    # this exact collision (in the sibling copy of this stoplist in
+    # src/tool_execution.py) silently hijacked a real, load-bearing
+    # automated pipeline's entire chat call for 6 straight days. Added
+    # here too for the same structural reason, even though this specific
+    # copy backs the standalone /api/price-query endpoint rather than the
+    # confirmed-broken call site.
+    _TICKER_STOPLIST = frozenset({
+        "CEO", "CFO", "CTO", "USA", "ASAP", "OK", "IT", "TV", "PC", "AI",
+        "US", "UK", "EU", "UN", "OMG", "LOL", "FYI", "ETA", "FAQ", "DIY",
+        "API", "URL", "PDF", "CSV", "SQL", "GPU", "CPU", "RAM", "SSD",
+        "IRA", "LLC", "INC", "CEO", "VP", "HR", "PR", "PM", "AM", "DK",
+    })
+    _BARE_TICKER_RE = re.compile(r"(?<![A-Za-z])[A-Z]{2,5}(?![A-Za-z])")
+
+    def _get_quotes_tool_names(self) -> Set[str]:
+        """Real, direct scan of currently-indexed tool names for any
+        real, live `__get_quotes` tool, by suffix rather than a static,
+        hardcoded qualified name -- confirmed directly last night that a
+        static entry (e.g. "mcp__74167655__get_quotes") would silently
+        break if that server is ever re-registered under a new id.
+        Deliberately not cached: server ids can change between calls in
+        a long-running process, and this is a cheap in-memory metadata
+        scan, not a real network/embedding call."""
+        names = set()
+        for lane in self._lanes:
+            try:
+                if lane.count() == 0:
+                    continue
+                data = lane.collection.get(include=["metadatas"])
+                for meta in data.get("metadatas") or []:
+                    name = meta.get("tool_name", "")
+                    if name.endswith("__get_quotes"):
+                        names.add(name)
+            except Exception as e:
+                logger.warning("get_quotes suffix scan failed in %s lane: %s", lane.name, e)
+        return names
+
     def get_tools_for_query(
-        self, query: str, k: int = 8, always_include: Optional[Set[str]] = None
+        self, query: str, k: int = 8, always_include: Optional[Set[str]] = None,
+        max_tools: Optional[int] = None,
     ) -> Set[str]:
-        """Get the set of tool names to include for a given user query."""
+        """Get the set of tool names to include for a given user query.
+
+        Real, added 2026-09-25: `max_tools`, an optional final cap on the
+        total returned set. Found directly, this same session: this
+        function's own `base` set only ever grows (ALWAYS_AVAILABLE, RAG
+        retrieval, then a long chain of deterministic force-includes for
+        specific real gaps -- ticker/price detection, scheduling intent,
+        contact-save patterns, domain seeding, etc.) with no final trim,
+        so the real, effective tool count sent to the model can end up
+        far larger than the `k` passed in (a real, live case measured
+        this at k=8 in, 61 out). A direct evaluation of xLAM-2-8b-fc-r
+        found tool-selection accuracy collapsing well before a list that
+        size, especially once a realistic system prompt is also present
+        -- see scripts/model_tool_calling_eval.py. `max_tools` lets a
+        caller (agent_loop.py, based on the active model) enforce a real
+        ceiling for models known/measured to need one, without changing
+        this function's behavior at all for callers that don't pass it.
+        """
         base = set(always_include or ALWAYS_AVAILABLE)
         retrieved = self.retrieve(query, k=k)
         base.update(retrieved)
+        # Real, added 2026-09-16: force-include any real, live `get_quotes`
+        # tool for price-intent queries, regardless of RAG top-K ranking.
+        # Confirmed directly the same evening: even after fixing a real
+        # description-indexing bug that had this tool ranking 210th of 370
+        # (a negative similarity score), it still only reached 18th for a
+        # plain "price of AAPL" query -- genuinely better, but still
+        # outside the real k=8 cutoff used above. RAG ranking will keep
+        # fluctuating as more finance-domain tools/servers get added, so
+        # this deterministic override, not a retrieval/ranking tweak, is
+        # the real, reliable fix for this specific tool.
+        if self._PRICE_QUERY_RE.search(query):
+            base.update(self._get_quotes_tool_names())
+        # Real, added 2026-09-16, same session: separate, narrower gap
+        # found directly (not assumed) by regex-testing the price-keyword
+        # check above against realistic phrasings -- a bare ticker mention
+        # alone ("AAPL") matches none of those keywords. Case-sensitive
+        # match against real all-caps tokens, filtered through a real
+        # stoplist of common acronyms/words to reduce false positives.
+        for token in self._BARE_TICKER_RE.findall(query):
+            if token not in self._TICKER_STOPLIST:
+                base.update(self._get_quotes_tool_names())
+                break
         # Keyword-based force-include for common intents. Match on word
         # boundaries, not raw substrings, so short hints like "fix", "line",
         # "serve", "reply" or "unread" don't fire inside unrelated words
@@ -590,6 +745,42 @@ class ToolIndex:
             base.add("manage_contact")
         if contact_only_signal and "manage_contact" in base:
             base.discard("manage_memory")
+        # Real, "Variant E" of a designed disambiguation experiment
+        # (remove WorldWideView's competing fly_to tool when God's Eye
+        # View is named explicitly) was implemented, tested live via
+        # 8 real fly-action trials, and found to make things WORSE:
+        # 8/8 resulted in no tool call at all, worse than the 25%
+        # baseline. Reverted 2026-09-21 to isolate the next variant
+        # (tool renaming) cleanly, rather than testing it on top of a
+        # confirmed-worse prior change.
+        if max_tools is not None and len(base) > max_tools:
+            # Real, direct priority order when trimming is actually needed:
+            # (1) ALWAYS_AVAILABLE first -- small, safety-relevant baseline,
+            # always kept whole; (2) the original RAG-retrieved tools, in
+            # their real relevance-ranked order (self.retrieve() returns
+            # closest-match first) -- these are the ones actually specific
+            # to this query; (3) everything else this function added along
+            # the way (force-includes, domain seeding), in deterministic
+            # sorted order, filling any remaining room. This means a hard
+            # cap drops the "bonus" additions first, not the query-relevant
+            # core -- the opposite of a naive arbitrary truncation.
+            always = set(always_include or ALWAYS_AVAILABLE)
+            trimmed: Set[str] = set(always) & base
+            for name in retrieved:
+                if len(trimmed) >= max_tools:
+                    break
+                if name in base:
+                    trimmed.add(name)
+            if len(trimmed) < max_tools:
+                for name in sorted(base - trimmed):
+                    if len(trimmed) >= max_tools:
+                        break
+                    trimmed.add(name)
+            logger.info(
+                "[tool-rag] max_tools=%d applied: %d -> %d tools",
+                max_tools, len(base), len(trimmed),
+            )
+            return trimmed
         return base
 
 

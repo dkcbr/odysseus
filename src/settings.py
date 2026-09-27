@@ -29,6 +29,12 @@ def _invalidate_caches():
 # ── Default values ──
 
 DEFAULT_SETTINGS = {
+    # Real, added 2026-09-13: the display/identity name the assistant uses
+    # to refer to itself, wired into the system prompt in agent_loop.py and
+    # shown on the welcome screen. Empty string means the default identity
+    # (no rename applied) -- the "Rename AI" modal in the frontend was
+    # fully non-functional before this (POSTed to a route that didn't exist).
+    "ai_name": "",
     # Agent email safety: when True, the MCP send_email / reply_to_email
     # tools don't SMTP directly. They stage the composed message into the
     # scheduled_emails table with status='agent_draft' and return a
@@ -273,6 +279,14 @@ _PER_USER_KEYS = {
     "default_endpoint_id", "default_model", "default_model_fallbacks",
     "utility_endpoint_id", "utility_model", "utility_model_fallbacks",
     "research_endpoint_id", "research_model",
+    # Real, added 2026-08-24: the voice pipeline (wake word -> Whisper ->
+    # LLM -> Piper TTS, being rebuilt to integrate with Odysseus) needs a
+    # genuinely fast, low-latency model for real-time conversation, kept
+    # deliberately independent of whatever default_model is set to for
+    # regular chat -- switching your default chat model should never
+    # change what the voice loop uses, and vice versa. Same real,
+    # established pattern as utility_model/research_model above.
+    "voice_endpoint_id", "voice_model", "voice_model_fallbacks",
 }
 
 

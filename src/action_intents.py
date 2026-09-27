@@ -46,6 +46,17 @@ _PANEL = (
     r"settings|cookbook|sessions?|chats?|skills|memories|memory|brain)"
 )
 
+# Real, added 2026-09-25: found completely missing while investigating a
+# real Home Assistant question ("What's the indoor temperature?") that
+# silently failed to trigger tool use in plain chat mode -- this
+# category didn't exist at all before this. "garage door" is used
+# instead of bare "door" deliberately: "is the door open" is too
+# ambiguous/figurative ("the door to opportunity") to safely match.
+_HA_THING = (
+    r"(?:thermostat|temperature|(?:the\s+)?(?:home|house)\s+temp(?:erature)?|"
+    r"light|lights|switch|lock|garage\s+door)"
+)
+
 _ROUTING_PATTERNS: tuple[tuple[str, str, Pattern[str]], ...] = tuple(
     (category, reason, re.compile(pattern, re.I))
     for category, reason, pattern in (
@@ -122,6 +133,20 @@ _ROUTING_PATTERNS: tuple[tuple[str, str, Pattern[str]], ...] = tuple(
         ("workspace", "named computer task request", r"\b(?:on|from)\s+(?!this\b|my\b|the\b|a\b|an\b)(?:[a-z][a-z0-9_.-]{1,31})\b"),
         ("workspace", "terminal workspace request", r"\b(?:terminal|shell|workspace|tmux|docker|container|git|branch|commit|diff|pytest|stacktrace|traceback|benchmark|terminal[- ]bench|tbench)\b"),
 
+        # Real, added 2026-09-25: natural system-diagnostic questions
+        # ("Is the whisper service running?", "How much disk space do I
+        # have left?") were falling through entirely -- the existing
+        # "server/process debugging request" pattern above only covers
+        # imperative/"can you" phrasing, not a plain question. Deliberately
+        # narrow on the bare "is X running" form: earlier draft included
+        # "up"/"down" as bare state words and that matched real, unrelated
+        # stock-price questions ("Is KTOS down?", "Is Bitcoin up?") -- only
+        # "running"/"alive" are unambiguous enough to use without a
+        # service/process/server/container qualifier.
+        ("workspace", "system resource question", r"\bhow\s+much\s+(?:disk|storage|memory|ram|cpu)\b.{0,60}\b(?:do\s+i\s+have|left|free|available|used?)\b"),
+        ("workspace", "service running-state question", r"\bis\s+(?:the\s+)?[\w-]{1,40}\s+(?:service|process|server|container)\s+(?:running|up|down|alive|active)\b"),
+        ("workspace", "named process running-state question", r"\bis\s+[\w-]{1,40}\s+(?:running|alive)\b"),
+
         # Shell / remote-host intent.
         ("shell", "ssh request", r"\bssh\s+(?:in)?to\b"),
         ("shell", "ssh target request", r"\bssh\s+\w+"),
@@ -134,6 +159,14 @@ _ROUTING_PATTERNS: tuple[tuple[str, str, Pattern[str]], ...] = tuple(
         ("shell", "imperative shell command request", rf"{_PLEASE}(deploy|build|install|restart|reboot|kill|tail|grep|cat|ls|cd|cp|mv|rm)\b\s+\S+"),
         ("shell", "assistant shell command request", rf"{_ACTION_QUESTION}(deploy|build|install|restart|reboot|kill|tail|grep|cat|ls|cd|cp|mv|rm)\b\s+\S+"),
         ("shell", "system/file check request", r"\b(check|see)\s+(if|whether|what)\s+.{1,40}\b(running|process|service|port|file|exists?)\b"),
+
+        # Home Assistant (real device control/lookup): thermostat, lights,
+        # switches, locks, garage door. See _HA_THING above for why "door"
+        # alone isn't used.
+        ("home-assistant", "indoor temperature lookup question", r"\b(?:what|whats|what'?s|is)\b.{0,80}\b(?:indoor|inside|house|home)\b.{0,40}\btemp(?:erature)?\b"),
+        ("home-assistant", "device state question", rf"\bis\s+the\s+{_HA_THING}\b\s+(?:on|off|open|closed|locked|unlocked|running)\b"),
+        ("home-assistant", "device control imperative", rf"{_PLEASE}(?:turn|switch|set|adjust|lower|raise|dim)\b.{{0,60}}\b{_HA_THING}\b"),
+        ("home-assistant", "assistant device control request", rf"{_ACTION_QUESTION}(?:turn|switch|set|adjust|lower|raise|dim)\b.{{0,60}}\b{_HA_THING}\b"),
     )
 )
 

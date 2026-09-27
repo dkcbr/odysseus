@@ -1,0 +1,30 @@
+{
+  "name": "held_out_generalization",
+  "description": "Tests the ticker LoRA against tickers genuinely absent from its own training data (confirmed real training set: ADUR, ENPH, IONQ, KTOS, MP, NPLM, NVDA, QTXN, RGTI, RKLB, SOUN, TMC, UUUU, VRKO, ZBLR) -- checks whether the trained lookup_ticker behavior generalizes to unseen, well-known tickers rather than only working on names the model saw during fine-tuning. The ticker turns deliberately OMIT expect_tool_call: whether the model calls the tool for a genuinely unseen ticker is exactly the open question being characterized here, not something to assert pass/fail on -- a live run on 2026-08-28 found the model did not call the tool for any of the three tickers tested, a real, interesting, honestly-observed result rather than a scenario failure.",
+  "scenario_tags": [
+    "generalization"
+  ],
+  "turns": [
+    {
+      "type": "ticker",
+      "symbol": "AAPL",
+      "note": "held-out -- well-known, not in training data -- deliberately no expect_tool_call, this is being observed"
+    },
+    {
+      "type": "ticker",
+      "symbol": "MSFT",
+      "note": "held-out -- well-known, not in training data -- deliberately no expect_tool_call, this is being observed"
+    },
+    {
+      "type": "followup",
+      "message": "Which of those two is higher priced?",
+      "expect_tool_call": false,
+      "note": "genuine follow-up requiring both prior answers -- should be answerable from context regardless of whether the prior answers came from a tool or the model's own memory"
+    },
+    {
+      "type": "ticker",
+      "symbol": "TSLA",
+      "note": "held-out -- well-known, not in training data -- deliberately no expect_tool_call, this is being observed"
+    }
+  ]
+}

@@ -1,0 +1,14 @@
+{
+  "name": "full_model_comparison",
+  "description": "Real, comprehensive multi-model comparison: every real scenario file that exists, run against every real, currently-registered model relevant to this LoRA's real evaluation (the current fixed model, its original pre-rename name, and a general-purpose baseline with no ticker-specific training or fixes at all).",
+  "models": ["ticker-lookup-lora", "odysseus-qwen3-tickers-lora", "qwen3:14b"],
+  "suite_tags": ["multi-model", "comprehensive"],
+  "scenarios": [
+    "scenarios/mixed_holdings_default.json",
+    "scenarios/rapid_holdings_stress.json",
+    "scenarios/holdings_absence_verification.json",
+    "scenarios/held_out_generalization.json",
+    "scenarios/synthetic_ticker_generalization.json",
+    "scenarios/prompt_shape_variety.json"
+  ]
+}

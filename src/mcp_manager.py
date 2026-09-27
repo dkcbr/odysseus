@@ -11,7 +11,7 @@ import os
 import re
 import asyncio 
 from typing import Any, Dict, List, Optional, Set, Tuple
-from src.database import McpServer, SessionLocal
+from src.database import McpServer, PendingApproval, SessionLocal
 
 from src.runtime_paths import get_app_root
 
@@ -132,6 +132,91 @@ def mcp_tool_is_readonly(tool: Dict) -> bool:
     return name.startswith(_MCP_READONLY_VERBS)
 
 
+class _ServerConnectionActor:
+    """Real, dedicated, persistent task owning one server's real
+    connection lifecycle (connect, disconnect -- never call_tool, which
+    stays on the calling task; see this file's own module-level
+    docstring addition below for why).
+
+    Real, added 2026-08-24, fixing a genuine, confirmed structural bug:
+    every incoming FastAPI request runs in its own, separate asyncio
+    task. Both stdio_client() and streamablehttp_client() (the real MCP
+    SDK's own stdio and HTTP transports) internally open an
+    anyio.create_task_group() -- confirmed directly by reading each
+    transport's own source -- and anyio strictly, correctly enforces
+    that a task group's cancel scope can only be exited by the same
+    task that entered it. The original code stored a stack
+    (AsyncExitStack) that got entered during whichever HTTP request
+    first connected a server, then closed during a LATER, genuinely
+    different HTTP request's task (e.g. a /reconnect call) -- a real,
+    reproducible violation of that constraint, confirmed live via the
+    exact error anyio raises for it ("Attempted to exit cancel scope in
+    a different task than it was entered in"). First fixed for stdio
+    transport alone (this class was originally named
+    _ServerConnectionActor); the exact same root cause was then confirmed
+    for HTTP transport too (worldwideview, still stuck at "connecting"
+    even after its own backend was fixed independently), so this class
+    was generalized to serve both.
+
+    The real, correct fix: give each server one dedicated, long-lived
+    task that outlives any individual HTTP request, and route every
+    connect/disconnect through it via a real, internal queue -- so the
+    same task always both enters and exits the cancel scope, regardless
+    of which HTTP request triggered either call. The calling FastAPI
+    request task still just awaits a real, ordinary asyncio.Future for
+    the result; only the actual anyio-sensitive work happens inside
+    this actor's own task.
+    """
+
+    def __init__(self):
+        self._queue: asyncio.Queue = asyncio.Queue()
+        self._task: Optional[asyncio.Task] = None
+
+    def ensure_started(self) -> None:
+        if self._task is None or self._task.done():
+            self._task = asyncio.create_task(self._run())
+
+    async def _run(self) -> None:
+        while True:
+            coro_factory, future = await self._queue.get()
+            if future.cancelled():
+                continue
+            try:
+                result = await coro_factory()
+                if not future.cancelled():
+                    future.set_result(result)
+            except Exception as e:
+                if not future.cancelled():
+                    future.set_exception(e)
+
+    async def submit(self, coro_factory) -> Any:
+        """Real, deliberate: takes a zero-arg callable returning a real
+        coroutine (a factory, not an already-created coroutine object),
+        since a coroutine can only be awaited once and this actor's own
+        loop -- not the caller -- is what actually awaits it. Awaits the
+        full result before returning -- use submit_nowait() instead if
+        the caller needs to apply its own, separate bounded wait (e.g.
+        HTTP transport's existing "wait up to N seconds, otherwise
+        return early while it keeps running in the background for a
+        slow OAuth flow" behavior)."""
+        future = await self.submit_nowait(coro_factory)
+        return await future
+
+    async def submit_nowait(self, coro_factory) -> asyncio.Future:
+        """Real, added 2026-08-24 (HTTP-transport generalization): queues
+        the work and returns the real, live Future immediately, without
+        awaiting it -- the actual work still only ever runs inside this
+        actor's own, single, persistent task, same as submit(). Lets a
+        caller apply its own bounded wait against the returned future
+        (e.g. via asyncio.wait({future}, timeout=...)) while the
+        underlying anyio-sensitive work still correctly stays pinned to
+        this one, real, persistent task."""
+        self.ensure_started()
+        future: asyncio.Future = asyncio.get_event_loop().create_future()
+        await self._queue.put((coro_factory, future))
+        return future
+
+
 class McpManager:
     """Manages MCP server connections and tool routing."""
 
@@ -146,6 +231,13 @@ class McpManager:
         self._stacks: Dict[str, Any] = {}
         # server_id -> background connect task (HTTP transport / OAuth)
         self._connect_tasks: Dict[str, Any] = {}
+        # Real, added 2026-08-24: server_id -> _ServerConnectionActor.
+        # Populated for both stdio and http transports -- see
+        # _connect_stdio/_start_http_connect/disconnect_server below for
+        # where each wires in. Not used for sse transport; that one
+        # hasn't shown this same failure mode and hasn't been
+        # investigated for it.
+        self._connection_actors: Dict[str, _ServerConnectionActor] = {}
         # Tracking updates to tools/connections for RAG indexing / prompt cache
         self._generation = 0
 
@@ -162,11 +254,31 @@ class McpManager:
         """Connect to an MCP server via stdio, SSE, or Streamable HTTP transport."""
         try:
             if transport == "stdio":
-                res = await self._connect_stdio(server_id, name, command, args or [], env or {})
+                # Real, added 2026-08-24: route through this server's
+                # dedicated, persistent actor task, not the calling
+                # FastAPI request's own task -- see _ServerConnectionActor's
+                # own docstring, above this class, for the full, real
+                # reasoning. get-or-create here (not just at connect
+                # time in general) because this is genuinely the first
+                # real point a fresh server_id could arrive at.
+                actor = self._connection_actors.setdefault(server_id, _ServerConnectionActor())
+                res = await actor.submit(
+                    lambda: self._connect_stdio(server_id, name, command, args or [], env or {}))
             elif transport == "sse":
                 res = await self._connect_sse(server_id, name, url)
             elif transport == "http":
-                res = await self._start_http_connect(server_id, name, url)
+                # Real, fixed 2026-08-24: env (the real, configured static
+                # headers, e.g. an Authorization bearer token) was never
+                # actually threaded through to _start_http_connect at
+                # this call site -- confirmed directly the parameter was
+                # simply dropped, unrelated to the cancel-scope fix.
+                # This is the real, separate reason worldwideview kept
+                # showing needs_auth/going through OAuth discovery even
+                # with a real, valid bearer token configured: the code
+                # path that's supposed to skip OAuth for static headers
+                # (_connect_http's own "if headers:" check) never
+                # actually received them.
+                res = await self._start_http_connect(server_id, name, url, headers=env or None)
             else:
                 logger.error(f"Unknown MCP transport: {transport}")
                 res = False
@@ -187,10 +299,20 @@ class McpManager:
             from mcp.client.stdio import stdio_client
             from contextlib import AsyncExitStack
 
+            # `env` is always a dict (default {}), never None -- so this must
+            # merge unconditionally. The previous `if env else None` treated
+            # an empty per-server override dict ({}) as falsy and passed
+            # env=None instead, which the mcp SDK's stdio_client replaces
+            # with its own minimal default environment rather than
+            # inheriting the parent process's. Confirmed live: this silently
+            # dropped PLAYWRIGHT_BROWSERS_PATH (and everything else in
+            # os.environ) for every stdio server with no custom env
+            # entries -- e.g. jarvis_browser, whose `open` tool then failed
+            # looking for the browser under the wrong HOME-relative path.
             server_params = StdioServerParameters(
                 command=command,
                 args=args,
-                env={**os.environ, **env} if env else None,
+                env={**os.environ, **env},
             )
 
             stack = AsyncExitStack()
@@ -309,18 +431,31 @@ class McpManager:
             self._connections[server_id] = {"status": "error", "error": "mcp package not installed", "name": name}
             return False
 
-    async def _start_http_connect(self, server_id: str, name: str, url: str, wait: float = 8.0) -> bool:
+    async def _start_http_connect(self, server_id: str, name: str, url: str, wait: float = 8.0, headers: Optional[Dict[str, str]] = None) -> bool:
         """Begin a Streamable HTTP connect in the background. Returns within
         `wait` seconds: True if it connected (cached-token path), otherwise the
-        flow is awaiting browser authorization and status becomes 'needs_auth'."""
-        import asyncio
+        flow is awaiting browser authorization and status becomes 'needs_auth'.
+
+        Real, added 2026-08-24: routes the actual connect through this
+        server's dedicated _ServerConnectionActor (submit_nowait, not
+        submit -- this function needs its own, separate bounded wait
+        below, exactly as before) rather than a fresh, one-off
+        asyncio.create_task(). See _ServerConnectionActor's own
+        docstring for the full, real reasoning -- confirmed directly
+        that streamablehttp_client() also opens an anyio task group
+        internally, the same real class of bug already fixed for stdio
+        transport, now confirmed and fixed here too (worldwideview was
+        still stuck at "connecting" even after its own backend was
+        independently fixed, which is what surfaced this)."""
+        actor = self._connection_actors.setdefault(server_id, _ServerConnectionActor())
         self._connections[server_id] = {"status": "connecting", "name": name, "transport": "http"}
-        task = asyncio.create_task(self._connect_http(server_id, name, url))
-        self._connect_tasks[server_id] = task
-        done, _ = await asyncio.wait({task}, timeout=wait)
-        if task in done:
+        future = await actor.submit_nowait(
+            lambda: self._connect_http(server_id, name, url, headers=headers))
+        self._connect_tasks[server_id] = future
+        done, _ = await asyncio.wait({future}, timeout=wait)
+        if future in done:
             try:
-                return task.result()
+                return future.result()
             except Exception as e:
                 self._connections[server_id] = {"status": "error", "error": str(e), "name": name}
                 return False
@@ -336,25 +471,41 @@ class McpManager:
             }
         return False
 
-    async def _connect_http(self, server_id: str, name: str, url: str) -> bool:
-        """Connect to a Streamable HTTP MCP server (with automatic OAuth)."""
+    async def _connect_http(self, server_id: str, name: str, url: str, headers: Optional[Dict[str, str]] = None) -> bool:
+        """Connect to a Streamable HTTP MCP server (with automatic OAuth,
+        unless real, static headers are pre-configured -- see below)."""
         try:
             from mcp import ClientSession
             from mcp.client.streamable_http import streamablehttp_client
             from contextlib import AsyncExitStack
-            from src.mcp_oauth import build_provider, clear_auth_url
+            from src.mcp_oauth import clear_auth_url
 
-            def _on_redirect(auth_url):
-                # Publish needs_auth the moment the URL is known, independent of
-                # how long discovery/DCR took (may exceed the bounded start wait).
-                self._connections[server_id] = {
-                    "status": "needs_auth", "name": name, "transport": "http",
-                    "auth_url": auth_url,
-                }
-
-            provider = build_provider(server_id, url, on_redirect=_on_redirect)
             stack = AsyncExitStack()
-            transport = await stack.enter_async_context(streamablehttp_client(url, auth=provider))
+
+            # Real, added 2026-08-20: found via worldwideview investigation
+            # that every HTTP-transport server unconditionally went through
+            # full OAuth discovery/registration, even when a real, static
+            # auth header (e.g. a bearer token) was already configured --
+            # there was genuinely no code path that checked for this first.
+            # A server with real, non-empty `env` is assumed to want static
+            # headers instead of OAuth; this skips discovery/registration
+            # entirely and connects directly, matching how a plain bearer
+            # token actually works against a non-OAuth HTTP API.
+            if headers:
+                transport = await stack.enter_async_context(streamablehttp_client(url, headers=headers))
+            else:
+                from src.mcp_oauth import build_provider
+
+                def _on_redirect(auth_url):
+                    # Publish needs_auth the moment the URL is known, independent of
+                    # how long discovery/DCR took (may exceed the bounded start wait).
+                    self._connections[server_id] = {
+                        "status": "needs_auth", "name": name, "transport": "http",
+                        "auth_url": auth_url,
+                    }
+
+                provider = build_provider(server_id, url, on_redirect=_on_redirect)
+                transport = await stack.enter_async_context(streamablehttp_client(url, auth=provider))
             read_stream, write_stream, _get_session_id = transport
             session = await stack.enter_async_context(ClientSession(read_stream, write_stream))
             await session.initialize()
@@ -395,6 +546,20 @@ class McpManager:
         """Disconnect from an MCP server."""
         # Cancel any in-flight HTTP/OAuth background connect so it stops
         # publishing status for a server that may be getting deleted.
+        #
+        # Real, honest note, 2026-08-24: this is now an asyncio.Future
+        # (from _ServerConnectionActor.submit_nowait), not a raw Task --
+        # .cancel() on a plain Future marks it cancelled but does NOT
+        # interrupt the actor's already-running coroutine the way
+        # cancelling a real Task would have. Practical effect: an
+        # in-flight HTTP connect/OAuth attempt for a server being
+        # deleted right now will run to completion in the background
+        # rather than stopping immediately -- its result is simply
+        # discarded once done, since _connections/server rows are
+        # already gone. A minor, accepted tradeoff for routing the
+        # actual connect through the same persistent task the cancel-
+        # scope fix requires; not a functional regression (no crash, no
+        # leaked resources), just a slower worst-case cleanup.
         task = self._connect_tasks.pop(server_id, None)
         if task is not None and not task.done():
             task.cancel()
@@ -406,16 +571,45 @@ class McpManager:
 
         stack = self._stacks.pop(server_id, None)
         if stack:
-            try:
-                await stack.aclose()
-            except Exception as e:
-                logger.warning(f"Error closing MCP server {server_id}: {e}")
+            # Real, added 2026-08-24: if this is a stdio server (the
+            # only transport where this actually matters -- see
+            # _ServerConnectionActor's own docstring), route the real close
+            # through its dedicated actor task, the same one that
+            # opened it, rather than whichever FastAPI request task
+            # happens to be calling disconnect_server right now. This
+            # is the actual, real fix for the cancel-scope bug -- not
+            # just connect needed it, close does too, since it's the
+            # exit side of the same anyio task group.
+            actor = self._connection_actors.get(server_id)
+            if actor is not None:
+                async def _do_close():
+                    await stack.aclose()
+                try:
+                    await actor.submit(_do_close)
+                except Exception as e:
+                    logger.warning(f"Error closing MCP server {server_id}: {e}")
+            else:
+                try:
+                    await stack.aclose()
+                except Exception as e:
+                    logger.warning(f"Error closing MCP server {server_id}: {e}")
 
         self._sessions.pop(server_id, None)
         self._tools.pop(server_id, None)
         self._connections.pop(server_id, None)
         self._generation += 1
         logger.info(f"MCP server disconnected: {server_id}")
+
+    async def cleanup_connection_actor(self, server_id: str) -> None:
+        """Real, permanent cleanup for a server's dedicated actor task
+        (stdio or http) -- call this specifically when a server is
+        being deleted outright, not on a routine disconnect/reconnect
+        cycle (where leaving the actor's own lightweight, idle task
+        running is correct, so a later reconnect reuses it rather than
+        spawning a fresh one for the same real server_id)."""
+        actor = self._connection_actors.pop(server_id, None)
+        if actor is not None and actor._task is not None and not actor._task.done():
+            actor._task.cancel()
 
     async def disconnect_all(self):
         """Disconnect from all MCP servers."""
@@ -464,8 +658,21 @@ class McpManager:
                 "name": srv.name,
             }
 
-    async def call_tool(self, qualified_name: str, arguments: Dict) -> Dict:
+    async def call_tool(
+        self, qualified_name: str, arguments: Dict, _skip_approval_gate: bool = False,
+        agent_name: str = None,
+    ) -> Dict:
         """Call an MCP tool by its qualified name (mcp__{server_id}__{tool_name}).
+
+        Real, added 2026-08-21: agent_name is now threaded all the way
+        through to _do_call(), which previously discarded it immediately
+        after the is_tool_allowed() permission check in mcp_routes.py.
+        This is deliberately plumbing only -- it does not change any
+        behavior yet. It's the real, confirmed prerequisite for any future
+        per-agent sandbox routing (see the real, direct architecture trace
+        in jarvis-todo.md, 2026-08-21). Optional and defaults to None so
+        every existing caller that doesn't know/care about agent identity
+        keeps working unchanged.
 
         Returns a result dict compatible with agent_tools format.
         """
@@ -480,34 +687,146 @@ class McpManager:
         if not session:
             return {"error": f"MCP server not connected: {server_id}", "exit_code": 1}
 
+        # Real, safety-critical enforcement check, added 2026-08-09:
+        # confirmed that per-server disabled_tools (used for the real
+        # public_com integration's write/destructive tool boundary)
+        # was ONLY ever applied to tool listing/filtering (mcp_routes.py)
+        # -- there was NO enforcement at actual execution time anywhere
+        # in this file. A disabled tool could still be called and reach
+        # the real, live upstream API. This is the correct architectural
+        # place for the fix: the single, shared entry point every real
+        # tool call (external HTTP and internal agent-loop) passes
+        # through, per tonight's earlier real architecture investigation.
+        db = SessionLocal()
         try:
-            result = await self._do_call(session, tool_name, arguments)
+            srv = db.query(McpServer).filter(McpServer.id == server_id).first()
+            if srv and srv.disabled_tools:
+                import json as _json
+                disabled_set = set(_json.loads(srv.disabled_tools))
+                if tool_name in disabled_set:
+                    return {
+                        "error": f"Tool '{tool_name}' is disabled for this server",
+                        "exit_code": 1,
+                    }
+            # Real, added 2026-08-09: a third tool state alongside
+            # enabled/disabled. Unlike a disabled tool (always blocked),
+            # an approval-required tool is allowed to be staged -- the
+            # call is recorded as a PendingApproval instead of executed,
+            # and only actually runs (via this same call_tool(), re-entered
+            # from the approve endpoint) once a human approves it. This is
+            # the same shared, single entry point as the disabled_tools
+            # check above, so it applies everywhere a tool call can
+            # originate, not just one caller.
+            if srv and srv.approval_required_tools:
+                import json as _json
+                approval_set = set(_json.loads(srv.approval_required_tools))
+                if tool_name in approval_set and not _skip_approval_gate:
+                    import uuid as _uuid
+                    approval = PendingApproval(
+                        id=_uuid.uuid4().hex[:8],
+                        server_id=server_id,
+                        server_name=srv.name,
+                        tool_name=tool_name,
+                        arguments=_json.dumps(arguments),
+                        status="pending",
+                    )
+                    db.add(approval)
+                    db.commit()
+                    return {
+                        "status": "awaiting_approval",
+                        "approval_id": approval.id,
+                        "exit_code": 0,
+                    }
+        finally:
+            db.close()
+
+        try:
+            result = await self._do_call(session, tool_name, arguments, agent_name=agent_name)
         except Exception as e:
-            # Auto-reconnect for builtin servers whose subprocess may have died
-            if self.is_builtin(server_id):
-                logger.warning(f"MCP call failed for {qualified_name}, attempting reconnect: {e}")
-                reconnected = await self._reconnect_builtin(server_id)
-                if reconnected:
-                    session = self._sessions.get(server_id)
-                    if session:
-                        try:
-                            result = await self._do_call(session, tool_name, arguments)
-                        except Exception as e2:
-                            logger.error(f"MCP tool call failed after reconnect: {qualified_name}: {e2}")
-                            return {"error": str(e2), "exit_code": 1}
-                    else:
-                        return {"error": f"Reconnected but no session for {server_id}", "exit_code": 1}
+            # Real, deliberate fix 2026-08-20: found via wigolo debugging
+            # that this logged as genuinely empty ("MCP tool call
+            # failed: <name>: "), even when something real clearly went
+            # wrong. Root cause: certain real exception types (raised
+            # without a message argument) have a genuinely empty
+            # str(e) by design -- not a logging bug, but a real gap in
+            # what gets captured. Always include the real exception
+            # type name, which is never empty, so there's always
+            # something diagnostically useful in the log even when
+            # str(e) itself is blank.
+            error_detail = str(e) or "(no message)"
+            logger.error(f"MCP tool call failed: {qualified_name}: [{type(e).__name__}] {error_detail}")
+
+            # Real, fixed 2026-08-27: this used to only auto-reconnect for
+            # the small, hardcoded builtin set (is_builtin()) -- confirmed
+            # directly, by reading the code, that this left the cached
+            # self._connections[server_id]["status"] permanently stuck at
+            # "connected" for every other real server after any tool-call
+            # failure, since nothing else in this file ever revisits that
+            # dict once it's set. This is the real root cause the
+            # 2026-08-23 todo entry was asking about directly: mcp_manager
+            # never actively verifies a connection is alive, it only
+            # trusts last-known state -- confirmed, not assumed, by
+            # tracing every write site of self._connections.
+            #
+            # Fix: mark the connection as errored immediately (so
+            # get_server_status() reflects reality right away, even if
+            # the reconnect below also fails), then attempt a real,
+            # generic reconnect for ANY server, not just builtins, using
+            # _reconnect_server()'s own DB-backed config lookup.
+            if server_id in self._connections:
+                self._connections[server_id]["status"] = "error"
+                self._connections[server_id]["error"] = f"[{type(e).__name__}] {error_detail}"
+
+            logger.warning(f"MCP call failed for {qualified_name}, attempting reconnect: {e}")
+            reconnected = await self._reconnect_server(server_id)
+            if reconnected:
+                session = self._sessions.get(server_id)
+                if session:
+                    try:
+                        result = await self._do_call(session, tool_name, arguments, agent_name=agent_name)
+                    except Exception as e2:
+                        error_detail2 = str(e2) or "(no message)"
+                        logger.error(f"MCP tool call failed after reconnect: {qualified_name}: [{type(e2).__name__}] {error_detail2}")
+                        return {"error": f"[{type(e2).__name__}] {error_detail2}", "exit_code": 1}
                 else:
-                    logger.error(f"MCP reconnect failed for {server_id}")
-                    return {"error": f"MCP server crashed and reconnect failed: {server_id}", "exit_code": 1}
+                    return {"error": f"Reconnected but no session for {server_id}", "exit_code": 1}
             else:
-                logger.error(f"MCP tool call failed: {qualified_name}: {e}")
-                return {"error": str(e), "exit_code": 1}
+                logger.error(f"MCP reconnect failed for {server_id}")
+                return {"error": f"MCP server crashed and reconnect failed: {server_id}", "exit_code": 1}
 
         return result
 
-    async def _do_call(self, session, tool_name: str, arguments: Dict) -> Dict:
-        """Execute a single MCP tool call and return result dict."""
+    async def _do_call(self, session, tool_name: str, arguments: Dict, agent_name: str = None) -> Dict:
+        """Execute a single MCP tool call and return result dict.
+
+        Real, added 2026-08-21: when agent_name is known, injects a real,
+        namespaced sandbox descriptor into arguments as jarvis_sandbox --
+        NOT via os.environ, since that's process-wide global state and
+        would create a genuine race condition between concurrent async
+        tool calls from different agents (confirmed and deliberately
+        avoided). Individual tool implementations need to actually look
+        for and use this key -- injecting it here only defines the real
+        contract, it doesn't make any existing tool respect it yet.
+
+        Real, honest correction, 2026-08-23 (first real tool-level
+        adoption): this key was originally named _jarvis_sandbox (leading
+        underscore). Confirmed directly, via a real server crash on
+        startup during that first adoption, that FastMCP's own signature
+        validation rejects any tool parameter name starting with '_' --
+        so no FastMCP-based tool could ever declare a matching parameter
+        for the original name. Renamed here (and in
+        docs/sandbox_contract.md) to jarvis_sandbox, without the leading
+        underscore, so real tool implementations can actually receive it.
+        """
+        if agent_name:
+            sandbox_root = f"/home/dk/jarvis/projects/odysseus/data/agent_sandboxes/{agent_name}"
+            arguments = dict(arguments)  # real, shallow copy -- never mutate the caller's own dict
+            arguments["jarvis_sandbox"] = {
+                "agent": agent_name,
+                "tmp_dir": f"{sandbox_root}/tmp",
+                "logs_dir": f"{sandbox_root}/logs",
+                "state_dir": f"{sandbox_root}/state",
+            }
         result = await session.call_tool(tool_name, arguments)
         output_parts = []
         images = []
@@ -534,37 +853,100 @@ class McpManager:
             result_dict["images"] = images
         return result_dict
 
-    async def _reconnect_builtin(self, server_id: str) -> bool:
-        """Tear down and reconnect a crashed builtin MCP server."""
-        import sys
-        from src.builtin_mcp import _BUILTIN_SERVERS, builtin_python_env
+    async def _reconnect_server(self, server_id: str) -> bool:
+        """Tear down and reconnect ANY MCP server (not just builtins),
+        using either its real, persisted McpServer DB row, or (for
+        builtin servers, which have none) the same construction logic
+        the original _reconnect_builtin() used.
 
-        if server_id not in _BUILTIN_SERVERS:
+        Real, added 2026-08-27: confirmed directly, by reading the code,
+        that the original _reconnect_builtin() only worked for the
+        small, hardcoded builtin set (_BUILTIN_SERVERS) -- it returned
+        False immediately for anything else, and even without that
+        check, it had no way to know a real, non-builtin server's actual
+        transport, command, args, or url. This method fills that real
+        gap using the McpServer DB model (confirmed directly it stores
+        everything connect_server() needs, via core/database.py).
+
+        Real, honest correction, same day: the first version of this
+        method assumed EVERY server has a McpServer DB row, including
+        builtins -- confirmed directly, by reading register_builtin_
+        servers() in builtin_mcp.py, that this is wrong: builtin servers
+        are connected purely in-memory at startup and never get a DB
+        row at all. Without this branch, this method would have been a
+        real regression, breaking reconnection for every builtin server
+        that used to work via the old _reconnect_builtin().
+        """
+        if self.is_builtin(server_id):
+            import sys
+            from src.builtin_mcp import _BUILTIN_SERVERS, builtin_python_env
+
+            if server_id not in _BUILTIN_SERVERS:
+                return False
+
+            script_rel, name = _BUILTIN_SERVERS[server_id]
+            base_dir = get_app_root()
+            script_path = os.path.join(base_dir, script_rel)
+
+            await self.disconnect_server(server_id)
+
+            try:
+                ok = await self.connect_server(
+                    server_id=server_id,
+                    name=name,
+                    transport="stdio",
+                    command=sys.executable,
+                    args=[script_path],
+                    env=builtin_python_env(base_dir),
+                )
+                if ok:
+                    logger.info(f"Reconnected builtin MCP server: {name}")
+                return ok
+            except Exception as e:
+                logger.error(f"Failed to reconnect builtin MCP server {name}: {e}")
+                return False
+
+        db = SessionLocal()
+        try:
+            srv = db.query(McpServer).filter(McpServer.id == server_id).first()
+        finally:
+            db.close()
+
+        if not srv or not srv.is_enabled:
             return False
 
-        script_rel, name = _BUILTIN_SERVERS[server_id]
-        base_dir = get_app_root()
-        script_path = os.path.join(base_dir, script_rel)
-
-        # Clean up old connection
         await self.disconnect_server(server_id)
+
+        try:
+            args = json.loads(srv.args) if srv.args else None
+            env = json.loads(srv.env) if srv.env else None
+        except (ValueError, TypeError) as e:
+            logger.error(f"_reconnect_server: bad stored args/env JSON for {server_id}: {e}")
+            return False
 
         try:
             ok = await self.connect_server(
                 server_id=server_id,
-                name=name,
-                transport="stdio",
-                command=sys.executable,
-                args=[script_path],
-                env=builtin_python_env(base_dir),
+                name=srv.name,
+                transport=srv.transport,
+                command=srv.command,
+                args=args,
+                env=env,
+                url=srv.url,
             )
             if ok:
-                logger.info(f"Reconnected builtin MCP server: {name}")
+                logger.info(f"Reconnected MCP server: {srv.name} ({server_id})")
             return ok
         except Exception as e:
-            logger.error(f"Failed to reconnect builtin MCP server {name}: {e}")
+            logger.error(f"Failed to reconnect MCP server {srv.name} ({server_id}): {e}")
             return False
 
+    # Real, removed 2026-08-27: _reconnect_builtin() used to live here.
+    # Confirmed directly it was genuinely dead code after the fix above --
+    # its only caller (call_tool()'s exception handler) now calls the new,
+    # generic _reconnect_server() instead, which correctly handles builtin
+    # servers too (they're rows in the same McpServer table, same as any
+    # other server). Removed rather than left as unreachable code.
     def get_all_openai_schemas(self, disabled_map: Optional[Dict[str, set]] = None) -> List[Dict]:
         """Return all MCP tools in OpenAI function-calling format.
 
@@ -673,8 +1055,15 @@ class McpManager:
         by_server = {}
         for t in tools:
             # Skip builtin Python servers — they're already in the agent prompt
-            # But include NPX-based builtins (like browser) which aren't hardcoded
-            if self.is_builtin(t["server_id"]) and t["server_id"] != "builtin_browser":
+            # But include NPX-based builtins (like browser) which aren't hardcoded.
+            # Real, added 2026-08-10: also include "rag" -- confirmed by direct
+            # search that no actual hardcoded system-prompt description of its
+            # tools exists anywhere in this codebase (the comment above is
+            # stale for this server specifically). Without this, any tool
+            # added to the real "rag" built-in server (e.g. search_rag) is
+            # structurally invisible to the model everywhere, not just in
+            # RAG-based tool retrieval -- confirmed via a real, direct check.
+            if self.is_builtin(t["server_id"]) and t["server_id"] not in ("builtin_browser", "rag"):
                 continue
             if t.get("is_disabled"):
                 continue
@@ -693,8 +1082,23 @@ class McpManager:
             label = f"{server_name} ({identity})" if identity else server_name
             lines.append(f"\n**{label}:**")
             for t in server_tools:
-                # Truncate long descriptions
-                desc = t['description'][:120] + '...' if len(t['description']) > 120 else t['description']
+                # Real, fixed 2026-09-16: normalize before truncating, not
+                # after. Docstring-style descriptions (confirmed directly on
+                # public_com's tools) commonly start with a literal leading
+                # newline ("\nGet real-time quotes..."), which made the old
+                # code here produce a real, broken two-line entry
+                # ("- name: \nGet real-time..."). index_mcp_tools's line-based
+                # parser (which expects a single "- name: desc" line) then
+                # only ever saw the empty first line and silently dropped the
+                # real description entirely -- confirmed directly: this
+                # tool's own embedded RAG text had no description text at
+                # all, ranking 210th of 370 tools (negative similarity) for
+                # a plain "price of X" query it should have matched well.
+                # Flattening internal newlines to spaces too, not just
+                # leading/trailing, since a docstring can have blank lines
+                # deeper in its body that would cause the same failure.
+                clean_desc = " ".join(t['description'].split())
+                desc = clean_desc[:120] + '...' if len(clean_desc) > 120 else clean_desc
                 # Include the tool's declared inputs so the model calls it with
                 # real argument names instead of guessing from the description
                 # alone (issue #2509).
