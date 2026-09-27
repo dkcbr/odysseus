@@ -197,6 +197,38 @@ def test_how_much_is_ticker_does_not_double_up_with_existing_checks():
     # can't, being end-anchored) handle them itself.
     assert detect_price_query("how much is TSLA worth") == "TSLA"
     assert detect_price_query("how much is TSLA stock") == "TSLA"
+    # Real, added 2026-09-27: a proposed test block (from an uploaded
+    # file, evaluated on its merits rather than trusted at face value --
+    # see jarvis-todo.md) asserted these two should return None. Ran them
+    # against the real code before accepting either claim: both actually
+    # return the ticker, correctly, via the pre-existing keyword/adjacency
+    # checks above (not this fix) -- "worth today" still contains "worth"
+    # regardless of trailing words, and "AAPL stock" still matches the
+    # ticker-adjacent-to-stock-word check regardless of a leading "check".
+    # The two dropped assertions from that file were simply wrong, not
+    # edge cases this code needs to additionally guard against.
+    assert detect_price_query("how much is TSLA worth today") == "TSLA"
+    assert detect_price_query("check AAPL stock") == "AAPL"
+
+
+def test_how_much_is_ticker_handles_whitespace_and_trailing_punctuation():
+    assert detect_price_query("how much is NVDA.") == "NVDA"
+    assert detect_price_query("how  much  is TSLA") == "TSLA"
+
+
+def test_how_much_is_ticker_rejects_mixed_case_and_trailing_words():
+    # Mixed case ("Tsla") must not match -- same case-sensitivity
+    # guard as plain lowercase, just a subtler form of it.
+    assert detect_price_query("how much is Tsla") is None
+    assert detect_price_query("how much is TSLA doing this week") is None
+
+
+def test_broad_price_question_prefixes_do_not_misfire_generally():
+    # Sanity check, not specific to the "how much is" prefix: ordinary
+    # questions sharing surface-level similarity with a price question
+    # must not misfire anywhere in detect_price_query.
+    assert detect_price_query("what is your name") is None
+    assert detect_price_query("where is the bathroom") is None
 
 
 def test_answer_price_query_surfaces_the_tools_own_real_error():
