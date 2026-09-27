@@ -113,6 +113,51 @@ def test_adjacency_fallback_is_case_sensitive_on_the_ticker():
     assert detect_price_query("my shares of responsibility here are equal") is None
 
 
+# Real, added 2026-09-27: a live trial against the real, running system
+# (using the currently-selected default model, not the separately-hidden
+# ticker-lookup-lora) confirmed a bare "NVDA?" -- nothing else in the
+# message -- still fell through to model synthesis and returned a wrong,
+# inconsistent price versus the same ticker answered correctly moments
+# earlier through the deterministic path. This is the exact bare-ticker-
+# shorthand shape that originally caused ticker-lookup-lora's fabrication;
+# hiding that one model never actually closed the underlying gap.
+def test_detects_bare_ticker_shorthand_with_nothing_else_in_message():
+    assert detect_price_query("NVDA?") == "NVDA"
+    assert detect_price_query("NVDA") == "NVDA"
+    assert detect_price_query("AAPL!") == "AAPL"
+    assert detect_price_query("KTOS.") == "KTOS"
+
+
+def test_bare_ticker_shorthand_is_case_sensitive_to_avoid_false_positives():
+    # Real, deliberate guard: an ordinary short reply typed normally
+    # ("sure", "nice", "thanks", "hello") must NOT misfire into a
+    # spurious price lookup just because it happens to be 2-5 letters
+    # and isn't a stoplisted word. Bare-ticker shorthand is only
+    # recognized when typed in ALL CAPS, matching the existing
+    # convention _BARE_TICKER_RE already uses elsewhere in this file.
+    assert detect_price_query("Sure") is None
+    assert detect_price_query("nice") is None
+    assert detect_price_query("Hello") is None
+    assert detect_price_query("thanks") is None
+
+
+def test_bare_ticker_shorthand_does_not_fire_on_a_ticker_inside_a_sentence():
+    # The narrow, deliberate scope: the ENTIRE message must be just the
+    # ticker. A ticker mentioned as part of a larger sentence should
+    # still fall through to the model/agent loop as before, matching
+    # the adjacency check's own established false-positive guard.
+    assert detect_price_query("I'm reading about AAPL's supply chain") is None
+    assert detect_price_query("NVDA is a company I follow") is None
+
+
+def test_bare_ticker_shorthand_still_respects_the_stoplist():
+    # "DK" alone must still fall through rather than misfiring as Delek
+    # US Holdings -- same collision this stoplist already exists for.
+    assert detect_price_query("DK") is None
+    assert detect_price_query("DK?") is None
+    assert detect_price_query("CEO") is None
+
+
 def test_answer_price_query_surfaces_the_tools_own_real_error():
     async def _run():
         fake_result = {

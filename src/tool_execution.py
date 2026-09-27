@@ -969,6 +969,35 @@ _TICKER_ASSET_ADJACENT_RE = re.compile(
     r"|\b(?i:stock|shares?|crypto|coins?)\s+([A-Z]{2,5})\b"
 )
 
+# Real, added 2026-09-27: confirmed live (a direct trial against the real,
+# running system, using the currently-selected default model, not
+# ticker-lookup-lora) that a bare "NVDA?" -- nothing else in the message --
+# still fell through to model synthesis and got a wrong, inconsistent price
+# compared to the same ticker answered correctly moments earlier via the
+# deterministic path above. This is the exact bare-ticker-shorthand shape
+# that originally caused ticker-lookup-lora's fabrication (that model was
+# separately hidden from the picker, but the underlying gap in this
+# deterministic short-circuit was never actually closed for any model).
+#
+# Deliberately much narrower than a bare "any ticker anywhere in the
+# message" match (which the adjacency check above explicitly rejected for
+# false-positive risk, e.g. "I'm reading about AAPL's supply chain"):
+# this only matches when the ENTIRE message -- once trailing punctuation
+# is stripped -- is nothing but the candidate ticker. A ticker mentioned
+# as part of a larger sentence never matches this; only true shorthand
+# ("NVDA?", "NVDA") does. Reuses the same stoplist as the other checks,
+# so "DK" alone still correctly falls through rather than misfiring as
+# Delek US Holdings (see _TICKER_STOPLIST's own history).
+#
+# Deliberately case-SENSITIVE (real tickers only, no re.IGNORECASE),
+# matching _BARE_TICKER_RE's own existing convention above: a short,
+# ALL-CAPS-only message is a deliberate, distinctive shorthand a person
+# actually has to type; an ordinary short reply typed normally --
+# "sure", "nice", "thanks", "hello" -- is lowercase/mixed-case and never
+# matches. Without this restriction, a plain "Sure" or "Nice" (2-5
+# letters, not stoplisted) would misfire into a spurious price lookup.
+_BARE_TICKER_ONLY_RE = re.compile(r"^([A-Z]{2,5})[?!.\s]*$")
+
 
 def detect_price_query(message: str) -> Optional[str]:
     """Real, direct, deterministic check: does this message contain both
@@ -987,6 +1016,12 @@ def detect_price_query(message: str) -> Optional[str]:
     m = _TICKER_ASSET_ADJACENT_RE.search(text)
     if m:
         token = (m.group(1) or m.group(2)).upper()
+        if token not in _TICKER_STOPLIST:
+            return token
+        return None
+    m = _BARE_TICKER_ONLY_RE.match(text)
+    if m:
+        token = m.group(1).upper()
         if token not in _TICKER_STOPLIST:
             return token
     return None
