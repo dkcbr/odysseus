@@ -952,6 +952,23 @@ _TICKER_STOPLIST = frozenset({
     "IRA", "LLC", "INC", "VP", "HR", "PR", "PM", "AM", "DK",
 })
 
+# Real, added 2026-09-26: found live that "How much is TSLA stock right
+# now?" fell all the way through to the agent loop instead of this
+# deterministic path -- confirmed the keyword regex above only matches
+# the compound phrase "stock price", not bare "stock"/"share(s)"/
+# "crypto"/"coin" used next to a ticker. Deliberately NOT added as a
+# bare, anywhere-in-message keyword like the others above: "stock"
+# alone is common in ordinary unrelated sentences ("I don't care about
+# the stock market, but NASA is cool") and would risk misfiring
+# whenever any other bare all-caps token happens to appear elsewhere in
+# the same message. Instead requires direct adjacency -- the ticker
+# immediately next to the asset word, in either order -- which is how
+# this phrasing actually occurs in real questions.
+_TICKER_ASSET_ADJACENT_RE = re.compile(
+    r"\b([A-Z]{2,5})\s+(?i:stock|shares?|crypto|coins?)\b"
+    r"|\b(?i:stock|shares?|crypto|coins?)\s+([A-Z]{2,5})\b"
+)
+
 
 def detect_price_query(message: str) -> Optional[str]:
     """Real, direct, deterministic check: does this message contain both
@@ -962,9 +979,14 @@ def detect_price_query(message: str) -> Optional[str]:
     detection, appropriate for running against every chat message rather
     than only ones already headed into the agent loop."""
     text = message.strip()
-    if not _PRICE_QUERY_KEYWORD_RE.search(text):
+    if _PRICE_QUERY_KEYWORD_RE.search(text):
+        for token in _BARE_TICKER_RE.findall(text):
+            if token not in _TICKER_STOPLIST:
+                return token
         return None
-    for token in _BARE_TICKER_RE.findall(text):
+    m = _TICKER_ASSET_ADJACENT_RE.search(text)
+    if m:
+        token = (m.group(1) or m.group(2)).upper()
         if token not in _TICKER_STOPLIST:
             return token
     return None

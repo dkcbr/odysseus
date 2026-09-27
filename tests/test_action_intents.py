@@ -130,3 +130,29 @@ def test_system_diagnostic_pattern_does_not_match_stock_price_questions():
     assert not message_needs_tools("Is Bitcoin going up?")
     assert not message_needs_tools("Is Bitcoin up?")
     assert not message_needs_tools("Is KTOS down?")
+
+
+# Real, added 2026-09-26: found completely missing while investigating a
+# real ticker/stock-price gap -- confirmed live that plain price
+# questions returned needs_tools=False under the pre-existing "web"
+# category's rate/price patterns, which require a trailing/leading
+# time-word ("now", "current", "latest") next to the price keyword and
+# didn't cover "trading at" or "worth" phrasing at all.
+def test_ticker_price_questions_promote_to_agent():
+    assert message_needs_tools("Whats PL trading at right now?")
+    assert message_needs_tools("What's RKLB trading at right now?")
+    assert message_needs_tools("What's the price of RKLB?")
+    assert message_needs_tools("How much is TSLA stock right now?")
+    assert message_needs_tools("What's AAPL worth today?")
+    intent = classify_tool_intent("What's RKLB trading at right now?")
+    assert intent.category == "finance"
+
+
+def test_finance_patterns_do_not_match_unrelated_questions():
+    # Deliberately anchored on explicit price/trading vocabulary, not a
+    # blanket ticker-symbol regex -- guards against exactly the kind of
+    # over-triggering this file's patterns are built to avoid.
+    assert not message_needs_tools("What time is it right now?")
+    assert not message_needs_tools("How do I explain what stocks are to my kid?")
+    assert not message_needs_tools("What is the meaning of life?")
+    assert not message_needs_tools("How much is too much screen time?")

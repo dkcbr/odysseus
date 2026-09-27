@@ -57,6 +57,22 @@ _HA_THING = (
     r"light|lights|switch|lock|garage\s+door)"
 )
 
+# Real, added 2026-09-26: found completely missing while investigating a
+# real ticker/stock-price gap ("What's RKLB trading at right now?",
+# "What's the price of RKLB?", "How much is TSLA stock right now?",
+# "What's AAPL worth today?") -- all four confirmed live to return
+# needs_tools=False under the existing "web" category's rate/price
+# patterns, which require a trailing/leading time-word ("now",
+# "current", "latest") next to the price keyword and don't cover
+# "trading at" or "worth" phrasing at all.
+#
+# Deliberately anchored on explicit price/trading vocabulary, NOT a
+# blanket ticker-symbol regex (e.g. matching any 1-5 letter uppercase
+# token) -- that would false-positive constantly on ordinary chat (a
+# bare "I", "A", acronyms, sentence-initial caps), the exact class of
+# over-triggering this file's patterns are built to avoid.
+_FINANCE_ASSET = r"(?:stock|share|shares|ticker|crypto|coin|token)"
+
 _ROUTING_PATTERNS: tuple[tuple[str, str, Pattern[str]], ...] = tuple(
     (category, reason, re.compile(pattern, re.I))
     for category, reason, pattern in (
@@ -159,6 +175,14 @@ _ROUTING_PATTERNS: tuple[tuple[str, str, Pattern[str]], ...] = tuple(
         ("shell", "imperative shell command request", rf"{_PLEASE}(deploy|build|install|restart|reboot|kill|tail|grep|cat|ls|cd|cp|mv|rm)\b\s+\S+"),
         ("shell", "assistant shell command request", rf"{_ACTION_QUESTION}(deploy|build|install|restart|reboot|kill|tail|grep|cat|ls|cd|cp|mv|rm)\b\s+\S+"),
         ("shell", "system/file check request", r"\b(check|see)\s+(if|whether|what)\s+.{1,40}\b(running|process|service|port|file|exists?)\b"),
+
+        # Ticker/stock/crypto price lookups. See _FINANCE_ASSET above for
+        # why this isn't a blanket ticker-symbol regex.
+        ("finance", "trading-at price question", r"\bwhat'?s?\b.{1,40}\btrading\s+at\b"),
+        ("finance", "asset worth question", rf"\bwhat'?s?\b.{{1,40}}\b{_FINANCE_ASSET}?\s*\bworth\b"),
+        ("finance", "stock/share price question", rf"\b{_FINANCE_ASSET}\s+price\b|\bprice\s+of\s+(?:[\w.$-]{{1,10}})\b"),
+        ("finance", "how much is asset question", rf"\bhow\s+much\s+is\b.{{1,40}}\b{_FINANCE_ASSET}\b"),
+        ("finance", "assistant ticker lookup request", rf"{_ACTION_QUESTION}(?:check|look\s+up|get|find)\b.{{0,60}}\b(?:{_FINANCE_ASSET}\s+price|price\s+of)\b"),
 
         # Home Assistant (real device control/lookup): thermostat, lights,
         # switches, locks, garage door. See _HA_THING above for why "door"

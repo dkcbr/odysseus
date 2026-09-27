@@ -89,6 +89,30 @@ def test_answer_price_query_formats_real_successful_lookup():
     asyncio.run(_run())
 
 
+# Real, added 2026-09-26: "How much is TSLA stock right now?" was found
+# live to fall through this detector entirely -- the original keyword
+# regex only matched the compound phrase "stock price", not bare
+# "stock"/"shares"/"crypto"/"coin" adjacent to a ticker.
+def test_detects_price_query_via_ticker_adjacent_to_stock_word():
+    assert detect_price_query("How much is TSLA stock right now?") == "TSLA"
+    assert detect_price_query("Check my TSLA shares performance") == "TSLA"
+    assert detect_price_query("What are BTC crypto prices like") == "BTC"
+    assert detect_price_query("stock AAPL update") == "AAPL"
+
+
+def test_adjacency_fallback_is_case_sensitive_on_the_ticker():
+    # Real bug caught and fixed while building this: a first attempt
+    # applied re.IGNORECASE to the whole compiled pattern, which made
+    # the ticker capture group itself case-insensitive -- "The stock
+    # market crashed" matched "The" as if it were a valid ticker.
+    assert detect_price_query(
+        "I don't care about the stock market, but NASA is cool"
+    ) is None
+    assert detect_price_query("The stock market crashed today because of the Fed") is None
+    assert detect_price_query("My CEO asked about the stock options plan") is None
+    assert detect_price_query("my shares of responsibility here are equal") is None
+
+
 def test_answer_price_query_surfaces_the_tools_own_real_error():
     async def _run():
         fake_result = {
