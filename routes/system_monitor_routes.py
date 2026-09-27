@@ -33,6 +33,17 @@ from core.middleware import require_admin
 # reaching real host state from inside this container.
 SYSTEMCTL_AGENT_URL = "http://100.93.206.89:9001/game_mode"
 
+# Real, added 2026-09-27: system-restart support -- lets a sidebar button
+# gracefully quiesce the trading timers, the Bonsai llama-server, and the
+# Odysseus docker stack, then actually reboot the host, via the exact same
+# real, host-level systemctl_agent.py -> shutdown_restart.sh pattern
+# game-mode already established one section up. "status"/"prepare" are
+# safe, non-destructive (prepare never reboots), verified live directly
+# against the host agent before this route was added; "restart" is a
+# real, irreversible action (the host actually goes down) confirmed only
+# from the frontend's own confirm dialog, never auto-triggered.
+SYSTEMCTL_AGENT_SYSTEM_RESTART_URL = "http://100.93.206.89:9001/system_restart"
+
 
 def _real_gpu_metrics() -> dict | None:
     """Real, direct nvidia-smi query. Returns None (not an error) if no
@@ -165,6 +176,59 @@ def setup_system_monitor_routes() -> APIRouter:
             raise HTTPException(
                 status_code=502,
                 detail=f"game-mode agent returned unexpected status {resp.status_code}",
+            )
+
+        return resp.json()
+
+    class SystemRestartRequest(BaseModel):
+        action: str  # "status", "prepare", or "restart"
+
+    @router.post("/system-restart")
+    def system_restart(req: SystemRestartRequest, request: Request):
+        require_admin(request)
+
+        if req.action not in ("status", "prepare", "restart"):
+            raise HTTPException(status_code=400, detail="action must be one of: status, prepare, restart")
+
+        token = os.environ.get("SYSTEMCTL_AGENT_TOKEN")
+        if not token:
+            raise HTTPException(
+                status_code=503,
+                detail="system-restart agent token not configured -- SYSTEMCTL_AGENT_TOKEN missing",
+            )
+
+        try:
+            resp = httpx.post(
+                SYSTEMCTL_AGENT_SYSTEM_RESTART_URL,
+                json={"action": req.action},
+                headers={"Authorization": f"Bearer {token}"},
+                # Real, matches the host agent's own 120s internal timeout
+                # for "prepare"/"restart" (stops 3 trading timers, waits up
+                # to 30s for an in-flight run, stops the Bonsai llama-server,
+                # `docker compose stop`s the whole Odysseus stack) plus real
+                # margin for network/queueing. A genuine "restart" reboots
+                # the host out from under this very request -- the frontend
+                # must treat a dropped connection here as an expected,
+                # successful outcome, not an error, for that action only.
+                timeout=125,
+            )
+        except httpx.RequestError as e:
+            if req.action == "restart":
+                # Real, expected: the host went down mid-response. Report
+                # success rather than a spurious 502 -- the reboot itself is
+                # what actually mattered, and it was already in flight.
+                return {"ok": True, "action": "restart", "note": "connection dropped -- host is rebooting"}
+            raise HTTPException(
+                status_code=502,
+                detail=f"could not reach the system-restart agent: {type(e).__name__}: {e}",
+            )
+
+        if resp.status_code == 401:
+            raise HTTPException(status_code=502, detail="system-restart agent rejected the token")
+        if resp.status_code != 200:
+            raise HTTPException(
+                status_code=502,
+                detail=f"system-restart agent returned unexpected status {resp.status_code}",
             )
 
         return resp.json()

@@ -12,6 +12,7 @@ from contextlib import asynccontextmanager
 from fastapi import HTTPException
 from typing import Optional, Dict, List, Tuple
 from src.model_context import get_context_length, DEFAULT_CONTEXT, is_local_endpoint
+from src.text_helpers import strip_think
 from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)
@@ -1318,6 +1319,13 @@ _THINKING_MODEL_PATTERNS = (
     "qwen3", "qwq", "deepseek-r1", "deepseek-reasoner", "minimax",
     "m2-reap", "gemma", "stepfun", "step-3", "step3",
     "magistral", "mistral-small", "mistral-medium",
+    # Real, added 2026-09-27: Ternary-Bonsai-27B (Prism ML fork, local
+    # llama-server endpoint) always reasons at length before any real
+    # answer -- confirmed live, it burns ~100+ tokens of reasoning even
+    # on trivial prompts like "2+2". Needed here so _supports_thinking()
+    # (and anything gated on it, e.g. agent_loop.py's low-signal
+    # fast-path bypass) recognizes it as a reasoning model.
+    "ternary-bonsai",
     # Real, added 2026-08-28: ticker-lookup-lora is a real, custom LoRA
     # fine-tune of a Qwen3 base model. Confirmed directly, via a real,
     # live captured stability-harness run, that this exact real,
@@ -1948,9 +1956,19 @@ def llm_call(url: str, model: str, messages: List[Dict], temperature: float = LL
                 if thinking_part:
                     response = thinking_part + "\n\n" + (text_part or "")
                 else:
-                    response = text_part or msg.get("reasoning_content") or ""
+                    # Real, added 2026-09-27: `content` empty (model hit its
+                    # token budget, or stopped, mid-reasoning) used to fall
+                    # back to the RAW reasoning_content verbatim -- leaking
+                    # internal chain-of-thought ("Thinking Process: ...") as
+                    # if it were the actual answer to whatever called this.
+                    # Route it through the same strip_think() the chat UI's
+                    # content path already uses (prose=True is safe here:
+                    # this text is LLM-only reasoning, never user content),
+                    # and prefer an honest empty string over unstripped CoT
+                    # if nothing salvageable remains.
+                    response = text_part or strip_think(msg.get("reasoning_content") or "", prose=True, prompt_echo=True)
             else:
-                response = content or msg.get("reasoning_content") or ""
+                response = content or strip_think(msg.get("reasoning_content") or "", prose=True, prompt_echo=True)
         _set_cached_response(cache_key, response)
         return response
     except Exception:
@@ -2186,7 +2204,9 @@ async def llm_call_async(
                     response = _parse_ollama_response(data)
                 else:
                     msg = data["choices"][0]["message"]
-                    response = msg.get("content") or msg.get("reasoning_content") or ""
+                    # Real, added 2026-09-27: same raw-reasoning-leak fix as
+                    # the sync llm_call() fallback above -- see that comment.
+                    response = msg.get("content") or strip_think(msg.get("reasoning_content") or "", prose=True, prompt_echo=True)
                 _set_cached_response(cache_key, response)
                 return response
             except Exception:

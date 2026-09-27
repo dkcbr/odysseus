@@ -985,6 +985,16 @@
         <svg class="sidebar-action-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="6" width="20" height="12" rx="3"/><line x1="7" y1="10" x2="7" y2="14"/><line x1="5" y1="12" x2="9" y2="12"/><circle cx="16" cy="10.5" r="1" fill="currentColor" stroke="none"/><circle cx="18.5" cy="13" r="1" fill="currentColor" stroke="none"/></svg>
         <span class="grow" id="sidebar-game-mode-label" style="position:relative;left:-1px;">Game Mode</span>
       </div>
+      <!-- Real, added 2026-09-27: gracefully stops the trading timers, the
+           Bonsai llama-server, and the Odysseus docker stack, then reboots
+           the host, via routes/system_monitor_routes.py -> systemctl_agent.py
+           -> shutdown_restart.sh. A real, irreversible action -- gated by a
+           confirm() dialog in app.js before it ever calls "restart"; a
+           plain click only refreshes the status tooltip. -->
+      <div class="list-item" id="sidebar-restart-pc-btn" title="Restart PC (click to check status, confirm to reboot)">
+        <svg class="sidebar-action-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21.5 2v6h-6"/><path d="M2.5 22v-6h6"/><path d="M2 11.5a10 10 0 0 1 18.8-4.3M22 12.5a10 10 0 0 1-18.8 4.3"/></svg>
+        <span class="grow" id="sidebar-restart-pc-label" style="position:relative;left:-1px;">Restart PC</span>
+      </div>
       <!-- Assistant sidebar entry removed — its log + settings live inside
            the Tasks modal (Activity + Settings tabs). The backend
            assistant session is still maintained for log_to_assistant()

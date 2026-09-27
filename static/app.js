@@ -4008,6 +4008,55 @@ function startOdysseusApp() {
       }
     });
   }
+
+  // Real, added 2026-09-27: gracefully quiesce the trading timers, the
+  // Bonsai llama-server, and the Odysseus docker stack, then reboot the
+  // host, via routes/system_monitor_routes.py -> systemctl_agent.py ->
+  // shutdown_restart.sh (all real, verified live before this button was
+  // wired up). Unlike Game Mode's toggle, this is a real, irreversible
+  // action -- every click shows a native confirm() dialog first, and the
+  // restart request is only ever sent if the user explicitly confirms.
+  const sidebarRestartPcBtn = el('sidebar-restart-pc-btn');
+  const sidebarRestartPcLabel = el('sidebar-restart-pc-label');
+  let _restartPcBusy = false;
+
+  async function _callSystemRestart(action) {
+    const resp = await fetch('/api/system-monitor/system-restart', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action }),
+    });
+    if (!resp.ok) {
+      throw new Error('system-restart request failed: HTTP ' + resp.status);
+    }
+    return resp.json();
+  }
+
+  if (sidebarRestartPcBtn) {
+    sidebarRestartPcBtn.addEventListener('click', async () => {
+      if (_restartPcBusy) return;
+      const confirmed = window.confirm(
+        'This will gracefully stop the trading agents, Bonsai, and the Odysseus stack, then REBOOT this PC now. Continue?'
+      );
+      if (!confirmed) return;
+      _restartPcBusy = true;
+      const prevLabel = sidebarRestartPcLabel ? sidebarRestartPcLabel.textContent : '';
+      if (sidebarRestartPcLabel) sidebarRestartPcLabel.textContent = 'Restarting…';
+      try {
+        await _callSystemRestart('restart');
+        // Real, expected: on an actual reboot the response either never
+        // arrives or reports ok -- either way, stay in this "Restarting…"
+        // state rather than resetting the label, since the host is now
+        // genuinely going down.
+      } catch (e) {
+        if (sidebarRestartPcLabel) sidebarRestartPcLabel.textContent = prevLabel;
+        console.error('system-restart request error:', e);
+        window.alert('Restart request failed: ' + e.message);
+      } finally {
+        _restartPcBusy = false;
+      }
+    });
+  }
   // Modify form submit to handle special modes
   const chatForm = document.getElementById('chat-form');
   const originalSubmit = chatModule.handleChatSubmit;

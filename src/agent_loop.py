@@ -20,6 +20,7 @@ from src.llm_core import (
     stream_llm,
     stream_llm_with_fallback,
     _is_ollama_native_url,
+    _supports_thinking,
 )
 from src.model_context import estimate_tokens
 from src.settings import get_setting
@@ -440,6 +441,7 @@ _AGENT_RULES = """\
 ## Base rules
 - Only use tools when needed. For casual messages like "test", "yo", "thanks", answer normally.
 - If a needed tool/domain is missing from this turn, say what is missing briefly instead of pretending.
+- Real, added 2026-09-27: NEVER invent a tool name, action, or method that isn't in the tool list/schema given to you this turn -- not even one that sounds plausible or that you recall from a past session/memory. If you're not sure a real tool covers what you need, say so in one sentence instead of calling a fabricated one. This applies doubly to claims of a completed action: never tell the user something was done, saved, searched, or found unless a real tool call actually returned that result this turn -- "I've noted that" / "no matches found" / "couldn't find X" are lies if no tool ran. Write tool calls ONLY in the exact mechanism given to you (native function-calling or the fenced-code-block syntax below, whichever this turn provides) -- never as freeform pseudo-syntax (e.g. hand-written `<function=...>` XML) typed into the chat text; that is never parsed and the user sees only broken text.
 - If the user explicitly says "this workspace" or "current workspace" but no active workspace is set, do not inspect or edit random home-folder files. Tell them to set one with `/workspace pick` or `/workspace set /absolute/path`.
 - After a tool succeeds, do not second-guess it; reply with one short confirmation unless more work remains.
 - After a tool fails, retry with a concrete fix or state what is blocking you.
@@ -454,6 +456,7 @@ _API_AGENT_RULES = """\
 - Prefer native tool/function calling when tools are needed.
 - Only call tools when they materially help answer the request. For casual messages like "test", "yo", "thanks", answer normally.
 - You MUST use tools to take action; do not claim you did something without a tool result.
+- Real, added 2026-09-27: NEVER invent a tool name, action, or method that isn't in the tool schemas given to you this turn -- not even one that sounds plausible or that you recall from a past session/memory. If you're not sure a real tool covers what you need, say so in one sentence instead of calling a fabricated one. This applies doubly to claims of a completed action: never tell the user something was done, saved, searched, or found unless a real tool call actually returned that result this turn -- "I've noted that" / "no matches found" / "couldn't find X" are lies if no tool ran. Issue tool calls ONLY through the real native function-calling mechanism -- never as freeform pseudo-syntax (e.g. hand-written `<function=...>` XML) typed into the chat text; that is never parsed and the user sees only broken text instead of a real result.
 - If a needed tool/domain is missing from this turn, say what is missing briefly instead of pretending.
 - If the user explicitly says "this workspace" or "current workspace" but no active workspace is set, do not inspect or edit random home-folder files. Tell them to set one with `/workspace pick` or `/workspace set /absolute/path`.
 - Keep answers concise unless the user asks for depth.
@@ -3442,6 +3445,17 @@ async def stream_agent_loop(
             "mcp__email__list_emails", "mcp__email__read_email", "mcp__email__scan_email_unsubscribes",
         })
     _prompt_active_document = active_document if _active_document_relevant else None
+    # Real, added 2026-09-27: this path sends NO system prompt and NO tools
+    # at all (see below -- direct_messages is just the bare user turn, and
+    # stream_llm_with_fallback is called with tools=None), capped at a hard
+    # 128 max_tokens. That's fine for fast, non-reasoning models answering
+    # small talk, but a reasoning model (confirmed live with Bonsai-27B)
+    # spends its entire budget on reasoning before any real answer and
+    # never even sees the tool schemas it would need to route correctly --
+    # not a token-budget problem, a "no tools were offered" problem, so a
+    # bigger max_tokens alone would not fix it. Exempt reasoning models
+    # from this fast path entirely; they always take the real agent path
+    # below (system prompt + tools + the normal max_tokens budget).
     _direct_low_signal = (
         _low_signal_turn
         and not _existing_conversation
@@ -3454,6 +3468,7 @@ async def stream_agent_loop(
         and (_casual_low_signal_turn or not workspace)
         and not forced_tools
         and not relevant_tools
+        and not _supports_thinking(model)
     )
     # Tool retrieval uses the latest message by default. It may inherit recent
     # user turns only for explicit continuations ("yes", "do it", "1").

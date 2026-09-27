@@ -39,9 +39,14 @@ _THOUGHT_TAG_CLOSE_RE = re.compile(r"</thought>", re.IGNORECASE)
 _GEMMA_THOUGHT_CHANNEL_OPEN_RE = re.compile(r"<\|channel>thought\s*\n?", re.IGNORECASE)
 _GEMMA_CHANNEL_CLOSE_TRIM_RE = re.compile(r"<channel\|>\s*", re.IGNORECASE)
 # Qwen and a few other models prefix the response with a "Thinking Process:"
-# block before the real answer.
+# block before the real answer. Real, added 2026-09-27: Ternary-Bonsai-27B
+# (Prism ML fork, local llama-server endpoint) was confirmed live to use two
+# different lead-ins for the same block -- a bare "Thinking Process:" on some
+# generations and "Here's a/the thinking process:" on others -- so the
+# optional lead-in is matched here rather than requiring a second, separate
+# regex the callers below would also have to know to apply.
 _QWEN_THINKING_RE = re.compile(
-    r"^Thinking Process:.*?(?=\n\n#|\n\n\*\*|\Z)",
+    r"^(?:Here's (?:a|the) )?Thinking Process:.*?(?=\n\n#|\n\n\*\*|\Z)",
     re.IGNORECASE | re.DOTALL,
 )
 # Leaked prompt-echo headers (a few models replay the request before answering).
