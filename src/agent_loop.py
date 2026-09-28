@@ -3384,6 +3384,19 @@ async def stream_agent_loop(
     # the full investigation and the decision to pursue a simpler,
     # non-agent-loop path for price queries instead.
     _ody_qwen_finetune_model = (model or "").lower().startswith("odysseus-qwen3")
+    # Real, added 2026-09-28: closes the "structural fix needed for
+    # Bonsai's tool-call fabrication" TODO. Confirmed live, repeatedly
+    # (dispatcher trial + real production chat session
+    # d758c8a4-ecd5-4bca-a461-4936d7d47780): Ternary-Bonsai-27B
+    # fabricates a confident, plausible-sounding completed/negative
+    # result ("No matches found", "I've noted that your favorite color
+    # is blue") for search_vault/manage_memory-shaped requests instead
+    # of actually calling the tool. A system-prompt rule explicitly
+    # naming this exact behavior as forbidden was tested live and had
+    # NO effect -- confirmed this is a real capability gap, not an
+    # instruction-following one. See the tool_choice_required gate at
+    # this round's stream_llm_with_fallback call below for the real fix.
+    _ody_fabrication_prone_model = "ternary-bonsai" in (model or "").lower()
     # Real, added 2026-08-28: confirmed live, across multiple independent
     # real agent trials, that this specific ticker-lookup LoRA sometimes
     # repeats its own final answer sentence verbatim, immediately, with no
@@ -4341,6 +4354,36 @@ async def stream_agent_loop(
         _tool_names_sent = [t.get("function", {}).get("name") for t in (all_tool_schemas or []) if t.get("function")]
         logger.info(f"[agent-debug] round={round_num} model={model} _is_api_model={_is_api_model} tools_sent={len(_tool_names_sent)} tool_names={_tool_names_sent[:15]} relevant_tools={sorted(_relevant_tools)[:15] if _relevant_tools else 'ALL'}")
 
+        # Real, added 2026-09-28: structural fix for Bonsai's tool-call
+        # fabrication (see _ody_fabrication_prone_model above for the
+        # full context/evidence). Gated narrowly on purpose: only round 1
+        # of a turn (later rounds already have real tool results in
+        # context, where a plain-text synthesis is often the CORRECT
+        # final behavior -- forcing another mandatory tool call every
+        # round would break normal completion), only a known
+        # fabrication-prone model, and only when search_vault or
+        # manage_memory -- the two tools this model has been directly,
+        # repeatedly observed fabricating results for -- were actually
+        # offered this round (i.e. the existing tool-RAG retrieval
+        # already decided they're relevant to this turn; this gate never
+        # invents relevance of its own). Forces `tool_choice: "required"`
+        # at the API level rather than asking nicely in the prompt --
+        # confirmed live that the prompt-only version had zero effect,
+        # while tool_choice=required reliably produced a real, correctly-
+        # selected tool call on both previously-fabricating prompts.
+        _tool_choice_required = (
+            round_num == 1
+            and not _force_answer
+            and _ody_fabrication_prone_model
+            and bool({"search_vault", "manage_memory"} & set(_tool_names_sent))
+        )
+        if _tool_choice_required:
+            logger.info(
+                "[agent-intent] forcing tool_choice=required for %s round %s "
+                "(fabrication-prone model, search_vault/manage_memory offered)",
+                model, round_num,
+            )
+
         # Primary target + any configured fallback models. stream_llm_with_fallback
         # only switches on a pre-content failure, so streamed output is never
         # duplicated; the dead-host cooldown keeps repeat primary attempts cheap.
@@ -4371,6 +4414,7 @@ async def stream_agent_loop(
             prompt_type=prompt_type if round_num == 1 else None,
             tools=all_tool_schemas if all_tool_schemas else None,
             tool_choice_none=_ody_doc_finetune_mode,
+            tool_choice_required=_tool_choice_required,
             timeout=agent_stream_timeout,
             session_id=session_id,
             workload=workload,
