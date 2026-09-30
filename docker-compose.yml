@@ -193,6 +193,14 @@ services:
       # required-prerequisite pattern as that token: no default here,
       # real value lives only in .env (git-ignored).
       - SYSTEMCTL_AGENT_TOKEN=${SYSTEMCTL_AGENT_TOKEN}
+      # Real, added 2026-09-29: dedicated read-only token for Hermes
+      # (Zeus laptop Telegram bot) to fetch the live, auto-synced
+      # data/portfolio_context.md via GET /api/hermes/portfolio-context,
+      # replacing the stale hand-maintained Google Drive vault doc it
+      # used before. Same explicit-passthrough requirement as the tokens
+      # above -- confirmed directly the first build without this entry
+      # left the var unset inside the container despite being in .env.
+      - HERMES_READ_TOKEN=${HERMES_READ_TOKEN}
       # Real, added 2026-08-31: which Odysseus user's data the new MCP
       # HTTP server (routes/mcp_http_server.py) operates on for
       # owner-scoped tools (manage_email, manage_notes, etc.) -- needed

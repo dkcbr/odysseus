@@ -267,6 +267,13 @@ if AUTH_ENABLED:
         "/api/health",
         "/api/version",
         "/login",
+        # Real, added 2026-09-29: this route validates its own dedicated
+        # HERMES_READ_TOKEN bearer header inside the handler itself (see
+        # hermes_portfolio_context below) -- same pattern as the
+        # webhook_token routes above, just header-based instead of
+        # path-embedded. Without this exemption AuthMiddleware 401s it
+        # before the handler's own token check ever runs.
+        "/api/hermes/portfolio-context",
     }
     AUTH_EXEMPT_PREFIXES = ["/static"]
     # Dynamic paths whose own handler proves identity via a path-embedded
@@ -957,6 +964,37 @@ async def get_version():
 @app.get("/api/health")
 async def health_check() -> Dict[str, str]:
     return {"status": "healthy", "timestamp": datetime.now(timezone.utc).isoformat()}
+
+@app.get("/api/hermes/portfolio-context")
+async def hermes_portfolio_context(request: Request):
+    """Real, dedicated, READ-ONLY endpoint for Hermes (the Telegram bot
+    running on Zeus) to pull the live, auto-synced portfolio context
+    Odysseus's own daily_rung_review.py already maintains at
+    data/portfolio_context.md, instead of the stale hand-maintained Google
+    Drive doc it fetched before (found stuck a month behind, still
+    reporting a KTOS share count from August 30 well after the real
+    position had grown to 29 shares).
+
+    Auth: a single dedicated bearer token (HERMES_READ_TOKEN), not the
+    admin-bypass ODYSSEUS_INTERNAL_TOKEN and not ZEUS_AGENT_TOKEN (which
+    authenticates the opposite direction, Odysseus calling into Zeus).
+    This route can only ever return this one file's text -- there is no
+    argument or path that reaches anything else.
+    """
+    expected = os.environ.get("HERMES_READ_TOKEN")
+    if not expected:
+        raise HTTPException(500, "HERMES_READ_TOKEN is not configured")
+    auth_header = request.headers.get("Authorization", "")
+    presented = auth_header[7:] if auth_header.startswith("Bearer ") else ""
+    if not presented or not secrets.compare_digest(presented, expected):
+        raise HTTPException(401, "Unauthorized")
+    path = abs_join(BASE_DIR, "data/portfolio_context.md")
+    if not os.path.exists(path):
+        raise HTTPException(404, "portfolio_context.md not found")
+    with open(path, "r", encoding="utf-8") as f:
+        content = f.read()
+    from starlette.responses import PlainTextResponse
+    return PlainTextResponse(content)
 
 @app.post("/api/client-perf")
 async def client_perf(request: Request):

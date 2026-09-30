@@ -295,6 +295,37 @@ async def list_tools() -> list[Tool]:
             },
         ),
         Tool(
+            name="get_portfolio",
+            description=(
+                "Real, direct, READ-ONLY view of DK's live Public.com holdings "
+                "and open orders. Calls the same, already-working internal "
+                "'public_com' MCP server Odysseus's own daily_rung_review.py "
+                "automation uses (get_portfolio/get_orders), on demand, so "
+                "this doesn't have to wait for the once-daily "
+                "data/portfolio_context.md sync (runs at 08:00). "
+                "HONEST SAFETY SCOPE, enforced in code, not just by "
+                "convention: this tool can only ever call get_portfolio/"
+                "get_orders on the public_com server. place_order and every "
+                "other public_com tool are not reachable through it -- there "
+                "is no argument that reaches any other tool or server."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "account": {
+                        "type": "string",
+                        "enum": ["taxable", "roth", "both"],
+                        "description": "Which Public.com account to query (default 'both')",
+                    },
+                    "include_orders": {
+                        "type": "boolean",
+                        "description": "Also fetch open orders for the selected account(s) (default true)",
+                    },
+                },
+                "required": [],
+            },
+        ),
+        Tool(
             name="propose_edit_for_entity",
             description=(
                 "Real, direct call into the standalone Jarvis Composer "
@@ -1113,6 +1144,125 @@ async def _call_manage_email(arguments: dict) -> list[TextContent]:
         return _text(f"Error: Unknown action '{action}'")
 
 
+# ---------------------------------------------------------------------
+# get_portfolio tool implementation -- READ-ONLY, deliberately narrow.
+# Reuses the exact same in-process mcp_manager.call_tool() method
+# routes/mcp_routes.py's own /api/mcp/call endpoint calls (see that
+# file's call_mcp_tool handler), not a reimplementation or a separate
+# HTTP round-trip -- and the exact same real account ids
+# scripts/daily_rung_review.py already uses in production.
+# ---------------------------------------------------------------------
+
+# Real account ids, matching scripts/daily_rung_review.py's own
+# ACCOUNT_ID/ROTH_ACCOUNT_ID constants exactly (Taxable/Roth on
+# Public.com -- Fidelity is a separate, unconnected account with no
+# API/MCP access, out of scope here same as everywhere else in Jarvis).
+_PUBLIC_COM_ACCOUNTS = {
+    "taxable": "5OS47729",
+    "roth": "5OD45160",
+}
+
+
+def _get_mcp_manager():
+    """Lazy import of the live mcp_manager instance, same real pattern
+    _get_research_handler() above already uses to avoid a circular
+    import -- this file is imported at the very top of app.py, before
+    app.py's own `mcp_manager = McpManager()` line runs further down
+    in that same module."""
+    from app import mcp_manager as _mm
+    return _mm
+
+
+async def _resolve_public_com_server_id(mcp_manager) -> Optional[str]:
+    """Real, minimal version of mcp_routes.py's own call_mcp_tool()
+    server-resolution logic (DB id/name, falling back to the in-memory
+    registry for built-ins), scoped down to just the one server name
+    ('public_com') this tool ever needs -- not the general resolver."""
+    from core.database import SessionLocal, McpServer
+
+    db = SessionLocal()
+    try:
+        srv = (
+            db.query(McpServer).filter(McpServer.id == "public_com").first()
+            or db.query(McpServer).filter(McpServer.name == "public_com").first()
+        )
+        if srv is not None:
+            return srv.id
+    finally:
+        db.close()
+
+    status = mcp_manager.get_server_status("public_com")
+    if status and status.get("status") not in (None, "disconnected"):
+        return "public_com"
+    for tool in mcp_manager.get_all_tools():
+        if tool.get("server_name") == "public_com":
+            return tool["server_id"]
+    return None
+
+
+async def _call_get_portfolio(arguments: dict) -> list[TextContent]:
+    """Real, direct, READ-ONLY call into the same internal public_com MCP
+    server daily_rung_review.py uses. HONEST SAFETY SCOPE: the only two
+    qualified tool names this function ever constructs are
+    get_portfolio/get_orders on the public_com server -- place_order (used
+    by scripts/{buy,sell}_rung_agent.py for real trades) is never
+    reachable through this tool, by construction, not by a runtime check
+    that could be bypassed."""
+    account = (arguments.get("account") or "both").lower()
+    if account not in _PUBLIC_COM_ACCOUNTS and account != "both":
+        return _text("Error: account must be 'taxable', 'roth', or 'both'")
+    include_orders = arguments.get("include_orders", True)
+
+    mcp_manager = _get_mcp_manager()
+    resolved_id = await _resolve_public_com_server_id(mcp_manager)
+    if resolved_id is None:
+        return _text(
+            "Error: no 'public_com' MCP server is currently registered/"
+            "connected in Odysseus (check the MCP Servers panel)."
+        )
+
+    accounts_to_query = (
+        list(_PUBLIC_COM_ACCOUNTS.items())
+        if account == "both"
+        else [(account, _PUBLIC_COM_ACCOUNTS[account])]
+    )
+
+    sections = []
+    for label, account_id in accounts_to_query:
+        portfolio_result = await mcp_manager.call_tool(
+            f"mcp__{resolved_id}__get_portfolio",
+            {"account_id": account_id},
+            agent_name="claude_mcp",
+        )
+        if portfolio_result.get("exit_code") not in (0, None):
+            sections.append(f"## {label} ({account_id}) — portfolio\nError: {portfolio_result}")
+        else:
+            raw = portfolio_result.get("stdout", portfolio_result)
+            try:
+                raw = json.loads(raw) if isinstance(raw, str) else raw
+            except (TypeError, ValueError):
+                pass
+            sections.append(f"## {label} ({account_id}) — portfolio\n{json.dumps(raw, indent=2)}")
+
+        if include_orders:
+            orders_result = await mcp_manager.call_tool(
+                f"mcp__{resolved_id}__get_orders",
+                {"account_id": account_id},
+                agent_name="claude_mcp",
+            )
+            if orders_result.get("exit_code") not in (0, None):
+                sections.append(f"## {label} ({account_id}) — open orders\nError: {orders_result}")
+            else:
+                raw_o = orders_result.get("stdout", orders_result)
+                try:
+                    raw_o = json.loads(raw_o) if isinstance(raw_o, str) else raw_o
+                except (TypeError, ValueError):
+                    pass
+                sections.append(f"## {label} ({account_id}) — open orders\n{json.dumps(raw_o, indent=2)}")
+
+    return _text("\n\n".join(sections))
+
+
 async def _call_propose_edit_for_entity(arguments: dict) -> list[TextContent]:
     """Real, direct call into the standalone Jarvis Composer Flask
     service (127.0.0.1:5055) -- a genuinely separate app from Odysseus
@@ -1207,6 +1357,8 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         return await _call_web_search(arguments)
     if name == "manage_email":
         return await _call_manage_email(arguments)
+    if name == "get_portfolio":
+        return await _call_get_portfolio(arguments)
     if name == "propose_edit_for_entity":
         return await _call_propose_edit_for_entity(arguments)
     return _text(f"Unknown tool: {name}")
