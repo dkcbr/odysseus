@@ -108,3 +108,6 @@ _scratch/
 
 # Repro harness output (real test runs, not source -- see repro_harness.py)
 repro_runs/
+
+# Apodex/FrontierAgent CLI run artifacts (created in the cwd it is run from)
+.apodex/
