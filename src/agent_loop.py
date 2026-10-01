@@ -298,6 +298,18 @@ def _load_mcp_disabled_map() -> Dict[str, set]:
 # in use, without needing a change at every call site.
 _SMALL_LOCAL_MODEL_KEYWORDS = (
     "xlam",
+    # Real, added 2026-10-01, from a direct, live investigation into
+    # the already-documented "read_systemd_logs reliability" todo item.
+    # Confirmed directly, live: with the real, full, uncapped 20-tool
+    # list (tools_sent=20, wiring/retrieval fix from 2026-09-05 already
+    # confirmed correct and unrelated to this), qwen3:4b falsely
+    # claimed "no function call can be made for this request" despite
+    # read_systemd_logs being genuinely, correctly present in its own
+    # tool list -- while qwen3-14b-longctx, same request, same tool
+    # list, correctly identified and called it. A genuine,
+    # model-capability-dependent gap, not a wiring bug; this is the
+    # same class of fix already proven for xlam above.
+    "qwen3:4b",
 )
 _SMALL_LOCAL_MODEL_TOOL_CAP = 15
 
@@ -1485,12 +1497,31 @@ def _classify_agent_request(messages: List[Dict], last_user: str) -> Dict[str, o
            r"\b(searxng|ntfy)\b"):
         domains.add("container_management")
 
+    # Real, added 2026-09-30: narrow detector for search/memory-write-shaped
+    # requests, feeding the new tool-enforcement check below. Confirmed
+    # directly, live, across multiple models tonight (xLAM/Bonsai AND
+    # qwen2.5:7b -- this is not a single-model quirk): these specific
+    # intents are the ones most prone to a model answering "no matches
+    # found" / "I've noted that" in plain text without ever making the
+    # real search_vault/manage_memory call that claim depends on. Kept
+    # separate from the broader "notes_calendar_tasks"/"web" domains
+    # above since this needs to identify a narrower, specific pair of
+    # real tools to enforce, not just seed a domain's tool set.
+    _vault_memory_write_intent = has(
+        r"\b(?:search|look(?:ed)?\s+(?:in|through)|check)\b.{0,20}\b(?:my\s+)?vault\b",
+        r"\b(?:find|search\s+for)\b.{0,30}\bnotes?\b.{0,20}\b(?:about|on|regarding)\b",
+        r"\bremember\s+that\b",
+        r"\b(?:save|note)\s+(?:this|that)\s+(?:to|in)\s+memory\b",
+        r"\bmy\s+favorite\b.{1,40}\bis\b",
+    )
+
     low_signal = not continuation and not domains
     return {
         "low_signal": low_signal,
         "continuation": continuation,
         "domains": domains,
         "retrieval_query": retrieval_query,
+        "vault_memory_write_intent": _vault_memory_write_intent,
     }
 
 
@@ -4185,6 +4216,19 @@ async def stream_agent_loop(
     # that *can't* call the tool from looping forever.
     _intent_nudge_count = 0
     _MAX_INTENT_NUDGES = 2
+    # Real, added 2026-09-30: mirrors the intent-without-action nudge
+    # mechanism above, but for a narrower, more concerning real pattern --
+    # confirmed directly, live, across multiple models tonight (not just
+    # Bonsai): a model confidently CLAIMING a result ("no matches found",
+    # "I've noted that") on a search/memory-write-shaped turn with NO
+    # real backing search_vault/manage_memory call, rather than merely
+    # announcing an unfulfilled intent. Tracked separately since this is
+    # a different, arguably more serious failure (a false claim, not a
+    # stalled promise) and needs its own, real tool-call evidence check,
+    # not just a text-pattern match.
+    _vault_memory_enforce_count = 0
+    _MAX_VAULT_MEMORY_ENFORCE = 2
+    _vault_memory_tool_used = False
 
     # "I said I would, then didn't" detector. The pattern that breaks debug
     # loops on weak models (deepseek-v4-flash mid-2026): the model writes
@@ -4350,6 +4394,24 @@ async def stream_agent_loop(
             _wants_mcp = any(kw in _last_content for kw in _MCP_KEYWORDS)
             all_tool_schemas = mcp_schemas if (_wants_mcp and mcp_schemas) else []
         agent_stream_timeout = int(get_setting("agent_stream_timeout_seconds", 300) or 300)
+
+        # Real, attempted 2026-10-01, REVERTED same day: a final hard
+        # cap applied here (after all additive layers) was tried to
+        # close the gap where tools_sent can exceed max_tools even
+        # after get_tools_for_query()'s own internal cap. Reverted
+        # after a direct, live test exposed a worse bug: _relevant_tools
+        # is a plain Python set by this point (its original RAG-ranked
+        # order, from get_tools_for_query()'s own retrieve() call, is
+        # already lost), so trimming it here iterates in arbitrary,
+        # non-deterministic order -- confirmed directly, live: a real
+        # test excluded read_systemd_logs from the final list entirely,
+        # even though it was genuinely the correct, relevant tool for
+        # that exact query. A cap that can arbitrarily drop the one
+        # tool actually needed is worse than no cap -- do not re-add
+        # this without first threading the real, ranked order through
+        # to this point (not just a flat set), so trimming can
+        # correctly prioritize genuinely query-relevant tools over
+        # bonus/seeded ones.
 
         _tool_names_sent = [t.get("function", {}).get("name") for t in (all_tool_schemas or []) if t.get("function")]
         logger.info(f"[agent-debug] round={round_num} model={model} _is_api_model={_is_api_model} tools_sent={len(_tool_names_sent)} tool_names={_tool_names_sent[:15]} relevant_tools={sorted(_relevant_tools)[:15] if _relevant_tools else 'ALL'}")
@@ -5007,6 +5069,40 @@ async def stream_agent_loop(
                     + "\n\n"
                 )
                 break
+            # Real, added 2026-09-30: structural enforcement for the
+            # search/memory-write-claim-without-a-real-call pattern (per
+            # the real 2026-09-25 to-do item -- "not a prompt fix"; a
+            # prior system-prompt-only guardrail was tried and confirmed,
+            # via direct re-test, not to work). Mirrors the
+            # intent-without-action nudge immediately above in shape
+            # (inject a system message, continue the loop) but the
+            # trigger is real tool-call evidence, not a text-pattern
+            # match -- this fires even when the model's text gives no
+            # "let me..." signal at all and just states a confident,
+            # unbacked result outright.
+            if (
+                bool(_intent.get("vault_memory_write_intent"))
+                and not _vault_memory_tool_used
+                and not guide_only
+                and _vault_memory_enforce_count < _MAX_VAULT_MEMORY_ENFORCE
+            ):
+                _vault_memory_enforce_count += 1
+                logger.info(
+                    "[agent] vault/memory-write enforcement nudge #%d on round %d",
+                    _vault_memory_enforce_count, round_num,
+                )
+                messages.append({
+                    "role": "system",
+                    "content": (
+                        "This request needs a real search_vault or manage_memory "
+                        "tool call, and you have not made one yet. Do not answer "
+                        "with a result (\"no matches found\", \"I've noted that\", "
+                        "etc.) until you have actually called the real tool -- "
+                        "call it now."
+                    ),
+                })
+                yield f'data: {json.dumps({"type": "agent_step", "round": round_num + 1})}\n\n'
+                continue
             break  # no tools — done
 
         # ── Loop-breaker (Terminus-style stall detector) ──────────────
@@ -5687,6 +5783,16 @@ async def stream_agent_loop(
                     _ody_force_stop_turn = True
             else:
                 _ody_consecutive_failures = 0
+
+            # Real, added 2026-09-30: records a genuine, successful call to
+            # either of the two tools the vault/memory-write enforcement
+            # check below requires real evidence of -- not just an attempt,
+            # a real success (mirrors the _ody_result_failed check just
+            # above). block.tool_type is the bare, unprefixed name for
+            # these two (confirmed directly, live, in tonight's own debug
+            # logs) since both are native Odysseus tools, not MCP-served.
+            if not _ody_result_failed and block.tool_type in ("search_vault", "manage_memory"):
+                _vault_memory_tool_used = True
 
             formatted = format_tool_result(desc, result)
             tool_results.append(formatted)
