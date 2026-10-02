@@ -3810,8 +3810,20 @@ import { wireArrowUpRecall, getUserMessagesFromChatHistory } from './composerArr
           }
         }
       } else {
-        // Stop streaming TTS on any error/abort
-        if (streamingTTS && window.aiTTSManager) window.aiTTSManager.stop();
+        // Real, fixed 2026-10-02: a genuinely live, reported TTS cutoff
+        // bug traced here directly -- this unconditionally called
+        // aiTTSManager.stop() on ANY caught exception, including a real,
+        // confirmed-benign one that can fire AFTER [DONE] already
+        // arrived (the exact same "reader.read() after close" pattern
+        // the background-stream branch above already explicitly
+        // protects against via bgErr.status === 'completed', but this
+        // foreground path never had the equivalent check). A response
+        // that had already fully, successfully streamed in would still
+        // have its auto-playing TTS queue killed by this. Now matches
+        // the background path's own established pattern: only stop
+        // streaming TTS for an error/abort that happened before the
+        // stream genuinely finished.
+        if (streamingTTS && window.aiTTSManager && !_streamSawDone) window.aiTTSManager.stop();
 
         if (abortCtrl && abortCtrl.signal.aborted) {
           const abortReason = abortCtrl._reason || '';
